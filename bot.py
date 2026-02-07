@@ -259,7 +259,6 @@ async def whois(ctx, member: discord.Member = None):
 
 
 import os
-
 bot.run(os.getenv("DISCORD_TOKEN"))
 
  bot.run(os.getenv("MTQ2ODAzOTU0NDgwODAxODA1MQ.GYmhnP.ACQdvPo30ivZZ16hQdRslrvfutSpR_5GYs1wh8"))
