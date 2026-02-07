@@ -256,4 +256,5 @@ async def whois(ctx, member: discord.Member = None):
     embed.add_field(name="Roles", value=roles, inline=False)
 
     await ctx.send(embed=embed)
-  # bot.run("YOUR_TOKEN")
+ bot.run("MTQ2ODAzOTU0NDgwODAxODA1MQ.GYmhnP.ACQdvPo30ivZZ16hQdRslrvfutSpR_5GYs1wh8")
+
