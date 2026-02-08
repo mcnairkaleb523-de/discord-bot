@@ -1,3 +1,4 @@
+import os
 import discord
 from discord.ext import commands, tasks
 from datetime import datetime
@@ -256,9 +257,5 @@ async def whois(ctx, member: discord.Member = None):
     embed.add_field(name="Roles", value=roles, inline=False)
 
     await ctx.send(embed=embed)
-
-
 import os
 bot.run(os.getenv("DISCORD_TOKEN"))
- bot.run(os.getenv("MTQ2ODAzOTU0NDgwODAxODA1MQ.GYmhnP.ACQdvPo30ivZZ16hQdRslrvfutSpR_5GYs1wh8"))
- 34d477a8892d5569bbfb560bbf82e75e8ae7c910
