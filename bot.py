@@ -1,3 +1,5 @@
+from dotenv import load_dotenv
+load_dotenv()
 import os
 import discord
 from discord.ext import commands, tasks
@@ -257,5 +259,5 @@ async def whois(ctx, member: discord.Member = None):
     embed.add_field(name="Roles", value=roles, inline=False)
 
     await ctx.send(embed=embed)
-import os
+
 bot.run(os.getenv("DISCORD_TOKEN"))
