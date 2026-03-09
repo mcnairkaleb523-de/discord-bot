@@ -92,7 +92,12 @@ class VerifyView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Verify", style=discord.ButtonStyle.success, emoji="✅")
+    @discord.ui.button(
+        label="Verify",
+        style=discord.ButtonStyle.success,
+        emoji="✅",
+        custom_id="smokers_island_verify_button"
+    )
     async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild = interaction.guild
         member = interaction.user
@@ -392,14 +397,25 @@ async def on_message(message):
 
     msg = message.content.lower()
     if any(w in msg for w in BAD_WORDS) or any(l in msg for l in LINKS):
-        await message.delete()
-        await log(
-            message.guild,
-            LOG_CHANNELS["messages"],
-            "AutoMod Deleted Message",
-            f"Author: {message.author}\nChannel: {message.channel.mention}\nContent: {message.content or 'None'}",
-            discord.Color.orange()
-        )
+        try:
+            await message.delete()
+            await log(
+                message.guild,
+                LOG_CHANNELS["messages"],
+                "AutoMod Deleted Message",
+                f"Author: {message.author}\nChannel: {message.channel.mention}\nContent: {message.content or 'None'}",
+                discord.Color.orange()
+            )
+        except discord.Forbidden:
+            await log(
+                message.guild,
+                LOG_CHANNELS["mod"],
+                "AutoMod Delete Failed",
+                f"Could not delete a message from {message.author.mention} in {message.channel.mention}. Check permissions.",
+                discord.Color.red()
+            )
+        except discord.HTTPException:
+            pass
         return
 
     is_spamming = await handle_spam(message)
