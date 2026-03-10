@@ -3,12 +3,13 @@ load_dotenv()
 
 import os
 import discord
+import time
 from discord.ext import commands
+
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 intents.voice_states = True
-
 bot = commands.Bot(command_prefix=",", intents=intents)
 
 BAD_WORDS = ["badword1", "badword2"]
