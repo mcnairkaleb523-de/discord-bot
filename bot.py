@@ -70,6 +70,7 @@ LEVEL_ROLES = {
     50: "Level 50 — 👑💨 𝓚𝓲𝓷𝓰 𝓸𝓯 𝓢𝓶𝓸𝓴𝓮𝓻𝓼"
 }
 
+
 async def log(guild, channel_name, title, description, color):
     channel = discord.utils.get(guild.text_channels, name=channel_name)
     if not channel:
@@ -93,6 +94,7 @@ async def log(guild, channel_name, title, description, color):
         print(f"[LOG ERROR] Missing permission in #{channel_name}")
     except discord.HTTPException as e:
         print(f"[LOG ERROR] Failed to send log in #{channel_name}: {e}")
+
 
 class VerifyView(discord.ui.View):
     def __init__(self):
@@ -160,6 +162,7 @@ class VerifyView(discord.ui.View):
                 "❌ Something went wrong while verifying you.",
                 ephemeral=True
             )
+
 
 async def handle_spam(message):
     user_id = message.author.id
@@ -245,10 +248,12 @@ async def handle_spam(message):
 
     return False
 
+
 @bot.event
 async def on_ready():
     bot.add_view(VerifyView())
     print(f"Logged in as {bot.user}")
+
 
 @bot.event
 async def on_member_join(member):
@@ -310,6 +315,7 @@ async def on_member_join(member):
         embed.set_footer(text="Enjoy the island 🌴")
         await ch.send(embed=embed)
 
+
 @bot.event
 async def on_member_remove(member):
     await log(
@@ -319,6 +325,7 @@ async def on_member_remove(member):
         f"{member}",
         discord.Color.red()
     )
+
 
 @bot.event
 async def on_member_update(before, after):
@@ -348,6 +355,7 @@ async def on_member_update(before, after):
                 discord.Color.red()
             )
 
+
 @bot.event
 async def on_message_delete(message):
     if not message.guild or message.author.bot:
@@ -361,6 +369,7 @@ async def on_message_delete(message):
         discord.Color.red()
     )
 
+
 @bot.event
 async def on_message_edit(before, after):
     if before.author.bot or before.content == after.content or not before.guild:
@@ -373,6 +382,7 @@ async def on_message_edit(before, after):
         f"Author: {before.author}\nChannel: {before.channel.mention}\nBefore: {before.content}\nAfter: {after.content}",
         discord.Color.gold()
     )
+
 
 @bot.event
 async def on_voice_state_update(member, before, after):
@@ -415,6 +425,7 @@ async def on_voice_state_update(member, before, after):
             f"{member.mention} moved from **{before.channel.name}** to **{after.channel.name}**",
             discord.Color.gold()
         )
+
 
 @bot.event
 async def on_message(message):
@@ -510,9 +521,11 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
+
 @bot.command()
 async def ping(ctx):
     await ctx.send("pong")
+
 
 @bot.command()
 @commands.has_permissions(administrator=True)
@@ -529,6 +542,7 @@ async def sendverify(ctx):
     embed.set_footer(text="Smokers Island Verification System 🌴")
 
     await ctx.send(embed=embed, view=VerifyView())
+
 
 @bot.command()
 @commands.has_permissions(manage_roles=True)
@@ -570,6 +584,7 @@ async def verify(ctx, member: discord.Member):
     except discord.HTTPException:
         await ctx.send("❌ Something went wrong while verifying that member.")
 
+
 @bot.command()
 @commands.has_permissions(manage_messages=True)
 async def clear(ctx, amount: int):
@@ -581,6 +596,7 @@ async def clear(ctx, amount: int):
         f"Moderator: {ctx.author.mention}\nChannel: {ctx.channel.mention}\nAmount: {amount}",
         discord.Color.orange()
     )
+
 
 @bot.command()
 @commands.has_permissions(manage_channels=True)
@@ -595,6 +611,7 @@ async def lock(ctx):
         discord.Color.red()
     )
 
+
 @bot.command()
 @commands.has_permissions(manage_channels=True)
 async def unlock(ctx):
@@ -607,6 +624,7 @@ async def unlock(ctx):
         f"Moderator: {ctx.author.mention}\nChannel: {ctx.channel.mention}",
         discord.Color.green()
     )
+
 
 @bot.command()
 @commands.has_permissions(administrator=True)
@@ -621,6 +639,7 @@ async def restart(ctx):
     )
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
+
 @bot.command()
 @commands.has_permissions(kick_members=True)
 async def kick(ctx, member: discord.Member, *, reason="No reason provided"):
@@ -633,6 +652,7 @@ async def kick(ctx, member: discord.Member, *, reason="No reason provided"):
         f"Moderator: {ctx.author.mention}\nUser: {member}\nReason: {reason}",
         discord.Color.orange()
     )
+
 
 @bot.command()
 @commands.has_permissions(ban_members=True)
@@ -647,6 +667,7 @@ async def ban(ctx, member: discord.Member, *, reason="No reason provided"):
         discord.Color.red()
     )
 
+
 @bot.command()
 @commands.has_permissions(moderate_members=True)
 async def timeout(ctx, member: discord.Member, minutes: int, *, reason="No reason provided"):
@@ -660,6 +681,7 @@ async def timeout(ctx, member: discord.Member, minutes: int, *, reason="No reaso
         f"Moderator: {ctx.author.mention}\nUser: {member}\nDuration: {minutes} minute(s)\nReason: {reason}",
         discord.Color.gold()
     )
+
 
 @bot.command()
 async def vcstats(ctx, member: discord.Member = None):
@@ -689,6 +711,7 @@ async def vcstats(ctx, member: discord.Member = None):
     embed.set_footer(text=f"Requested by {ctx.author}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
 
+
 @bot.command()
 async def level(ctx, member: discord.Member = None):
     member = member or ctx.author
@@ -709,6 +732,7 @@ async def level(ctx, member: discord.Member = None):
     embed.set_footer(text=f"Requested by {ctx.author}", icon_url=ctx.author.display_avatar.url)
 
     await ctx.send(embed=embed)
+
 
 @bot.command()
 @commands.has_permissions(administrator=True)
@@ -739,6 +763,7 @@ async def strip(ctx, member: discord.Member):
         discord.Color.dark_red()
     )
 
+
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def nuke(ctx):
@@ -755,6 +780,7 @@ async def nuke(ctx):
         discord.Color.dark_red()
     )
 
+
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def lockdown(ctx):
@@ -769,6 +795,7 @@ async def lockdown(ctx):
         discord.Color.red()
     )
 
+
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def unlockdown(ctx):
@@ -782,6 +809,7 @@ async def unlockdown(ctx):
         f"Administrator: {ctx.author.mention}",
         discord.Color.green()
     )
+
 
 @bot.command()
 @commands.has_permissions(administrator=True)
@@ -806,6 +834,7 @@ async def roleall(ctx, role: discord.Role):
         discord.Color.blue()
     )
 
+
 @bot.command()
 async def whois(ctx, member: discord.Member = None):
     member = member or ctx.author
@@ -825,6 +854,7 @@ async def whois(ctx, member: discord.Member = None):
     embed.set_thumbnail(url=member.display_avatar.url)
 
     await ctx.send(embed=embed)
+
 
 token = os.getenv("DISCORD_TOKEN")
 
