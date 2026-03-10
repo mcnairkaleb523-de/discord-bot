@@ -2,13 +2,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import os
-import sys
-import time
-import random
 import discord
 from discord.ext import commands
-from datetime import datetime, timedelta
-
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
