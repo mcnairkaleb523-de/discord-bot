@@ -814,4 +814,9 @@ async def whois(ctx, member: discord.Member = None):
     await ctx.send(embed=embed)
 
 
-bot.run(os.getenv("DISCORD_TOKEN"))
+token = os.getenv("DISCORD_TOKEN")
+
+if not token:
+    raise ValueError("DISCORD_TOKEN is not set. Add it in Railway Variables.")
+
+bot.run(token)
