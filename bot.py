@@ -225,6 +225,191 @@ class VerifyView(discord.ui.View):
             await interaction.edit_original_response(embed=fail_embed)
 
 
+class CmdsView(discord.ui.View):
+    def __init__(self, author_id: int):
+        super().__init__(timeout=120)
+        self.author_id = author_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "❌ You can't use someone else's command menu.",
+                ephemeral=True
+            )
+            return False
+        return True
+
+    def home_embed(self, guild: discord.Guild):
+        embed = discord.Embed(
+            title="🤖 TrapAI Command Center",
+            description=(
+                "Welcome to the **Smokers Island** command panel.\n\n"
+                "Use the buttons below to view command categories."
+            ),
+            color=discord.Color.blurple(),
+            timestamp=datetime.utcnow()
+        )
+
+        embed.add_field(
+            name="📂 Categories",
+            value=(
+                "🛡 Moderation\n"
+                "🔒 Jail System\n"
+                "🤖 TrapAI Security\n"
+                "📊 Levels & Stats\n"
+                "⚙️ Admin"
+            ),
+            inline=False
+        )
+
+        if guild.icon:
+            embed.set_thumbnail(url=guild.icon.url)
+
+        embed.set_footer(text="TrapAI Security • Interactive Command Menu")
+        return embed
+
+    def moderation_embed(self, guild: discord.Guild):
+        embed = discord.Embed(
+            title="🛡 Moderation Commands",
+            color=discord.Color.red(),
+            timestamp=datetime.utcnow()
+        )
+        embed.add_field(
+            name="Commands",
+            value=(
+                "`,kick @user [reason]`\n"
+                "`,ban @user [reason]`\n"
+                "`,timeout @user minutes [reason]`\n"
+                "`,clear amount`\n"
+                "`,lock`\n"
+                "`,unlock`\n"
+                "`,nuke`\n"
+                "`,lockdown`\n"
+                "`,unlockdown`"
+            ),
+            inline=False
+        )
+        if guild.icon:
+            embed.set_thumbnail(url=guild.icon.url)
+        embed.set_footer(text="TrapAI Security • Moderation Panel")
+        return embed
+
+    def jail_embed(self, guild: discord.Guild):
+        embed = discord.Embed(
+            title="🔒 Jail System Commands",
+            color=discord.Color.dark_red(),
+            timestamp=datetime.utcnow()
+        )
+        embed.add_field(
+            name="Commands",
+            value=(
+                "`,jail @user time [reason]`\n"
+                "`,unjail @user [reason]`"
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="Time Formats",
+            value="`30s 10m 2h 3d 1w 1mo 1y`",
+            inline=False
+        )
+        if guild.icon:
+            embed.set_thumbnail(url=guild.icon.url)
+        embed.set_footer(text="TrapAI Security • Jail Panel")
+        return embed
+
+    def security_embed(self, guild: discord.Guild):
+        embed = discord.Embed(
+            title="🤖 TrapAI Security Commands",
+            color=discord.Color.green(),
+            timestamp=datetime.utcnow()
+        )
+        embed.add_field(
+            name="Commands",
+            value=(
+                "`,sendverify`\n"
+                "`,verify @user`\n"
+                "`,unverify @user`\n"
+                "`,denyverify @user [reason]`\n"
+                "`,trapwarn @user [reason]`\n"
+                "`,trapscan @user`"
+            ),
+            inline=False
+        )
+        if guild.icon:
+            embed.set_thumbnail(url=guild.icon.url)
+        embed.set_footer(text="TrapAI Security • Security Panel")
+        return embed
+
+    def levels_embed(self, guild: discord.Guild):
+        embed = discord.Embed(
+            title="📊 Levels & Stats Commands",
+            color=discord.Color.gold(),
+            timestamp=datetime.utcnow()
+        )
+        embed.add_field(
+            name="Commands",
+            value=(
+                "`,level`\n"
+                "`,leaderboard`\n"
+                "`,vcstats`\n"
+                "`,whois @user`\n"
+                "`,ping`"
+            ),
+            inline=False
+        )
+        if guild.icon:
+            embed.set_thumbnail(url=guild.icon.url)
+        embed.set_footer(text="TrapAI Security • Levels Panel")
+        return embed
+
+    def admin_embed(self, guild: discord.Guild):
+        embed = discord.Embed(
+            title="⚙️ Admin Commands",
+            color=discord.Color.blurple(),
+            timestamp=datetime.utcnow()
+        )
+        embed.add_field(
+            name="Commands",
+            value=(
+                "`,setup`\n"
+                "`,rules`\n"
+                "`,restart`\n"
+                "`,roleall @role`\n"
+                "`,strip @user`"
+            ),
+            inline=False
+        )
+        if guild.icon:
+            embed.set_thumbnail(url=guild.icon.url)
+        embed.set_footer(text="TrapAI Security • Admin Panel")
+        return embed
+
+    @discord.ui.button(label="Home", style=discord.ButtonStyle.secondary, emoji="🏠")
+    async def home_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=self.home_embed(interaction.guild), view=self)
+
+    @discord.ui.button(label="Moderation", style=discord.ButtonStyle.danger, emoji="🛡")
+    async def moderation_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=self.moderation_embed(interaction.guild), view=self)
+
+    @discord.ui.button(label="Jail", style=discord.ButtonStyle.danger, emoji="🔒")
+    async def jail_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=self.jail_embed(interaction.guild), view=self)
+
+    @discord.ui.button(label="Security", style=discord.ButtonStyle.success, emoji="🤖")
+    async def security_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=self.security_embed(interaction.guild), view=self)
+
+    @discord.ui.button(label="Levels", style=discord.ButtonStyle.primary, emoji="📊")
+    async def levels_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=self.levels_embed(interaction.guild), view=self)
+
+    @discord.ui.button(label="Admin", style=discord.ButtonStyle.primary, emoji="⚙️")
+    async def admin_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=self.admin_embed(interaction.guild), view=self)
+
+
 def parse_jail_duration(duration: str):
     duration = duration.lower().strip()
 
@@ -252,6 +437,14 @@ def parse_jail_duration(duration: str):
         return amount * time_units[unit]
     except Exception:
         return None
+
+
+def make_bar(current, total, length=12):
+    if total <= 0:
+        total = 1
+    filled = int((current / total) * length)
+    filled = max(0, min(filled, length))
+    return "█" * filled + "░" * (length - filled)
 
 
 async def auto_unjail(guild_id: int, user_id: int, delay: int, reason: str = "Jail timer expired"):
@@ -673,6 +866,13 @@ async def on_message(message):
 @bot.command()
 async def ping(ctx):
     await ctx.send("pong")
+
+
+@bot.command(name="cmds")
+async def cmds(ctx):
+    view = CmdsView(ctx.author.id)
+    embed = view.home_embed(ctx.guild)
+    await ctx.send(embed=embed, view=view)
 
 
 @bot.command()
@@ -1364,6 +1564,71 @@ async def level(ctx, member: discord.Member = None):
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.set_footer(text=f"Requested by {ctx.author}", icon_url=ctx.author.display_avatar.url)
 
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+async def leaderboard(ctx):
+    if not levels:
+        await ctx.send("❌ No leaderboard data yet.")
+        return
+
+    sorted_users = sorted(
+        levels.items(),
+        key=lambda x: (x[1], xp.get(x[0], 0)),
+        reverse=True
+    )
+    top_users = sorted_users[:10]
+
+    medals = {
+        1: "🥇",
+        2: "🥈",
+        3: "🥉"
+    }
+
+    embed = discord.Embed(
+        title="🏆 TrapAI Level Leaderboard",
+        description="Top Smokers rising through the island ranks.",
+        color=discord.Color.gold(),
+        timestamp=datetime.utcnow()
+    )
+
+    lines = []
+
+    for position, (user_id, user_level) in enumerate(top_users, start=1):
+        member = ctx.guild.get_member(user_id)
+        if not member:
+            continue
+
+        user_xp = xp.get(user_id, 0)
+        required_xp = user_level * 100
+        progress_bar = make_bar(user_xp, required_xp)
+
+        role_name = LEVEL_ROLES.get(user_level)
+        role = discord.utils.get(ctx.guild.roles, name=role_name) if role_name else None
+        role_text = role.mention if role else (role_name if role_name else "No role")
+
+        medal = medals.get(position, f"`#{position}`")
+        crown = " 👑" if position == 1 else ""
+
+        lines.append(
+            f"{medal} **{member.display_name}**{crown}\n"
+            f"📈 Level: **{user_level}**\n"
+            f"⭐ XP: `{user_xp}/{required_xp}`\n"
+            f"📊 `{progress_bar}`\n"
+            f"🎖 Role: {role_text}"
+        )
+
+    if not lines:
+        await ctx.send("❌ No leaderboard members found.")
+        return
+
+    embed.description = "\n\n".join(lines)
+
+    if ctx.guild.icon:
+        embed.set_thumbnail(url=ctx.guild.icon.url)
+
+    embed.set_footer(text="TrapAI Security • Smokers Island")
     await ctx.send(embed=embed)
 
 
