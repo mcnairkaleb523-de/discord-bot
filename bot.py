@@ -38,6 +38,9 @@ UNVERIFIED_ROLE = "🚫💨 Unverified Smoker"
 VERIFIED_ROLE = "✅💨 Verified Smoker"
 JAIL_ROLE = "🔒💨 Jailed"
 
+JOIN_TO_CREATE_CHANNEL_NAME = "➕ Create VC"
+TEMP_VC_CATEGORY_NAME = "🎤 Private VCs"
+
 levels = {}
 xp = {}
 xp_cooldown = {}
@@ -58,6 +61,9 @@ RAID_LIMIT = 5
 
 vc_stats = {}
 vc_join_time = {}
+
+temp_vc_owners = {}
+temp_vc_text_channels = {}
 
 ANTI_RAID_ENABLED = True
 jailed_users = {}
@@ -257,6 +263,7 @@ class CmdsView(discord.ui.View):
                 "🔒 Jail System\n"
                 "🤖 TrapAI Security\n"
                 "📊 Levels & Stats\n"
+                "🎤 VC Controls\n"
                 "⚙️ Admin"
             ),
             inline=False
@@ -363,6 +370,35 @@ class CmdsView(discord.ui.View):
         embed.set_footer(text="TrapAI Security • Levels Panel")
         return embed
 
+    def vc_embed(self, guild: discord.Guild):
+        embed = discord.Embed(
+            title="🎤 VC Control Commands",
+            color=discord.Color.blue(),
+            timestamp=datetime.utcnow()
+        )
+        embed.add_field(
+            name="Commands",
+            value=(
+                "`,vclock`\n"
+                "`,vcunlock`\n"
+                "`,vchide`\n"
+                "`,vcshow`\n"
+                "`,vcname <name>`\n"
+                "`,vclimit <number>`\n"
+                "`,vckick @user`\n"
+                "`,vcban @user`\n"
+                "`,vcunban @user`\n"
+                "`,vctransfer @user`\n"
+                "`,vcpermit @user`\n"
+                "`,vcmod @user`"
+            ),
+            inline=False
+        )
+        if guild.icon:
+            embed.set_thumbnail(url=guild.icon.url)
+        embed.set_footer(text="TrapAI Security • VC Panel")
+        return embed
+
     def admin_embed(self, guild: discord.Guild):
         embed = discord.Embed(
             title="⚙️ Admin Commands",
@@ -405,6 +441,10 @@ class CmdsView(discord.ui.View):
     async def levels_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(embed=self.levels_embed(interaction.guild), view=self)
 
+    @discord.ui.button(label="VC", style=discord.ButtonStyle.primary, emoji="🎤")
+    async def vc_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=self.vc_embed(interaction.guild), view=self)
+
     @discord.ui.button(label="Admin", style=discord.ButtonStyle.primary, emoji="⚙️")
     async def admin_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(embed=self.admin_embed(interaction.guild), view=self)
@@ -445,6 +485,91 @@ def make_bar(current, total, length=12):
     filled = int((current / total) * length)
     filled = max(0, min(filled, length))
     return "█" * filled + "░" * (length - filled)
+
+
+def get_owned_temp_vc(member: discord.Member):
+    voice = member.voice
+    if not voice or not voice.channel:
+        return None
+
+    channel = voice.channel
+    owner_id = temp_vc_owners.get(channel.id)
+
+    if owner_id != member.id:
+        return None
+
+    return channel
+
+
+async def send_vc_control_panel(channel, owner, voice_channel):
+    embed = discord.Embed(
+        title="🎛 TrapAI VC Dashboard",
+        description=(
+            f"Welcome to your private VC, {owner.mention}.\n\n"
+            f"**Voice Channel:** `{voice_channel.name}`\n"
+            f"**Owner:** {owner.mention}\n\n"
+            "Use the commands below in this chat to control your VC."
+        ),
+        color=discord.Color.blurple(),
+        timestamp=datetime.utcnow()
+    )
+
+    embed.add_field(
+        name="🔒 Privacy Controls",
+        value=(
+            "`,vclock` — lock VC\n"
+            "`,vcunlock` — unlock VC\n"
+            "`,vchide` — hide VC\n"
+            "`,vcshow` — show VC\n"
+            "`,vcpermit @user` — allow a user in"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="👑 Ownership Controls",
+        value=(
+            "`,vctransfer @user` — transfer VC owner\n"
+            "`,vcmod @user` — give VC mod powers"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="⚙️ Channel Controls",
+        value=(
+            "`,vcname new name` — rename VC\n"
+            "`,vclimit 5` — set user limit"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="🛡 Member Controls",
+        value=(
+            "`,vckick @user` — kick from VC\n"
+            "`,vcban @user` — ban from VC\n"
+            "`,vcunban @user` — unban from VC"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="📌 Notes",
+        value=(
+            "• These commands only work if you're the current VC owner.\n"
+            "• Your VC and chat delete automatically when empty.\n"
+            "• Transfer ownership before leaving if you want someone else to keep control."
+        ),
+        inline=False
+    )
+
+    if owner.guild.icon:
+        embed.set_thumbnail(url=owner.guild.icon.url)
+
+    embed.set_footer(text="TrapAI VC System • Auto Control Panel")
+
+    await channel.send(embed=embed)
 
 
 async def auto_unjail(guild_id: int, user_id: int, delay: int, reason: str = "Jail timer expired"):
@@ -767,6 +892,88 @@ async def on_voice_state_update(member, before, after):
             discord.Color.gold()
         )
 
+    guild = member.guild
+
+    if after.channel and after.channel.name == JOIN_TO_CREATE_CHANNEL_NAME:
+        category = discord.utils.get(guild.categories, name=TEMP_VC_CATEGORY_NAME)
+        if category is None:
+            category = await guild.create_category(TEMP_VC_CATEGORY_NAME)
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(connect=True, view_channel=True),
+            member: discord.PermissionOverwrite(
+                manage_channels=True,
+                manage_permissions=True,
+                move_members=True,
+                connect=True,
+                speak=True,
+                view_channel=True
+            )
+        }
+
+        vc_name = f"{member.display_name}'s VC"
+        text_name = f"vc-{member.name}".lower().replace(" ", "-")
+
+        new_vc = await guild.create_voice_channel(
+            name=vc_name,
+            category=category,
+            overwrites=overwrites,
+            reason="Join to create VC"
+        )
+
+        text_overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            member: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+        }
+
+        new_text = await guild.create_text_channel(
+            name=text_name,
+            category=category,
+            overwrites=text_overwrites,
+            reason="Join to create VC text chat"
+        )
+
+        temp_vc_owners[new_vc.id] = member.id
+        temp_vc_text_channels[new_vc.id] = new_text.id
+
+        await member.move_to(new_vc)
+        await send_vc_control_panel(new_text, member, new_vc)
+
+        await log(
+            guild,
+            LOG_CHANNELS["vc"],
+            "Temporary VC Created",
+            f"Owner: {member.mention}\nVC: **{new_vc.name}**\nText Chat: {new_text.mention}",
+            discord.Color.green()
+        )
+
+    if before.channel and before.channel.id in temp_vc_owners:
+        if len(before.channel.members) == 0:
+            text_id = temp_vc_text_channels.get(before.channel.id)
+            text_channel = guild.get_channel(text_id) if text_id else None
+
+            try:
+                if text_channel:
+                    await text_channel.delete(reason="Temp VC empty")
+            except discord.HTTPException:
+                pass
+
+            try:
+                old_name = before.channel.name
+                await before.channel.delete(reason="Temp VC empty")
+                await log(
+                    guild,
+                    LOG_CHANNELS["vc"],
+                    "Temporary VC Deleted",
+                    f"VC: **{old_name}** was deleted because it became empty.",
+                    discord.Color.orange()
+                )
+            except discord.HTTPException:
+                pass
+
+            temp_vc_owners.pop(before.channel.id, None)
+            temp_vc_text_channels.pop(before.channel.id, None)
+
 
 @bot.event
 async def on_message(message):
@@ -876,6 +1083,242 @@ async def cmds(ctx):
 
 
 @bot.command()
+async def vclock(ctx):
+    channel = get_owned_temp_vc(ctx.author)
+    if not channel:
+        await ctx.send("❌ You must be in your own temporary VC.")
+        return
+
+    await channel.set_permissions(ctx.guild.default_role, connect=False)
+    await ctx.send(f"🔒 Locked **{channel.name}**")
+
+
+@bot.command()
+async def vcunlock(ctx):
+    channel = get_owned_temp_vc(ctx.author)
+    if not channel:
+        await ctx.send("❌ You must be in your own temporary VC.")
+        return
+
+    await channel.set_permissions(ctx.guild.default_role, connect=True)
+    await ctx.send(f"🔓 Unlocked **{channel.name}**")
+
+
+@bot.command()
+async def vchide(ctx):
+    channel = get_owned_temp_vc(ctx.author)
+    if not channel:
+        await ctx.send("❌ You must be in your own temporary VC.")
+        return
+
+    await channel.set_permissions(ctx.guild.default_role, view_channel=False)
+    await ctx.send(f"👻 Hid **{channel.name}**")
+
+
+@bot.command()
+async def vcshow(ctx):
+    channel = get_owned_temp_vc(ctx.author)
+    if not channel:
+        await ctx.send("❌ You must be in your own temporary VC.")
+        return
+
+    await channel.set_permissions(ctx.guild.default_role, view_channel=True)
+    await ctx.send(f"👀 Made **{channel.name}** visible")
+
+
+@bot.command()
+async def vcname(ctx, *, new_name: str):
+    channel = get_owned_temp_vc(ctx.author)
+    if not channel:
+        await ctx.send("❌ You must be in your own temporary VC.")
+        return
+
+    await channel.edit(name=new_name[:100])
+    await ctx.send(f"✏ Renamed VC to **{new_name[:100]}**")
+
+
+@bot.command()
+async def vclimit(ctx, limit: int):
+    channel = get_owned_temp_vc(ctx.author)
+    if not channel:
+        await ctx.send("❌ You must be in your own temporary VC.")
+        return
+
+    if limit < 0 or limit > 99:
+        await ctx.send("❌ Limit must be between 0 and 99.")
+        return
+
+    await channel.edit(user_limit=limit)
+    await ctx.send(f"👥 Set VC limit to **{limit}**")
+
+
+@bot.command()
+async def vckick(ctx, member: discord.Member):
+    channel = get_owned_temp_vc(ctx.author)
+    if not channel:
+        await ctx.send("❌ You must be in your own temporary VC.")
+        return
+
+    if not member.voice or member.voice.channel != channel:
+        await ctx.send("❌ That user is not in your VC.")
+        return
+
+    await member.move_to(None)
+    await ctx.send(f"👢 Kicked {member.mention} from **{channel.name}**")
+
+
+@bot.command()
+async def vcban(ctx, member: discord.Member):
+    channel = get_owned_temp_vc(ctx.author)
+
+    if not channel:
+        await ctx.send("❌ You must be in your own temporary VC.")
+        return
+
+    if member == ctx.author:
+        await ctx.send("❌ You cannot VC ban yourself.")
+        return
+
+    try:
+        await channel.set_permissions(member, connect=False, view_channel=False)
+
+        if member.voice and member.voice.channel == channel:
+            await member.move_to(None)
+
+        embed = discord.Embed(
+            title="🔨 VC Ban Applied",
+            description=f"{member.mention} has been banned from **{channel.name}**.",
+            color=discord.Color.red(),
+            timestamp=datetime.utcnow()
+        )
+
+        embed.set_footer(text=f"VC Owner: {ctx.author}")
+
+        await ctx.send(embed=embed)
+
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have permission to do that.")
+
+
+@bot.command()
+async def vcunban(ctx, member: discord.Member):
+    channel = get_owned_temp_vc(ctx.author)
+
+    if not channel:
+        await ctx.send("❌ You must be in your own temporary VC.")
+        return
+
+    try:
+        await channel.set_permissions(member, overwrite=None)
+
+        embed = discord.Embed(
+            title="✅ VC Ban Removed",
+            description=f"{member.mention} can now join **{channel.name}** again.",
+            color=discord.Color.green(),
+            timestamp=datetime.utcnow()
+        )
+
+        embed.set_footer(text=f"VC Owner: {ctx.author}")
+
+        await ctx.send(embed=embed)
+
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have permission to do that.")
+
+
+@bot.command()
+async def vctransfer(ctx, member: discord.Member):
+    channel = get_owned_temp_vc(ctx.author)
+
+    if not channel:
+        await ctx.send("❌ You must be in your own temporary VC.")
+        return
+
+    if not member.voice or member.voice.channel != channel:
+        await ctx.send("❌ That user must be in your VC.")
+        return
+
+    temp_vc_owners[channel.id] = member.id
+
+    await channel.set_permissions(
+        member,
+        manage_channels=True,
+        manage_permissions=True,
+        move_members=True,
+        connect=True,
+        speak=True
+    )
+
+    embed = discord.Embed(
+        title="👑 VC Ownership Transferred",
+        description=f"{member.mention} is now the owner of **{channel.name}**.",
+        color=discord.Color.gold(),
+        timestamp=datetime.utcnow()
+    )
+
+    embed.set_footer(text=f"Transferred by {ctx.author}")
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+async def vcpermit(ctx, member: discord.Member):
+    channel = get_owned_temp_vc(ctx.author)
+
+    if not channel:
+        await ctx.send("❌ You must be in your own temporary VC.")
+        return
+
+    try:
+        await channel.set_permissions(member, connect=True, view_channel=True)
+
+        embed = discord.Embed(
+            title="✅ VC Access Granted",
+            description=f"{member.mention} can now join **{channel.name}**.",
+            color=discord.Color.green(),
+            timestamp=datetime.utcnow()
+        )
+
+        await ctx.send(embed=embed)
+
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have permission to do that.")
+
+
+@bot.command()
+async def vcmod(ctx, member: discord.Member):
+    channel = get_owned_temp_vc(ctx.author)
+
+    if not channel:
+        await ctx.send("❌ You must be in your own temporary VC.")
+        return
+
+    if not member.voice or member.voice.channel != channel:
+        await ctx.send("❌ That user must be in your VC.")
+        return
+
+    try:
+        await channel.set_permissions(
+            member,
+            move_members=True,
+            mute_members=True,
+            deafen_members=True,
+            manage_channels=True
+        )
+
+        embed = discord.Embed(
+            title="🛡 VC Moderator Granted",
+            description=f"{member.mention} is now a VC moderator in **{channel.name}**.",
+            color=discord.Color.blurple(),
+            timestamp=datetime.utcnow()
+        )
+
+        await ctx.send(embed=embed)
+
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have permission to do that.")
+
+
+@bot.command()
 @commands.has_permissions(administrator=True)
 async def setup(ctx):
     guild = ctx.guild
@@ -910,6 +1353,10 @@ async def setup(ctx):
     restricted_category = discord.utils.get(guild.categories, name="🔒 Restricted")
     if restricted_category is None:
         restricted_category = await guild.create_category("🔒 Restricted")
+
+    temp_vc_category = discord.utils.get(guild.categories, name=TEMP_VC_CATEGORY_NAME)
+    if temp_vc_category is None:
+        temp_vc_category = await guild.create_category(TEMP_VC_CATEGORY_NAME)
 
     await arrival_category.set_permissions(everyone, view_channel=False)
     await arrival_category.set_permissions(unverified_role, view_channel=True, send_messages=False, read_message_history=True)
@@ -959,6 +1406,7 @@ async def setup(ctx):
     jail_channel = await get_or_create_text_channel("jail", restricted_category)
     jail_logs_channel = await get_or_create_text_channel("jail-logs", restricted_category)
 
+    await get_or_create_voice_channel(JOIN_TO_CREATE_CHANNEL_NAME, island_category)
     await get_or_create_voice_channel("💨 General VC", island_category)
     await get_or_create_voice_channel("🌴 Chill VC", island_category)
 
