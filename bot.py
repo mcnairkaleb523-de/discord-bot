@@ -4,7 +4,6 @@ load_dotenv()
 import os
 import sys
 import time
-import random
 import asyncio
 import discord
 from discord.ext import commands
@@ -30,21 +29,40 @@ LOG_CHANNELS = {
     "roles": 1480439660810342610,
     "boost": 1480440939276144721,
     "jail": 1480991299820851351,
+    "nicknames": 1480439660810342610,
+    "role_create": 1480439660810342610,
+    "role_delete": 1480439660810342610,
+    "channel_create": 1480439660810342610,
+    "channel_delete": 1480439660810342610,
+    "channel_update": 1480439660810342610,
+    "emoji": 1480439660810342610,
+    "stickers": 1480439660810342610,
+    "bans": 1480439660810342610,
+    "kicks": 1480439660810342610,
+    "timeouts": 1480439660810342610,
+    "strips": 1480439660810342610,
+    "lockdowns": 1480439660810342610,
+    "unlockdowns": 1480439660810342610,
+    "clears": 1480439660810342610,
+    "roleall": 1480439660810342610,
+    "verification": 1480439660810342610,
+    "warns": 1480439660810342610,
+    "tickets": 1480439660810342610,
+    "mutes": 1480439660810342610,
+    "hides": 1480439660810342610,
+    "purges": 1480439660810342610,
+    "massroles": 1480439660810342610,
 }
 
 WELCOME_CHANNEL = "welcome"
 
-UNVERIFIED_ROLE = "🚫💨 Unverified Smoker"
-VERIFIED_ROLE = "✅💨 Verified Smoker"
-JAIL_ROLE = "🔒💨 Jailed"
+UNVERIFIED_ROLE = "🚫 Unverified"
+VERIFIED_ROLE = "✅ Hood Member"
+JAIL_ROLE = "🔒 Jailed"
+MUTED_ROLE = "🔇 Muted"
 
 JOIN_TO_CREATE_CHANNEL_NAME = "➕ Create VC"
 TEMP_VC_CATEGORY_NAME = "🎤 Private VCs"
-
-levels = {}
-xp = {}
-xp_cooldown = {}
-XP_COOLDOWN = 10
 
 spam_tracker = {}
 spam_warnings = {}
@@ -64,27 +82,26 @@ vc_join_time = {}
 
 temp_vc_owners = {}
 temp_vc_text_channels = {}
+# vc_banned[vc_id] = {user_id, ...}  — users explicitly banned from a VC
+vc_banned = {}
+# vc_mods[vc_id] = {user_id, ...}  — users with VC-mod privileges
+vc_mods = {}
 
 ANTI_RAID_ENABLED = True
 jailed_users = {}
 
-LEVEL_ROLES = {
-    5: "Level 5 — 💨 𝓡𝓲𝓼𝓲𝓷𝓰 𝓢𝓶𝓸𝓴𝓮",
-    10: "Level 10 — 💨 𝓢𝓶𝓸𝓴𝓮 𝓢𝓽𝓪𝓻𝓽𝓮𝓻",
-    15: "Level 15 — 🌫️ 𝓒𝓪𝓶𝓹 𝓢𝓶𝓸𝓴𝓮𝓻",
-    20: "Level 20 — 💨 𝓢𝓶𝓸𝓴𝓮 𝓡𝓾𝓷𝓷𝓮𝓻",
-    25: "Level 25 — 🌴 𝓘𝓼𝓵𝓪𝓷𝓭 𝓢𝓶𝓸𝓴𝓮𝓻",
-    30: "Level 30 — 💨 𝓢𝓶𝓸𝓴𝓮 𝓒𝓱𝓲𝓮𝓯",
-    35: "Level 35 — 💨 𝓢𝓶𝓸𝓴𝓮 𝓦𝓪𝓻𝓭𝓮𝓷",
-    40: "Level 40 — 🌴 𝓘𝓼𝓵𝓪𝓷𝓭 𝓣𝓲𝓽𝓪𝓷",
-    45: "Level 45 — 💨 𝓢𝓶𝓸𝓴𝓮 𝓔𝓶𝓹𝓮𝓻𝓸𝓻",
-    50: "Level 50 — 👑💨 𝓚𝓲𝓷𝓰 𝓸𝓯 𝓢𝓶𝓸𝓴𝓮𝓻𝓼"
-}
+# WARNINGS[guild_id][user_id] = [ {reason, moderator, moderator_id, time}, ... ]
+WARNINGS = {}
+
+# TICKETS[guild_id][user_id] = channel_id
+TICKETS = {}
 
 
+# ============================================================
+# LOGGING
+# ============================================================
 async def log(guild, channel_id, title, description, color):
     channel = guild.get_channel(channel_id)
-
     if not channel:
         print(f"[LOG ERROR] Channel ID not found: {channel_id}")
         return
@@ -95,9 +112,7 @@ async def log(guild, channel_id, title, description, color):
         color=color,
         timestamp=datetime.utcnow()
     )
-
     embed.set_footer(text=f"{guild.name} • Logging System")
-
     if guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
 
@@ -110,6 +125,57 @@ async def log(guild, channel_id, title, description, color):
         print(f"[LOG ERROR] Failed to send log: {e}")
 
 
+# ============================================================
+# TICKET CLOSE VIEW (persistent)
+# ============================================================
+class TicketCloseView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Close Ticket",
+        style=discord.ButtonStyle.danger,
+        emoji="🔒",
+        custom_id="trapai_ticket_close"
+    )
+    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channel = interaction.channel
+        guild = interaction.guild
+
+        confirm_embed = discord.Embed(
+            title="🔒 Closing Ticket",
+            description="This ticket will be deleted in **5 seconds**.",
+            color=discord.Color.red(),
+            timestamp=datetime.utcnow()
+        )
+        confirm_embed.set_footer(text=f"Closed by {interaction.user}")
+        await interaction.response.send_message(embed=confirm_embed)
+
+        await log(
+            guild,
+            LOG_CHANNELS["tickets"],
+            "Ticket Closed",
+            f"Channel: {channel.name}\nClosed By: {interaction.user.mention}",
+            discord.Color.red()
+        )
+
+        await asyncio.sleep(5)
+
+        # Remove from tracking
+        for uid, cid in list(TICKETS.get(guild.id, {}).items()):
+            if cid == channel.id:
+                TICKETS[guild.id].pop(uid, None)
+                break
+
+        try:
+            await channel.delete(reason=f"Ticket closed by {interaction.user}")
+        except discord.HTTPException:
+            pass
+
+
+# ============================================================
+# VERIFY VIEW (persistent)
+# ============================================================
 class VerifyView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -118,17 +184,14 @@ class VerifyView(discord.ui.View):
         label="Verify Now",
         style=discord.ButtonStyle.success,
         emoji="✅",
-        custom_id="smokers_island_verify_button"
+        custom_id="hood_verify_button"
     )
     async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild = interaction.guild
         member = interaction.user
 
         if guild is None:
-            await interaction.response.send_message(
-                "❌ This button only works in a server.",
-                ephemeral=True
-            )
+            await interaction.response.send_message("❌ This button only works in a server.", ephemeral=True)
             return
 
         unverified_role = discord.utils.get(guild.roles, name=UNVERIFIED_ROLE)
@@ -146,15 +209,12 @@ class VerifyView(discord.ui.View):
                 color=discord.Color.red(),
                 timestamp=datetime.utcnow()
             )
-            embed.set_footer(text="TrapAI Security • Access Denied")
+            embed.set_footer(text="TrapAI Security • Access Denied • The Hood")
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
 
         if not verified_role:
-            await interaction.response.send_message(
-                f"❌ The role **{VERIFIED_ROLE}** was not found.",
-                ephemeral=True
-            )
+            await interaction.response.send_message(f"❌ The role **{VERIFIED_ROLE}** was not found.", ephemeral=True)
             return
 
         scan_embed = discord.Embed(
@@ -171,7 +231,6 @@ class VerifyView(discord.ui.View):
             timestamp=datetime.utcnow()
         )
         scan_embed.set_footer(text="TrapAI Security • Initializing")
-
         await interaction.response.send_message(embed=scan_embed, ephemeral=True)
 
         try:
@@ -193,18 +252,17 @@ class VerifyView(discord.ui.View):
                     "Server Entry: UNLOCKED\n"
                     "Status: VERIFIED\n"
                     "```\n"
-                    "Welcome to **Smokers Island** 🌴💨"
+                    "Welcome to **The Hood** 🏘️🔥"
                 ),
                 color=discord.Color.green(),
                 timestamp=datetime.utcnow()
             )
-            success_embed.set_footer(text="TrapAI Security • Access Granted")
-
+            success_embed.set_footer(text="TrapAI Security • Access Granted • The Hood")
             await interaction.edit_original_response(embed=success_embed)
 
             await log(
                 guild,
-                LOG_CHANNELS["roles"],
+                LOG_CHANNELS["verification"],
                 "TrapAI Verification Approved",
                 f"User: {member.mention}\nMethod: Verify Button\nStatus: Approved",
                 discord.Color.green()
@@ -231,6 +289,689 @@ class VerifyView(discord.ui.View):
             await interaction.edit_original_response(embed=fail_embed)
 
 
+# ============================================================
+# TICKET OPEN VIEW (persistent)
+# ============================================================
+class TicketOpenView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Open Ticket",
+        style=discord.ButtonStyle.primary,
+        emoji="🎫",
+        custom_id="trapai_ticket_open"
+    )
+    async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.guild
+        member = interaction.user
+
+        guild_tickets = TICKETS.setdefault(guild.id, {})
+
+        if member.id in guild_tickets:
+            existing = guild.get_channel(guild_tickets[member.id])
+            if existing:
+                await interaction.response.send_message(
+                    f"❌ You already have an open ticket: {existing.mention}",
+                    ephemeral=True
+                )
+                return
+            else:
+                del guild_tickets[member.id]
+
+        ticket_category = discord.utils.get(guild.categories, name="🎫 Tickets")
+        if ticket_category is None:
+            ticket_category = await guild.create_category("🎫 Tickets")
+
+        ticket_name = f"ticket-{member.name}".lower().replace(" ", "-")
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            member: discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True
+            )
+        }
+
+        # Give staff (anyone with manage_messages) access
+        for role in guild.roles:
+            if role.permissions.manage_messages or role.permissions.administrator:
+                overwrites[role] = discord.PermissionOverwrite(
+                    view_channel=True,
+                    send_messages=True,
+                    read_message_history=True
+                )
+
+        ticket_channel = await guild.create_text_channel(
+            name=ticket_name,
+            category=ticket_category,
+            overwrites=overwrites,
+            reason=f"Ticket opened by {member}"
+        )
+
+        guild_tickets[member.id] = ticket_channel.id
+
+        embed = discord.Embed(
+            title="🎫 Ticket Opened",
+            description=(
+                f"Welcome {member.mention}!\n\n"
+                "Support staff will be with you shortly.\n"
+                "Please describe your issue in detail.\n\n"
+                "Click **Close Ticket** when your issue is resolved."
+            ),
+            color=discord.Color.blurple(),
+            timestamp=datetime.utcnow()
+        )
+        embed.set_footer(text="TrapAI Ticket System")
+
+        await ticket_channel.send(embed=embed, view=TicketCloseView())
+        await ticket_channel.send(member.mention, delete_after=3)
+
+        await interaction.response.send_message(
+            f"✅ Ticket created: {ticket_channel.mention}",
+            ephemeral=True
+        )
+
+        await log(
+            guild,
+            LOG_CHANNELS["tickets"],
+            "Ticket Opened",
+            f"User: {member.mention}\nChannel: {ticket_channel.mention}",
+            discord.Color.blurple()
+        )
+
+
+# ============================================================
+# VC CONTROL VIEW — full persistent button panel (5 rows × up to 5 buttons)
+# ============================================================
+
+def _resolve_vc(guild: discord.Guild, text_channel_id: int):
+    """Return the VoiceChannel linked to a temp VC text channel, or None."""
+    for vc_id, tc_id in temp_vc_text_channels.items():
+        if tc_id == text_channel_id:
+            return guild.get_channel(vc_id)
+    return None
+
+
+def _is_vc_owner(member: discord.Member, vc: discord.VoiceChannel) -> bool:
+    return temp_vc_owners.get(vc.id) == member.id
+
+
+def _is_vc_mod(member: discord.Member, vc: discord.VoiceChannel) -> bool:
+    return member.id in vc_mods.get(vc.id, set())
+
+
+def _can_control(member: discord.Member, vc: discord.VoiceChannel) -> bool:
+    """Owner or VC-mod can use control buttons."""
+    return _is_vc_owner(member, vc) or _is_vc_mod(member, vc)
+
+
+class VCControlView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    async def _check(self, interaction: discord.Interaction, owner_only: bool = False):
+        vc = _resolve_vc(interaction.guild, interaction.channel_id)
+        if not vc:
+            await interaction.response.send_message("❌ Could not find the linked voice channel.", ephemeral=True)
+            return None
+        if owner_only and not _is_vc_owner(interaction.user, vc):
+            await interaction.response.send_message("❌ Only the **VC owner** can do that.", ephemeral=True)
+            return None
+        if not owner_only and not _can_control(interaction.user, vc):
+            await interaction.response.send_message("❌ Only the **VC owner or a VC mod** can do that.", ephemeral=True)
+            return None
+        return vc
+
+    # ── Row 0: Privacy ──────────────────────────────────────
+    @discord.ui.button(label="🔒 Lock", style=discord.ButtonStyle.danger, custom_id="vc_btn_lock", row=0)
+    async def btn_lock(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = await self._check(interaction)
+        if not vc:
+            return
+        await vc.set_permissions(interaction.guild.default_role, connect=False)
+        embed = discord.Embed(description="🔒 VC **locked** — only permitted users can join.", color=discord.Color.red())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await _vc_announce(interaction.guild, vc, f"🔒 **{interaction.user.display_name}** locked the VC.")
+
+    @discord.ui.button(label="🔓 Unlock", style=discord.ButtonStyle.success, custom_id="vc_btn_unlock", row=0)
+    async def btn_unlock(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = await self._check(interaction)
+        if not vc:
+            return
+        await vc.set_permissions(interaction.guild.default_role, connect=True)
+        embed = discord.Embed(description="🔓 VC **unlocked** — anyone can join.", color=discord.Color.green())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await _vc_announce(interaction.guild, vc, f"🔓 **{interaction.user.display_name}** unlocked the VC.")
+
+    @discord.ui.button(label="👻 Hide", style=discord.ButtonStyle.secondary, custom_id="vc_btn_hide", row=0)
+    async def btn_hide(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = await self._check(interaction)
+        if not vc:
+            return
+        await vc.set_permissions(interaction.guild.default_role, view_channel=False)
+        embed = discord.Embed(description="👻 VC **hidden** from everyone.", color=discord.Color.dark_grey())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await _vc_announce(interaction.guild, vc, f"👻 **{interaction.user.display_name}** hid the VC.")
+
+    @discord.ui.button(label="👀 Show", style=discord.ButtonStyle.secondary, custom_id="vc_btn_show", row=0)
+    async def btn_show(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = await self._check(interaction)
+        if not vc:
+            return
+        await vc.set_permissions(interaction.guild.default_role, view_channel=True)
+        embed = discord.Embed(description="👀 VC is now **visible** to everyone.", color=discord.Color.blurple())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await _vc_announce(interaction.guild, vc, f"👀 **{interaction.user.display_name}** made the VC visible.")
+
+    @discord.ui.button(label="📋 Info", style=discord.ButtonStyle.secondary, custom_id="vc_btn_info", row=0)
+    async def btn_info(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = _resolve_vc(interaction.guild, interaction.channel_id)
+        if not vc:
+            await interaction.response.send_message("❌ Could not find the linked voice channel.", ephemeral=True)
+            return
+        owner_id = temp_vc_owners.get(vc.id)
+        owner = interaction.guild.get_member(owner_id) if owner_id else None
+        mods = vc_mods.get(vc.id, set())
+        mod_mentions = ", ".join(f"<@{m}>" for m in mods) if mods else "None"
+        banned = vc_banned.get(vc.id, set())
+        banned_mentions = ", ".join(f"<@{b}>" for b in banned) if banned else "None"
+        members_str = "\n".join(f"• {m.display_name}" for m in vc.members) or "Empty"
+        limit_str = str(vc.user_limit) if vc.user_limit else "No limit"
+        ow = vc.overwrites_for(interaction.guild.default_role)
+        locked = ow.connect is False
+        hidden = ow.view_channel is False
+        embed = discord.Embed(title=f"🎤 {vc.name}", color=discord.Color.dark_grey(), timestamp=datetime.utcnow())
+        embed.add_field(name="👑 Owner", value=owner.mention if owner else "Unknown", inline=True)
+        embed.add_field(name="👥 Count", value=f"{len(vc.members)}/{limit_str}", inline=True)
+        embed.add_field(name="🔒 Locked", value="Yes" if locked else "No", inline=True)
+        embed.add_field(name="👻 Hidden", value="Yes" if hidden else "No", inline=True)
+        embed.add_field(name="🔊 Bitrate", value=f"{vc.bitrate // 1000}kbps", inline=True)
+        embed.add_field(name="🌐 Region", value=str(vc.rtc_region) if vc.rtc_region else "Auto", inline=True)
+        embed.add_field(name="🛡 VC Mods", value=mod_mentions, inline=False)
+        embed.add_field(name="🚫 Banned", value=banned_mentions, inline=False)
+        embed.add_field(name="🎙️ Members", value=members_str, inline=False)
+        embed.set_footer(text="TrapAI VC System • The Hood")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ── Row 1: Channel settings ──────────────────────────────
+    @discord.ui.button(label="✏️ Rename", style=discord.ButtonStyle.primary, custom_id="vc_btn_rename", row=1)
+    async def btn_rename(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = await self._check(interaction)
+        if not vc:
+            return
+        await interaction.response.send_modal(VCRenameModal(vc))
+
+    @discord.ui.button(label="👥 Limit", style=discord.ButtonStyle.primary, custom_id="vc_btn_limit", row=1)
+    async def btn_limit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = await self._check(interaction)
+        if not vc:
+            return
+        await interaction.response.send_modal(VCLimitModal(vc))
+
+    @discord.ui.button(label="🔊 Bitrate", style=discord.ButtonStyle.primary, custom_id="vc_btn_bitrate", row=1)
+    async def btn_bitrate(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = await self._check(interaction)
+        if not vc:
+            return
+        await interaction.response.send_modal(VCBitrateModal(vc))
+
+    @discord.ui.button(label="🌐 Region", style=discord.ButtonStyle.primary, custom_id="vc_btn_region", row=1)
+    async def btn_region(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = await self._check(interaction)
+        if not vc:
+            return
+        await interaction.response.send_modal(VCRegionModal(vc))
+
+    # ── Row 2: Member access ─────────────────────────────────
+    @discord.ui.button(label="✅ Permit", style=discord.ButtonStyle.success, custom_id="vc_btn_permit", row=2)
+    async def btn_permit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = await self._check(interaction)
+        if not vc:
+            return
+        await interaction.response.send_modal(VCPermitModal(vc, interaction.guild))
+
+    @discord.ui.button(label="👢 Kick", style=discord.ButtonStyle.danger, custom_id="vc_btn_kick", row=2)
+    async def btn_kick(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = await self._check(interaction)
+        if not vc:
+            return
+        await interaction.response.send_modal(VCKickModal(vc, interaction.guild))
+
+    @discord.ui.button(label="🚫 Ban", style=discord.ButtonStyle.danger, custom_id="vc_btn_ban", row=2)
+    async def btn_ban(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = await self._check(interaction)
+        if not vc:
+            return
+        await interaction.response.send_modal(VCBanModal(vc, interaction.guild))
+
+    @discord.ui.button(label="✔️ Unban", style=discord.ButtonStyle.success, custom_id="vc_btn_unban", row=2)
+    async def btn_unban(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = await self._check(interaction)
+        if not vc:
+            return
+        await interaction.response.send_modal(VCUnbanModal(vc, interaction.guild))
+
+    @discord.ui.button(label="🔇 Mute", style=discord.ButtonStyle.secondary, custom_id="vc_btn_mute", row=2)
+    async def btn_mute(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = await self._check(interaction)
+        if not vc:
+            return
+        await interaction.response.send_modal(VCMuteModal(vc, interaction.guild))
+
+    # ── Row 3: Ownership ─────────────────────────────────────
+    @discord.ui.button(label="👑 Transfer", style=discord.ButtonStyle.primary, custom_id="vc_btn_transfer", row=3)
+    async def btn_transfer(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = await self._check(interaction, owner_only=True)
+        if not vc:
+            return
+        await interaction.response.send_modal(VCTransferModal(vc, interaction.guild))
+
+    @discord.ui.button(label="🛡 Add Mod", style=discord.ButtonStyle.primary, custom_id="vc_btn_addmod", row=3)
+    async def btn_addmod(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = await self._check(interaction, owner_only=True)
+        if not vc:
+            return
+        await interaction.response.send_modal(VCAddModModal(vc, interaction.guild))
+
+    @discord.ui.button(label="🔕 Deafen", style=discord.ButtonStyle.secondary, custom_id="vc_btn_deafen", row=3)
+    async def btn_deafen(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = await self._check(interaction)
+        if not vc:
+            return
+        await interaction.response.send_modal(VCDeafenModal(vc, interaction.guild))
+
+    @discord.ui.button(label="🔊 Undeafen", style=discord.ButtonStyle.secondary, custom_id="vc_btn_undeafen", row=3)
+    async def btn_undeafen(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = await self._check(interaction)
+        if not vc:
+            return
+        await interaction.response.send_modal(VCUndeafenModal(vc, interaction.guild))
+
+    @discord.ui.button(label="🔊 Unmute", style=discord.ButtonStyle.success, custom_id="vc_btn_unmute", row=3)
+    async def btn_unmute(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = await self._check(interaction)
+        if not vc:
+            return
+        await interaction.response.send_modal(VCUnmuteModal(vc, interaction.guild))
+
+
+# ============================================================
+# HELPER: post an announcement inside the VC text channel
+# ============================================================
+async def _vc_announce(guild: discord.Guild, vc: discord.VoiceChannel, message: str):
+    text_id = temp_vc_text_channels.get(vc.id)
+    if not text_id:
+        return
+    text_ch = guild.get_channel(text_id)
+    if text_ch:
+        embed = discord.Embed(description=message, color=discord.Color.dark_grey(), timestamp=datetime.utcnow())
+        embed.set_footer(text="TrapAI VC System")
+        try:
+            await text_ch.send(embed=embed)
+        except discord.HTTPException:
+            pass
+
+
+# ============================================================
+# MODALS — one per button action that needs input
+# ============================================================
+
+class VCRenameModal(discord.ui.Modal, title="✏️ Rename VC"):
+    new_name = discord.ui.TextInput(label="New name", placeholder="e.g. Hood Hangout", min_length=1, max_length=100)
+
+    def __init__(self, vc):
+        super().__init__()
+        self.vc = vc
+
+    async def on_submit(self, interaction: discord.Interaction):
+        old = self.vc.name
+        await self.vc.edit(name=self.new_name.value[:100])
+        await interaction.response.send_message(f"✏️ Renamed **{old}** → **{self.new_name.value[:100]}**", ephemeral=True)
+        await _vc_announce(interaction.guild, self.vc, f"✏️ **{interaction.user.display_name}** renamed the VC to **{self.new_name.value[:100]}**.")
+
+
+class VCLimitModal(discord.ui.Modal, title="👥 Set User Limit"):
+    limit = discord.ui.TextInput(label="Limit (0 = no limit, max 99)", placeholder="e.g. 5", min_length=1, max_length=2)
+
+    def __init__(self, vc):
+        super().__init__()
+        self.vc = vc
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            value = int(self.limit.value)
+        except ValueError:
+            await interaction.response.send_message("❌ Enter a number 0–99.", ephemeral=True)
+            return
+        if value < 0 or value > 99:
+            await interaction.response.send_message("❌ Limit must be 0–99.", ephemeral=True)
+            return
+        await self.vc.edit(user_limit=value)
+        label = f"**{value}**" if value else "**no limit**"
+        await interaction.response.send_message(f"👥 User limit set to {label}.", ephemeral=True)
+        await _vc_announce(interaction.guild, self.vc, f"👥 **{interaction.user.display_name}** set the limit to {label}.")
+
+
+class VCBitrateModal(discord.ui.Modal, title="🔊 Set Bitrate"):
+    bitrate = discord.ui.TextInput(label="Bitrate in kbps (8–96)", placeholder="e.g. 64", min_length=1, max_length=2)
+
+    def __init__(self, vc):
+        super().__init__()
+        self.vc = vc
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            value = int(self.bitrate.value)
+        except ValueError:
+            await interaction.response.send_message("❌ Enter a number 8–96.", ephemeral=True)
+            return
+        if value < 8 or value > 96:
+            await interaction.response.send_message("❌ Bitrate must be 8–96 kbps.", ephemeral=True)
+            return
+        await self.vc.edit(bitrate=value * 1000)
+        await interaction.response.send_message(f"🔊 Bitrate set to **{value}kbps**.", ephemeral=True)
+        await _vc_announce(interaction.guild, self.vc, f"🔊 **{interaction.user.display_name}** set the bitrate to **{value}kbps**.")
+
+
+class VCRegionModal(discord.ui.Modal, title="🌐 Set Voice Region"):
+    region = discord.ui.TextInput(
+        label="Region (auto / us-east / eu-west / etc.)",
+        placeholder="auto",
+        min_length=1,
+        max_length=20
+    )
+
+    def __init__(self, vc):
+        super().__init__()
+        self.vc = vc
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = self.region.value.strip().lower()
+        region_val = None if raw == "auto" else raw
+        try:
+            await self.vc.edit(rtc_region=region_val)
+            label = f"**{raw}**" if region_val else "**auto**"
+            await interaction.response.send_message(f"🌐 Region set to {label}.", ephemeral=True)
+            await _vc_announce(interaction.guild, self.vc, f"🌐 **{interaction.user.display_name}** set the region to {label}.")
+        except discord.HTTPException:
+            await interaction.response.send_message("❌ Invalid region. Try: `auto`, `us-east`, `us-west`, `eu-west`, `singapore`, `sydney`, `brazil`, `hongkong`, `russia`, `japan`, `southafrica`, `india`.", ephemeral=True)
+
+
+class VCPermitModal(discord.ui.Modal, title="✅ Permit User"):
+    user_input = discord.ui.TextInput(label="User ID or @mention", placeholder="e.g. 123456789", min_length=1, max_length=30)
+
+    def __init__(self, vc, guild):
+        super().__init__()
+        self.vc = vc
+        self.guild = guild
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = self.user_input.value.strip().replace("<@", "").replace(">", "").replace("!", "")
+        try:
+            uid = int(raw)
+        except ValueError:
+            await interaction.response.send_message("❌ Enter a valid user ID.", ephemeral=True)
+            return
+        member = self.guild.get_member(uid)
+        if not member:
+            await interaction.response.send_message("❌ Member not found in this server.", ephemeral=True)
+            return
+        await self.vc.set_permissions(member, connect=True, view_channel=True)
+        await interaction.response.send_message(f"✅ **{member.display_name}** can now join.", ephemeral=True)
+        await _vc_announce(interaction.guild, self.vc, f"✅ **{interaction.user.display_name}** permitted **{member.display_name}** to join.")
+
+
+class VCKickModal(discord.ui.Modal, title="👢 Kick from VC"):
+    user_input = discord.ui.TextInput(label="User ID or @mention", placeholder="e.g. 123456789", min_length=1, max_length=30)
+
+    def __init__(self, vc, guild):
+        super().__init__()
+        self.vc = vc
+        self.guild = guild
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = self.user_input.value.strip().replace("<@", "").replace(">", "").replace("!", "")
+        try:
+            uid = int(raw)
+        except ValueError:
+            await interaction.response.send_message("❌ Enter a valid user ID.", ephemeral=True)
+            return
+        member = self.guild.get_member(uid)
+        if not member:
+            await interaction.response.send_message("❌ Member not found.", ephemeral=True)
+            return
+        if not member.voice or member.voice.channel != self.vc:
+            await interaction.response.send_message("❌ That user is not in your VC.", ephemeral=True)
+            return
+        await member.move_to(None)
+        await interaction.response.send_message(f"👢 **{member.display_name}** was kicked from the VC.", ephemeral=True)
+        await _vc_announce(interaction.guild, self.vc, f"👢 **{interaction.user.display_name}** kicked **{member.display_name}** from the VC.")
+
+
+class VCBanModal(discord.ui.Modal, title="🚫 Ban from VC"):
+    user_input = discord.ui.TextInput(label="User ID or @mention", placeholder="e.g. 123456789", min_length=1, max_length=30)
+
+    def __init__(self, vc, guild):
+        super().__init__()
+        self.vc = vc
+        self.guild = guild
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = self.user_input.value.strip().replace("<@", "").replace(">", "").replace("!", "")
+        try:
+            uid = int(raw)
+        except ValueError:
+            await interaction.response.send_message("❌ Enter a valid user ID.", ephemeral=True)
+            return
+        member = self.guild.get_member(uid)
+        if not member:
+            await interaction.response.send_message("❌ Member not found.", ephemeral=True)
+            return
+        if _is_vc_owner(member, self.vc):
+            await interaction.response.send_message("❌ You can't ban the VC owner.", ephemeral=True)
+            return
+        await self.vc.set_permissions(member, connect=False, view_channel=False)
+        vc_banned.setdefault(self.vc.id, set()).add(member.id)
+        if member.voice and member.voice.channel == self.vc:
+            await member.move_to(None)
+        await interaction.response.send_message(f"🚫 **{member.display_name}** was banned from the VC.", ephemeral=True)
+        await _vc_announce(interaction.guild, self.vc, f"🚫 **{interaction.user.display_name}** banned **{member.display_name}** from the VC.")
+
+
+class VCUnbanModal(discord.ui.Modal, title="✔️ Unban from VC"):
+    user_input = discord.ui.TextInput(label="User ID or @mention", placeholder="e.g. 123456789", min_length=1, max_length=30)
+
+    def __init__(self, vc, guild):
+        super().__init__()
+        self.vc = vc
+        self.guild = guild
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = self.user_input.value.strip().replace("<@", "").replace(">", "").replace("!", "")
+        try:
+            uid = int(raw)
+        except ValueError:
+            await interaction.response.send_message("❌ Enter a valid user ID.", ephemeral=True)
+            return
+        member = self.guild.get_member(uid)
+        if not member:
+            await interaction.response.send_message("❌ Member not found.", ephemeral=True)
+            return
+        await self.vc.set_permissions(member, overwrite=None)
+        vc_banned.get(self.vc.id, set()).discard(member.id)
+        await interaction.response.send_message(f"✔️ **{member.display_name}** can join again.", ephemeral=True)
+        await _vc_announce(interaction.guild, self.vc, f"✔️ **{interaction.user.display_name}** unbanned **{member.display_name}**.")
+
+
+class VCMuteModal(discord.ui.Modal, title="🔇 Server-Mute in VC"):
+    user_input = discord.ui.TextInput(label="User ID or @mention", placeholder="e.g. 123456789", min_length=1, max_length=30)
+
+    def __init__(self, vc, guild):
+        super().__init__()
+        self.vc = vc
+        self.guild = guild
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = self.user_input.value.strip().replace("<@", "").replace(">", "").replace("!", "")
+        try:
+            uid = int(raw)
+        except ValueError:
+            await interaction.response.send_message("❌ Enter a valid user ID.", ephemeral=True)
+            return
+        member = self.guild.get_member(uid)
+        if not member:
+            await interaction.response.send_message("❌ Member not found.", ephemeral=True)
+            return
+        if not member.voice or member.voice.channel != self.vc:
+            await interaction.response.send_message("❌ That user is not in your VC.", ephemeral=True)
+            return
+        await member.edit(mute=True)
+        await interaction.response.send_message(f"🔇 **{member.display_name}** has been server-muted.", ephemeral=True)
+        await _vc_announce(interaction.guild, self.vc, f"🔇 **{interaction.user.display_name}** server-muted **{member.display_name}**.")
+
+
+class VCUnmuteModal(discord.ui.Modal, title="🔊 Unmute in VC"):
+    user_input = discord.ui.TextInput(label="User ID or @mention", placeholder="e.g. 123456789", min_length=1, max_length=30)
+
+    def __init__(self, vc, guild):
+        super().__init__()
+        self.vc = vc
+        self.guild = guild
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = self.user_input.value.strip().replace("<@", "").replace(">", "").replace("!", "")
+        try:
+            uid = int(raw)
+        except ValueError:
+            await interaction.response.send_message("❌ Enter a valid user ID.", ephemeral=True)
+            return
+        member = self.guild.get_member(uid)
+        if not member:
+            await interaction.response.send_message("❌ Member not found.", ephemeral=True)
+            return
+        await member.edit(mute=False)
+        await interaction.response.send_message(f"🔊 **{member.display_name}** has been unmuted.", ephemeral=True)
+        await _vc_announce(interaction.guild, self.vc, f"🔊 **{interaction.user.display_name}** unmuted **{member.display_name}**.")
+
+
+class VCDeafenModal(discord.ui.Modal, title="🔕 Server-Deafen in VC"):
+    user_input = discord.ui.TextInput(label="User ID or @mention", placeholder="e.g. 123456789", min_length=1, max_length=30)
+
+    def __init__(self, vc, guild):
+        super().__init__()
+        self.vc = vc
+        self.guild = guild
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = self.user_input.value.strip().replace("<@", "").replace(">", "").replace("!", "")
+        try:
+            uid = int(raw)
+        except ValueError:
+            await interaction.response.send_message("❌ Enter a valid user ID.", ephemeral=True)
+            return
+        member = self.guild.get_member(uid)
+        if not member:
+            await interaction.response.send_message("❌ Member not found.", ephemeral=True)
+            return
+        if not member.voice or member.voice.channel != self.vc:
+            await interaction.response.send_message("❌ That user is not in your VC.", ephemeral=True)
+            return
+        await member.edit(deafen=True)
+        await interaction.response.send_message(f"🔕 **{member.display_name}** has been server-deafened.", ephemeral=True)
+        await _vc_announce(interaction.guild, self.vc, f"🔕 **{interaction.user.display_name}** server-deafened **{member.display_name}**.")
+
+
+class VCUndeafenModal(discord.ui.Modal, title="🔊 Undeafen in VC"):
+    user_input = discord.ui.TextInput(label="User ID or @mention", placeholder="e.g. 123456789", min_length=1, max_length=30)
+
+    def __init__(self, vc, guild):
+        super().__init__()
+        self.vc = vc
+        self.guild = guild
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = self.user_input.value.strip().replace("<@", "").replace(">", "").replace("!", "")
+        try:
+            uid = int(raw)
+        except ValueError:
+            await interaction.response.send_message("❌ Enter a valid user ID.", ephemeral=True)
+            return
+        member = self.guild.get_member(uid)
+        if not member:
+            await interaction.response.send_message("❌ Member not found.", ephemeral=True)
+            return
+        await member.edit(deafen=False)
+        await interaction.response.send_message(f"🔊 **{member.display_name}** has been undeafened.", ephemeral=True)
+        await _vc_announce(interaction.guild, self.vc, f"🔊 **{interaction.user.display_name}** undeafened **{member.display_name}**.")
+
+
+class VCTransferModal(discord.ui.Modal, title="👑 Transfer VC Ownership"):
+    user_input = discord.ui.TextInput(label="User ID or @mention (must be in VC)", placeholder="e.g. 123456789", min_length=1, max_length=30)
+
+    def __init__(self, vc, guild):
+        super().__init__()
+        self.vc = vc
+        self.guild = guild
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = self.user_input.value.strip().replace("<@", "").replace(">", "").replace("!", "")
+        try:
+            uid = int(raw)
+        except ValueError:
+            await interaction.response.send_message("❌ Enter a valid user ID.", ephemeral=True)
+            return
+        member = self.guild.get_member(uid)
+        if not member:
+            await interaction.response.send_message("❌ Member not found.", ephemeral=True)
+            return
+        if not member.voice or member.voice.channel != self.vc:
+            await interaction.response.send_message("❌ That user must be in the VC.", ephemeral=True)
+            return
+        temp_vc_owners[self.vc.id] = member.id
+        await self.vc.set_permissions(member, manage_channels=True, manage_permissions=True, move_members=True, connect=True, speak=True)
+        # Grant new owner text access
+        text_id = temp_vc_text_channels.get(self.vc.id)
+        if text_id:
+            text_ch = self.guild.get_channel(text_id)
+            if text_ch:
+                await text_ch.set_permissions(member, view_channel=True, send_messages=True, read_message_history=True)
+        await interaction.response.send_message(f"👑 Ownership transferred to **{member.display_name}**.", ephemeral=True)
+        await _vc_announce(interaction.guild, self.vc, f"👑 **{interaction.user.display_name}** transferred ownership to **{member.display_name}**.")
+
+
+class VCAddModModal(discord.ui.Modal, title="🛡 Add VC Moderator"):
+    user_input = discord.ui.TextInput(label="User ID or @mention (must be in VC)", placeholder="e.g. 123456789", min_length=1, max_length=30)
+
+    def __init__(self, vc, guild):
+        super().__init__()
+        self.vc = vc
+        self.guild = guild
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = self.user_input.value.strip().replace("<@", "").replace(">", "").replace("!", "")
+        try:
+            uid = int(raw)
+        except ValueError:
+            await interaction.response.send_message("❌ Enter a valid user ID.", ephemeral=True)
+            return
+        member = self.guild.get_member(uid)
+        if not member:
+            await interaction.response.send_message("❌ Member not found.", ephemeral=True)
+            return
+        if not member.voice or member.voice.channel != self.vc:
+            await interaction.response.send_message("❌ That user must be in the VC.", ephemeral=True)
+            return
+        vc_mods.setdefault(self.vc.id, set()).add(member.id)
+        await self.vc.set_permissions(member, move_members=True, mute_members=True, deafen_members=True, manage_channels=True)
+        await interaction.response.send_message(f"🛡 **{member.display_name}** is now a VC moderator.", ephemeral=True)
+        await _vc_announce(interaction.guild, self.vc, f"🛡 **{interaction.user.display_name}** made **{member.display_name}** a VC moderator.")
+
+
+# ============================================================
+# CMDS VIEW
+# ============================================================
 class CmdsView(discord.ui.View):
     def __init__(self, author_id: int):
         super().__init__(timeout=120)
@@ -249,30 +990,27 @@ class CmdsView(discord.ui.View):
         embed = discord.Embed(
             title="🤖 TrapAI Command Center",
             description=(
-                "Welcome to the **Smokers Island** command panel.\n\n"
+                "Welcome to **The Hood** command panel.\n\n"
                 "Use the buttons below to view command categories."
             ),
             color=discord.Color.blurple(),
             timestamp=datetime.utcnow()
         )
-
         embed.add_field(
             name="📂 Categories",
             value=(
                 "🛡 Moderation\n"
                 "🔒 Jail System\n"
                 "🤖 TrapAI Security\n"
-                "📊 Levels & Stats\n"
+                "📊 Stats\n"
                 "🎤 VC Controls\n"
                 "⚙️ Admin"
             ),
             inline=False
         )
-
         if guild.icon:
             embed.set_thumbnail(url=guild.icon.url)
-
-        embed.set_footer(text="TrapAI Security • Interactive Command Menu")
+        embed.set_footer(text="TrapAI Security • The Hood Command Menu")
         return embed
 
     def moderation_embed(self, guild: discord.Guild):
@@ -282,23 +1020,43 @@ class CmdsView(discord.ui.View):
             timestamp=datetime.utcnow()
         )
         embed.add_field(
-            name="Commands",
+            name="Punishment",
             value=(
                 "`,kick @user [reason]`\n"
                 "`,ban @user [reason]`\n"
                 "`,timeout @user minutes [reason]`\n"
+                "`,mute @user [reason]`\n"
+                "`,unmute @user [reason]`\n"
+                "`,warn @user [reason]`\n"
+                "`,warnings [@user]`\n"
+                "`,clearwarnings @user`"
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="Channel Management",
+            value=(
                 "`,clear amount`\n"
+                "`,purge amount [@user]`\n"
                 "`,lock`\n"
                 "`,unlock`\n"
+                "`,hide`\n"
+                "`,unhide`\n"
+                "`,slowmode seconds`\n"
                 "`,nuke`\n"
                 "`,lockdown`\n"
                 "`,unlockdown`"
             ),
             inline=False
         )
+        embed.add_field(
+            name="Member Management",
+            value="`,nickname @user [new_nick]`",
+            inline=False
+        )
         if guild.icon:
             embed.set_thumbnail(url=guild.icon.url)
-        embed.set_footer(text="TrapAI Security • Moderation Panel")
+        embed.set_footer(text="TrapAI Security • The Hood Moderation Panel")
         return embed
 
     def jail_embed(self, guild: discord.Guild):
@@ -322,7 +1080,7 @@ class CmdsView(discord.ui.View):
         )
         if guild.icon:
             embed.set_thumbnail(url=guild.icon.url)
-        embed.set_footer(text="TrapAI Security • Jail Panel")
+        embed.set_footer(text="TrapAI Security • The Hood Jail Panel")
         return embed
 
     def security_embed(self, guild: discord.Guild):
@@ -345,58 +1103,69 @@ class CmdsView(discord.ui.View):
         )
         if guild.icon:
             embed.set_thumbnail(url=guild.icon.url)
-        embed.set_footer(text="TrapAI Security • Security Panel")
+        embed.set_footer(text="TrapAI Security • The Hood Security Panel")
         return embed
 
-    def levels_embed(self, guild: discord.Guild):
+    def stats_embed(self, guild: discord.Guild):
         embed = discord.Embed(
-            title="📊 Levels & Stats Commands",
+            title="📊 Stats Commands",
             color=discord.Color.gold(),
             timestamp=datetime.utcnow()
         )
         embed.add_field(
             name="Commands",
             value=(
-                "`,level`\n"
-                "`,leaderboard`\n"
-                "`,vcstats`\n"
-                "`,whois @user`\n"
+                "`,vcstats [@user]`\n"
+                "`,whois [@user]`\n"
                 "`,ping`"
             ),
             inline=False
         )
         if guild.icon:
             embed.set_thumbnail(url=guild.icon.url)
-        embed.set_footer(text="TrapAI Security • Levels Panel")
+        embed.set_footer(text="TrapAI Security • The Hood Stats Panel")
         return embed
 
     def vc_embed(self, guild: discord.Guild):
         embed = discord.Embed(
             title="🎤 VC Control Commands",
-            color=discord.Color.blue(),
+            description="All commands work in your VC's private text chat. 👑 = owner only.",
+            color=discord.Color.dark_grey(),
             timestamp=datetime.utcnow()
         )
         embed.add_field(
-            name="Commands",
+            name="🔒 Privacy",
+            value="`,vclock` `,vcunlock` `,vchide` `,vcshow`",
+            inline=False
+        )
+        embed.add_field(
+            name="⚙️ Channel",
+            value="`,vcname <name>` `,vclimit <0-99>` `,vcbitrate <kbps>` `,vcregion <region>`",
+            inline=False
+        )
+        embed.add_field(
+            name="👥 Members",
             value=(
-                "`,vclock`\n"
-                "`,vcunlock`\n"
-                "`,vchide`\n"
-                "`,vcshow`\n"
-                "`,vcname <name>`\n"
-                "`,vclimit <number>`\n"
-                "`,vckick @user`\n"
-                "`,vcban @user`\n"
-                "`,vcunban @user`\n"
-                "`,vctransfer @user`\n"
-                "`,vcpermit @user`\n"
-                "`,vcmod @user`"
+                "`,vcpermit @user` — whitelist\n"
+                "`,vckick @user` `,vcban @user` `,vcunban @user`\n"
+                "`,vcmute @user` `,vcunmute @user`\n"
+                "`,vcdeafen @user` `,vcundeafen @user`"
             ),
+            inline=False
+        )
+        embed.add_field(
+            name="👑 Ownership",
+            value="`,vctransfer @user` `,vcmod @user` `,vcremovemod @user`",
+            inline=False
+        )
+        embed.add_field(
+            name="🖱️ Buttons",
+            value="Every command above is also a **button** in the VC text chat.",
             inline=False
         )
         if guild.icon:
             embed.set_thumbnail(url=guild.icon.url)
-        embed.set_footer(text="TrapAI Security • VC Panel")
+        embed.set_footer(text="TrapAI Security • The Hood VC Panel")
         return embed
 
     def admin_embed(self, guild: discord.Guild):
@@ -406,19 +1175,30 @@ class CmdsView(discord.ui.View):
             timestamp=datetime.utcnow()
         )
         embed.add_field(
-            name="Commands",
+            name="Setup",
             value=(
                 "`,setup`\n"
+                "`,setupvc [category]`\n"
                 "`,rules`\n"
-                "`,restart`\n"
+                "`,sendverify`\n"
+                "`,sendtickets`\n"
+                "`,restart`"
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="Role Management",
+            value=(
                 "`,roleall @role`\n"
+                "`,massrole @role [@filter_role]`\n"
+                "`,massunrole @role [@filter_role]`\n"
                 "`,strip @user`"
             ),
             inline=False
         )
         if guild.icon:
             embed.set_thumbnail(url=guild.icon.url)
-        embed.set_footer(text="TrapAI Security • Admin Panel")
+        embed.set_footer(text="TrapAI Security • The Hood Admin Panel")
         return embed
 
     @discord.ui.button(label="Home", style=discord.ButtonStyle.secondary, emoji="🏠")
@@ -437,9 +1217,9 @@ class CmdsView(discord.ui.View):
     async def security_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(embed=self.security_embed(interaction.guild), view=self)
 
-    @discord.ui.button(label="Levels", style=discord.ButtonStyle.primary, emoji="📊")
-    async def levels_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(embed=self.levels_embed(interaction.guild), view=self)
+    @discord.ui.button(label="Stats", style=discord.ButtonStyle.primary, emoji="📊")
+    async def stats_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=self.stats_embed(interaction.guild), view=self)
 
     @discord.ui.button(label="VC", style=discord.ButtonStyle.primary, emoji="🎤")
     async def vc_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -450,9 +1230,11 @@ class CmdsView(discord.ui.View):
         await interaction.response.edit_message(embed=self.admin_embed(interaction.guild), view=self)
 
 
+# ============================================================
+# HELPERS
+# ============================================================
 def parse_jail_duration(duration: str):
     duration = duration.lower().strip()
-
     time_units = {
         "s": 1,
         "m": 60,
@@ -462,7 +1244,6 @@ def parse_jail_duration(duration: str):
         "mo": 2592000,
         "y": 31536000
     }
-
     try:
         if duration.endswith("mo"):
             unit = "mo"
@@ -479,97 +1260,99 @@ def parse_jail_duration(duration: str):
         return None
 
 
-def make_bar(current, total, length=12):
-    if total <= 0:
-        total = 1
-    filled = int((current / total) * length)
-    filled = max(0, min(filled, length))
-    return "█" * filled + "░" * (length - filled)
+async def get_or_create_muted_role(guild: discord.Guild):
+    role = discord.utils.get(guild.roles, name=MUTED_ROLE)
+    if role is None:
+        role = await guild.create_role(name=MUTED_ROLE, reason="Auto-created mute role")
+        for channel in guild.channels:
+            try:
+                if isinstance(channel, discord.TextChannel):
+                    await channel.set_permissions(role, send_messages=False, add_reactions=False)
+                elif isinstance(channel, discord.VoiceChannel):
+                    await channel.set_permissions(role, speak=False)
+            except discord.HTTPException:
+                pass
+    return role
 
 
 def get_owned_temp_vc(member: discord.Member):
+    """Return the VC if member is the owner OR a VC-mod, else None."""
     voice = member.voice
     if not voice or not voice.channel:
         return None
-
     channel = voice.channel
-    owner_id = temp_vc_owners.get(channel.id)
-
-    if owner_id != member.id:
+    if not _can_control(member, channel):
         return None
+    return channel
 
+
+def get_strictly_owned_vc(member: discord.Member):
+    """Return the VC only if member is the owner (not just a mod)."""
+    voice = member.voice
+    if not voice or not voice.channel:
+        return None
+    channel = voice.channel
+    if temp_vc_owners.get(channel.id) != member.id:
+        return None
     return channel
 
 
 async def send_vc_control_panel(channel, owner, voice_channel):
     embed = discord.Embed(
-        title="🎛 TrapAI VC Dashboard",
+        title="🎛 TrapAI VC Control Panel",
         description=(
-            f"Welcome to your private VC, {owner.mention}.\n\n"
+            f"🏘️ Welcome to your private VC, {owner.mention}!\n\n"
             f"**Voice Channel:** `{voice_channel.name}`\n"
             f"**Owner:** {owner.mention}\n\n"
-            "Use the commands below in this chat to control your VC."
+            "Use the **buttons** to control everything, or use commands."
         ),
-        color=discord.Color.blurple(),
+        color=discord.Color.dark_grey(),
         timestamp=datetime.utcnow()
     )
-
     embed.add_field(
-        name="🔒 Privacy Controls",
+        name="🎛 Row 1 — Privacy",
+        value="🔒 Lock  •  🔓 Unlock  •  👻 Hide  •  👀 Show  •  📋 Info",
+        inline=False
+    )
+    embed.add_field(
+        name="⚙️ Row 2 — Channel",
+        value="✏️ Rename  •  👥 Limit  •  🔊 Bitrate  •  🌐 Region",
+        inline=False
+    )
+    embed.add_field(
+        name="👥 Row 3 — Members",
+        value="✅ Permit  •  👢 Kick  •  🚫 Ban  •  ✔️ Unban  •  🔇 Mute",
+        inline=False
+    )
+    embed.add_field(
+        name="👑 Row 4 — Ownership",
+        value="👑 Transfer  •  🛡 Add Mod  •  🔕 Deafen  •  🔊 Undeafen  •  🔊 Unmute",
+        inline=False
+    )
+    embed.add_field(
+        name="⌨️ Also available as commands",
         value=(
-            "`,vclock` — lock VC\n"
-            "`,vcunlock` — unlock VC\n"
-            "`,vchide` — hide VC\n"
-            "`,vcshow` — show VC\n"
-            "`,vcpermit @user` — allow a user in"
+            "`,vclock` `,vcunlock` `,vchide` `,vcshow`\n"
+            "`,vcname` `,vclimit` `,vcbitrate` `,vcregion`\n"
+            "`,vckick` `,vcban` `,vcunban` `,vcpermit`\n"
+            "`,vcmute` `,vcunmute` `,vcdeafen` `,vcundeafen`\n"
+            "`,vctransfer` `,vcmod` `,vcremovemod`"
         ),
         inline=False
     )
-
-    embed.add_field(
-        name="👑 Ownership Controls",
-        value=(
-            "`,vctransfer @user` — transfer VC owner\n"
-            "`,vcmod @user` — give VC mod powers"
-        ),
-        inline=False
-    )
-
-    embed.add_field(
-        name="⚙️ Channel Controls",
-        value=(
-            "`,vcname new name` — rename VC\n"
-            "`,vclimit 5` — set user limit"
-        ),
-        inline=False
-    )
-
-    embed.add_field(
-        name="🛡 Member Controls",
-        value=(
-            "`,vckick @user` — kick from VC\n"
-            "`,vcban @user` — ban from VC\n"
-            "`,vcunban @user` — unban from VC"
-        ),
-        inline=False
-    )
-
     embed.add_field(
         name="📌 Notes",
         value=(
-            "• These commands only work if you're the current VC owner.\n"
-            "• Your VC and chat delete automatically when empty.\n"
-            "• Transfer ownership before leaving if you want someone else to keep control."
+            "• Buttons announce every action in this chat automatically.\n"
+            "• Members see 🟢 join / 🔴 leave messages here in real-time.\n"
+            "• Both the VC and this chat are deleted when the VC empties.\n"
+            "• Transfer ownership before leaving to keep the VC alive."
         ),
         inline=False
     )
-
-    if owner.guild.icon:
-        embed.set_thumbnail(url=owner.guild.icon.url)
-
-    embed.set_footer(text="TrapAI VC System • Auto Control Panel")
-
-    await channel.send(embed=embed)
+    embed.set_thumbnail(url=owner.display_avatar.url)
+    embed.set_footer(text="TrapAI VC System • The Hood")
+    await channel.send(embed=embed, view=VCControlView())
 
 
 async def auto_unjail(guild_id: int, user_id: int, delay: int, reason: str = "Jail timer expired"):
@@ -591,10 +1374,8 @@ async def auto_unjail(guild_id: int, user_id: int, delay: int, reason: str = "Ja
     if jail_role and jail_role in member.roles:
         try:
             await member.remove_roles(jail_role, reason=reason)
-
             if unverified_role and unverified_role not in member.roles:
                 await member.add_roles(unverified_role, reason="Returned to unverified after jail")
-
             await log(
                 guild,
                 LOG_CHANNELS["jail"],
@@ -645,10 +1426,8 @@ async def handle_spam(message):
                 color=discord.Color.orange(),
                 timestamp=datetime.utcnow()
             )
-            embed.set_footer(text="Smokers Island Anti-Spam")
-
+            embed.set_footer(text="The Hood Anti-Spam")
             await message.channel.send(embed=embed, delete_after=8)
-
             await log(
                 message.guild,
                 LOG_CHANNELS["mod"],
@@ -656,7 +1435,6 @@ async def handle_spam(message):
                 f"User: {message.author.mention}\nWarnings: {warning_count}/{SPAM_WARNING_LIMIT}\nChannel: {message.channel.mention}",
                 discord.Color.orange()
             )
-
         else:
             try:
                 until = discord.utils.utcnow() + timedelta(minutes=SPAM_TIMEOUT_MINUTES)
@@ -673,10 +1451,8 @@ async def handle_spam(message):
                     color=discord.Color.red(),
                     timestamp=datetime.utcnow()
                 )
-                embed.set_footer(text="Smokers Island Anti-Spam")
-
+                embed.set_footer(text="The Hood Anti-Spam")
                 await message.channel.send(embed=embed)
-
                 await log(
                     message.guild,
                     LOG_CHANNELS["mod"],
@@ -684,7 +1460,6 @@ async def handle_spam(message):
                     f"User: {message.author.mention}\nReason: Reached {SPAM_WARNING_LIMIT} spam warnings\nDuration: {SPAM_TIMEOUT_MINUTES} minute(s)\nChannel: {message.channel.mention}",
                     discord.Color.red()
                 )
-
             except discord.Forbidden:
                 await log(
                     message.guild,
@@ -701,9 +1476,15 @@ async def handle_spam(message):
     return False
 
 
+# ============================================================
+# EVENTS
+# ============================================================
 @bot.event
 async def on_ready():
     bot.add_view(VerifyView())
+    bot.add_view(TicketOpenView())
+    bot.add_view(TicketCloseView())
+    bot.add_view(VCControlView())
     print(f"Logged in as {bot.user}")
 
 
@@ -724,9 +1505,6 @@ async def on_member_join(member):
                 discord.Color.red()
             )
             return
-
-    levels.setdefault(member.id, 1)
-    xp.setdefault(member.id, 0)
 
     unverified_role = discord.utils.get(member.guild.roles, name=UNVERIFIED_ROLE)
     if unverified_role:
@@ -754,7 +1532,7 @@ async def on_member_join(member):
         embed = discord.Embed(
             title="🤖 TrapAI Arrival Scan",
             description=(
-                f"Welcome {member.mention} to **Smokers Island** 🌴💨\n\n"
+                f"Welcome {member.mention} to **The Hood** 🏘️🔥\n\n"
                 "```yaml\n"
                 "Identity Scan: DETECTED\n"
                 "Threat Analysis: ACTIVE\n"
@@ -762,23 +1540,20 @@ async def on_member_join(member):
                 "Verification Status: REQUIRED\n"
                 "```\n"
                 "Your account has entered the **TrapAI arrival zone**.\n\n"
-                "To unlock the island:\n"
+                "To get in:\n"
                 "1. Read the rules\n"
                 "2. Go to **#verify**\n"
                 "3. Press the **Verify Now** button\n\n"
                 "Until then, your access stays restricted."
             ),
-            color=discord.Color.green(),
+            color=discord.Color.dark_grey(),
             timestamp=datetime.utcnow()
         )
-
         embed.add_field(name="🔒 Current Access", value="Arrival zone only", inline=True)
         embed.add_field(name="✅ Required Step", value="Complete verification", inline=True)
         embed.add_field(name="🛡 Security", value="TrapAI Enabled", inline=True)
-
         embed.set_thumbnail(url=member.display_avatar.url)
-        embed.set_footer(text="TrapAI Security • New Arrival Registered")
-
+        embed.set_footer(text="TrapAI Security • The Hood • New Arrival")
         await ch.send(embed=embed)
 
 
@@ -795,13 +1570,20 @@ async def on_member_remove(member):
 
 @bot.event
 async def on_member_update(before, after):
-    if before.roles == after.roles:
-        return
+    # Boost detection
+    if before.premium_since is None and after.premium_since is not None:
+        await log(
+            after.guild,
+            LOG_CHANNELS["boost"],
+            "Server Boosted 🚀",
+            f"{after.mention} just boosted the server!\nTotal Boosts: **{after.guild.premium_subscription_count}**",
+            discord.Color.nitro_pink() if hasattr(discord.Color, "nitro_pink") else discord.Color.purple()
+        )
 
-    removed_roles = [role for role in before.roles if role not in after.roles]
-    added_roles = [role for role in after.roles if role not in before.roles]
+    if before.roles != after.roles:
+        removed_roles = [role for role in before.roles if role not in after.roles]
+        added_roles = [role for role in after.roles if role not in before.roles]
 
-    if added_roles:
         for role in added_roles:
             await log(
                 after.guild,
@@ -811,7 +1593,6 @@ async def on_member_update(before, after):
                 discord.Color.green()
             )
 
-    if removed_roles:
         for role in removed_roles:
             await log(
                 after.guild,
@@ -821,12 +1602,109 @@ async def on_member_update(before, after):
                 discord.Color.red()
             )
 
+    if before.nick != after.nick:
+        await log(
+            after.guild,
+            LOG_CHANNELS["nicknames"],
+            "Nickname Changed",
+            f"User: {after.mention}\nBefore: {before.nick or before.name}\nAfter: {after.nick or after.name}",
+            discord.Color.blurple()
+        )
+
+
+@bot.event
+async def on_guild_role_create(role):
+    await log(
+        role.guild,
+        LOG_CHANNELS["role_create"],
+        "Role Created",
+        f"Role: {role.mention}\nName: {role.name}",
+        discord.Color.green()
+    )
+
+
+@bot.event
+async def on_guild_role_delete(role):
+    await log(
+        role.guild,
+        LOG_CHANNELS["role_delete"],
+        "Role Deleted",
+        f"Role Name: {role.name}",
+        discord.Color.red()
+    )
+
+
+@bot.event
+async def on_guild_channel_create(channel):
+    await log(
+        channel.guild,
+        LOG_CHANNELS["channel_create"],
+        "Channel Created",
+        f"Channel: {channel.mention if hasattr(channel, 'mention') else channel.name}\nType: {channel.type}",
+        discord.Color.green()
+    )
+
+
+@bot.event
+async def on_guild_channel_delete(channel):
+    await log(
+        channel.guild,
+        LOG_CHANNELS["channel_delete"],
+        "Channel Deleted",
+        f"Channel Name: {channel.name}\nType: {channel.type}",
+        discord.Color.red()
+    )
+
+
+@bot.event
+async def on_guild_channel_update(before, after):
+    changes = []
+    if before.name != after.name:
+        changes.append(f"Name: `{before.name}` → `{after.name}`")
+    if isinstance(before, discord.TextChannel) and isinstance(after, discord.TextChannel):
+        if before.topic != after.topic:
+            changes.append("Topic changed")
+        if before.slowmode_delay != after.slowmode_delay:
+            changes.append(f"Slowmode: `{before.slowmode_delay}s` → `{after.slowmode_delay}s`")
+
+    if changes:
+        await log(
+            after.guild,
+            LOG_CHANNELS["channel_update"],
+            "Channel Updated",
+            f"Channel: {after.mention if hasattr(after, 'mention') else after.name}\n" + "\n".join(changes),
+            discord.Color.gold()
+        )
+
+
+@bot.event
+async def on_guild_emojis_update(guild, before, after):
+    added = [e for e in after if e not in before]
+    removed = [e for e in before if e not in after]
+
+    for emoji in added:
+        await log(guild, LOG_CHANNELS["emoji"], "Emoji Added", f"Emoji: {emoji} (`{emoji.name}`)", discord.Color.green())
+
+    for emoji in removed:
+        await log(guild, LOG_CHANNELS["emoji"], "Emoji Removed", f"Name: `{emoji.name}`", discord.Color.red())
+
+
+@bot.event
+async def on_guild_stickers_update(guild, before, after):
+    added = [s for s in after if s not in before]
+    removed = [s for s in before if s not in after]
+
+    for sticker in added:
+        await log(guild, LOG_CHANNELS["stickers"], "Sticker Added", f"Sticker: `{sticker.name}`", discord.Color.green())
+
+    for sticker in removed:
+        await log(guild, LOG_CHANNELS["stickers"], "Sticker Removed", f"Name: `{sticker.name}`", discord.Color.red())
+
 
 @bot.event
 async def on_message_delete(message):
     if not message.guild or message.author.bot:
         return
-
     await log(
         message.guild,
         LOG_CHANNELS["messages"],
@@ -840,7 +1718,6 @@ async def on_message_delete(message):
 async def on_message_edit(before, after):
     if before.author.bot or before.content == after.content or not before.guild:
         return
-
     await log(
         before.guild,
         LOG_CHANNELS["messages"],
@@ -856,44 +1733,74 @@ async def on_voice_state_update(member, before, after):
 
     if before.channel is None and after.channel is not None:
         vc_join_time[member.id] = now
-        await log(
-            member.guild,
-            LOG_CHANNELS["vc"],
-            "VC Join",
-            f"{member.mention} joined **{after.channel.name}**",
-            discord.Color.blue()
-        )
+        await log(member.guild, LOG_CHANNELS["vc"], "VC Join", f"{member.mention} joined **{after.channel.name}**", discord.Color.blue())
 
     elif before.channel is not None and after.channel is None:
         joined = vc_join_time.pop(member.id, None)
         if joined:
             vc_stats[member.id] = vc_stats.get(member.id, 0) + int(now - joined)
-
-        await log(
-            member.guild,
-            LOG_CHANNELS["vc"],
-            "VC Leave",
-            f"{member.mention} left **{before.channel.name}**",
-            discord.Color.red()
-        )
+        await log(member.guild, LOG_CHANNELS["vc"], "VC Leave", f"{member.mention} left **{before.channel.name}**", discord.Color.red())
 
     elif before.channel != after.channel and before.channel is not None and after.channel is not None:
         joined = vc_join_time.pop(member.id, None)
         if joined:
             vc_stats[member.id] = vc_stats.get(member.id, 0) + int(now - joined)
-
         vc_join_time[member.id] = now
-
-        await log(
-            member.guild,
-            LOG_CHANNELS["vc"],
-            "VC Moved",
-            f"{member.mention} moved from **{before.channel.name}** to **{after.channel.name}**",
-            discord.Color.gold()
-        )
+        await log(member.guild, LOG_CHANNELS["vc"], "VC Moved", f"{member.mention} moved from **{before.channel.name}** to **{after.channel.name}**", discord.Color.gold())
 
     guild = member.guild
 
+    # ── Member joined a temp VC mid-session ──────────────────
+    if after.channel and after.channel.id in temp_vc_owners:
+        text_id = temp_vc_text_channels.get(after.channel.id)
+        text_channel = guild.get_channel(text_id) if text_id else None
+        if text_channel:
+            # Grant text access
+            try:
+                await text_channel.set_permissions(
+                    member, view_channel=True, send_messages=True, read_message_history=True
+                )
+            except discord.HTTPException:
+                pass
+            # Post join announcement
+            join_embed = discord.Embed(
+                description=f"🟢 **{member.display_name}** joined the VC.",
+                color=discord.Color.green(),
+                timestamp=datetime.utcnow()
+            )
+            join_embed.set_thumbnail(url=member.display_avatar.url)
+            join_embed.set_footer(text="TrapAI VC System")
+            try:
+                await text_channel.send(embed=join_embed)
+            except discord.HTTPException:
+                pass
+
+    # ── Member left a temp VC ────────────────────────────────
+    if (before.channel and before.channel.id in temp_vc_owners
+            and (after.channel is None or after.channel.id != before.channel.id)):
+        text_id = temp_vc_text_channels.get(before.channel.id)
+        text_channel = guild.get_channel(text_id) if text_id else None
+        if text_channel:
+            # Post leave announcement
+            leave_embed = discord.Embed(
+                description=f"🔴 **{member.display_name}** left the VC.",
+                color=discord.Color.red(),
+                timestamp=datetime.utcnow()
+            )
+            leave_embed.set_thumbnail(url=member.display_avatar.url)
+            leave_embed.set_footer(text="TrapAI VC System")
+            try:
+                await text_channel.send(embed=leave_embed)
+            except discord.HTTPException:
+                pass
+            # Remove text access (non-owners only)
+            if temp_vc_owners.get(before.channel.id) != member.id:
+                try:
+                    await text_channel.set_permissions(member, overwrite=None)
+                except discord.HTTPException:
+                    pass
+
+    # Create temp VC
     if after.channel and after.channel.name == JOIN_TO_CREATE_CHANNEL_NAME:
         category = discord.utils.get(guild.categories, name=TEMP_VC_CATEGORY_NAME)
         if category is None:
@@ -947,6 +1854,7 @@ async def on_voice_state_update(member, before, after):
             discord.Color.green()
         )
 
+    # Clean up empty temp VC
     if before.channel and before.channel.id in temp_vc_owners:
         if len(before.channel.members) == 0:
             text_id = temp_vc_text_channels.get(before.channel.id)
@@ -973,6 +1881,8 @@ async def on_voice_state_update(member, before, after):
 
             temp_vc_owners.pop(before.channel.id, None)
             temp_vc_text_channels.pop(before.channel.id, None)
+            vc_banned.pop(before.channel.id, None)
+            vc_mods.pop(before.channel.id, None)
 
 
 @bot.event
@@ -1007,72 +1917,49 @@ async def on_message(message):
     if is_spamming:
         return
 
-    user_id = message.author.id
-    current_time = time.time()
-
-    levels.setdefault(user_id, 1)
-    xp.setdefault(user_id, 0)
-
-    last_xp_time = xp_cooldown.get(user_id, 0)
-    if current_time - last_xp_time >= XP_COOLDOWN:
-        xp[user_id] += 5
-        xp_cooldown[user_id] = current_time
-
-        required_xp = levels[user_id] * 100
-
-        if xp[user_id] >= required_xp:
-            xp[user_id] -= required_xp
-            levels[user_id] += 1
-
-            new_level = levels[user_id]
-
-            level_messages = [
-                f"🌫 {message.author.mention} just rose through the smoke!",
-                f"🔥 {message.author.mention}'s fire just got stronger!",
-                f"💨 {message.author.mention} leveled up on Smokers Island!",
-                f"🌴 {message.author.mention} climbed higher in the smoke ranks!"
-            ]
-
-            embed = discord.Embed(
-                title="💨🔥 Level Up!",
-                description=random.choice(level_messages),
-                color=discord.Color.purple(),
-                timestamp=datetime.utcnow()
-            )
-            embed.add_field(name="🏝 Server", value="Smokers Island", inline=True)
-            embed.add_field(name="📈 New Level", value=f"**Level {new_level}**", inline=True)
-            embed.add_field(name="⭐ XP Left", value=f"**{xp[user_id]}/{new_level * 100}**", inline=True)
-            embed.set_thumbnail(url=message.author.display_avatar.url)
-            embed.set_footer(text="Keep chatting to rise through the smoke 💨")
-
-            role_name = LEVEL_ROLES.get(new_level)
-            if role_name:
-                role = discord.utils.get(message.guild.roles, name=role_name)
-                if role:
-                    try:
-                        await message.author.add_roles(role, reason=f"Reached level {new_level}")
-                        embed.add_field(name="🎁 Reward", value=f"Received role: {role.mention}", inline=False)
-
-                        await log(
-                            message.guild,
-                            LOG_CHANNELS["mod"],
-                            "Level Role Awarded",
-                            f"User: {message.author.mention}\nLevel: {new_level}\nRole: {role.name}",
-                            discord.Color.green()
-                        )
-                    except discord.Forbidden:
-                        embed.add_field(name="⚠ Reward", value=f"Could not give role **{role_name}**", inline=False)
-                    except discord.HTTPException:
-                        embed.add_field(name="⚠ Reward", value=f"Error giving role **{role_name}**", inline=False)
-
-            await message.channel.send(embed=embed)
-
     await bot.process_commands(message)
 
 
+# ============================================================
+# GLOBAL ERROR HANDLER
+# ============================================================
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ You don't have permission to use that command.")
+    elif isinstance(error, commands.BotMissingPermissions):
+        await ctx.send("❌ I'm missing the required permissions to do that.")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(f"❌ Missing argument: `{error.param.name}`. Use `,cmds` to see usage.")
+    elif isinstance(error, commands.BadArgument):
+        await ctx.send("❌ Invalid argument provided. Make sure you're mentioning a valid user or role.")
+    elif isinstance(error, commands.MemberNotFound):
+        await ctx.send("❌ Member not found. Make sure you mention them correctly.")
+    elif isinstance(error, commands.RoleNotFound):
+        await ctx.send("❌ Role not found. Make sure the role name or mention is correct.")
+    elif isinstance(error, commands.CommandNotFound):
+        pass  # silently ignore unknown commands
+    elif isinstance(error, commands.CheckFailure):
+        await ctx.send("❌ You don't have permission to use that command.")
+    else:
+        await ctx.send("❌ An unexpected error occurred.")
+        raise error
+
+
+# ============================================================
+# BASIC COMMANDS
+# ============================================================
 @bot.command()
 async def ping(ctx):
-    await ctx.send("pong")
+    latency = round(bot.latency * 1000)
+    embed = discord.Embed(
+        title="🏓 Pong!",
+        description=f"Latency: **{latency}ms**",
+        color=discord.Color.green(),
+        timestamp=datetime.utcnow()
+    )
+    embed.set_footer(text="TrapAI")
+    await ctx.send(embed=embed)
 
 
 @bot.command(name="cmds")
@@ -1082,248 +1969,278 @@ async def cmds(ctx):
     await ctx.send(embed=embed, view=view)
 
 
+# ============================================================
+# VC COMMANDS  (all upgraded — owner or VC-mod unless noted)
+# ============================================================
+
+def _vc_embed(title, description, color=discord.Color.dark_grey()):
+    return discord.Embed(title=title, description=description, color=color, timestamp=datetime.utcnow())
+
+
 @bot.command()
 async def vclock(ctx):
-    channel = get_owned_temp_vc(ctx.author)
-    if not channel:
-        await ctx.send("❌ You must be in your own temporary VC.")
+    ch = get_owned_temp_vc(ctx.author)
+    if not ch:
+        await ctx.send("❌ You must be in a VC you own or moderate.")
         return
-
-    await channel.set_permissions(ctx.guild.default_role, connect=False)
-    await ctx.send(f"🔒 Locked **{channel.name}**")
+    await ch.set_permissions(ctx.guild.default_role, connect=False)
+    await ctx.send(embed=_vc_embed("🔒 VC Locked", f"Only permitted users can now join **{ch.name}**."))
+    await _vc_announce(ctx.guild, ch, f"🔒 **{ctx.author.display_name}** locked the VC.")
 
 
 @bot.command()
 async def vcunlock(ctx):
-    channel = get_owned_temp_vc(ctx.author)
-    if not channel:
-        await ctx.send("❌ You must be in your own temporary VC.")
+    ch = get_owned_temp_vc(ctx.author)
+    if not ch:
+        await ctx.send("❌ You must be in a VC you own or moderate.")
         return
-
-    await channel.set_permissions(ctx.guild.default_role, connect=True)
-    await ctx.send(f"🔓 Unlocked **{channel.name}**")
+    await ch.set_permissions(ctx.guild.default_role, connect=True)
+    await ctx.send(embed=_vc_embed("🔓 VC Unlocked", f"**{ch.name}** is now open to everyone.", discord.Color.green()))
+    await _vc_announce(ctx.guild, ch, f"🔓 **{ctx.author.display_name}** unlocked the VC.")
 
 
 @bot.command()
 async def vchide(ctx):
-    channel = get_owned_temp_vc(ctx.author)
-    if not channel:
-        await ctx.send("❌ You must be in your own temporary VC.")
+    ch = get_owned_temp_vc(ctx.author)
+    if not ch:
+        await ctx.send("❌ You must be in a VC you own or moderate.")
         return
-
-    await channel.set_permissions(ctx.guild.default_role, view_channel=False)
-    await ctx.send(f"👻 Hid **{channel.name}**")
+    await ch.set_permissions(ctx.guild.default_role, view_channel=False)
+    await ctx.send(embed=_vc_embed("👻 VC Hidden", f"**{ch.name}** is now invisible to everyone."))
+    await _vc_announce(ctx.guild, ch, f"👻 **{ctx.author.display_name}** hid the VC.")
 
 
 @bot.command()
 async def vcshow(ctx):
-    channel = get_owned_temp_vc(ctx.author)
-    if not channel:
-        await ctx.send("❌ You must be in your own temporary VC.")
+    ch = get_owned_temp_vc(ctx.author)
+    if not ch:
+        await ctx.send("❌ You must be in a VC you own or moderate.")
         return
-
-    await channel.set_permissions(ctx.guild.default_role, view_channel=True)
-    await ctx.send(f"👀 Made **{channel.name}** visible")
+    await ch.set_permissions(ctx.guild.default_role, view_channel=True)
+    await ctx.send(embed=_vc_embed("👀 VC Visible", f"**{ch.name}** is now visible to everyone.", discord.Color.blurple()))
+    await _vc_announce(ctx.guild, ch, f"👀 **{ctx.author.display_name}** made the VC visible.")
 
 
 @bot.command()
 async def vcname(ctx, *, new_name: str):
-    channel = get_owned_temp_vc(ctx.author)
-    if not channel:
-        await ctx.send("❌ You must be in your own temporary VC.")
+    ch = get_owned_temp_vc(ctx.author)
+    if not ch:
+        await ctx.send("❌ You must be in a VC you own or moderate.")
         return
-
-    await channel.edit(name=new_name[:100])
-    await ctx.send(f"✏ Renamed VC to **{new_name[:100]}**")
+    old = ch.name
+    await ch.edit(name=new_name[:100])
+    await ctx.send(embed=_vc_embed("✏️ VC Renamed", f"**{old}** → **{new_name[:100]}**"))
+    await _vc_announce(ctx.guild, ch, f"✏️ **{ctx.author.display_name}** renamed the VC to **{new_name[:100]}**.")
 
 
 @bot.command()
 async def vclimit(ctx, limit: int):
-    channel = get_owned_temp_vc(ctx.author)
-    if not channel:
-        await ctx.send("❌ You must be in your own temporary VC.")
+    ch = get_owned_temp_vc(ctx.author)
+    if not ch:
+        await ctx.send("❌ You must be in a VC you own or moderate.")
         return
-
     if limit < 0 or limit > 99:
-        await ctx.send("❌ Limit must be between 0 and 99.")
+        await ctx.send("❌ Limit must be 0–99.")
         return
+    await ch.edit(user_limit=limit)
+    label = f"**{limit}**" if limit else "**no limit**"
+    await ctx.send(embed=_vc_embed("👥 User Limit Set", f"Limit for **{ch.name}** is now {label}."))
+    await _vc_announce(ctx.guild, ch, f"👥 **{ctx.author.display_name}** set the limit to {label}.")
 
-    await channel.edit(user_limit=limit)
-    await ctx.send(f"👥 Set VC limit to **{limit}**")
+
+@bot.command()
+async def vcbitrate(ctx, kbps: int):
+    ch = get_owned_temp_vc(ctx.author)
+    if not ch:
+        await ctx.send("❌ You must be in a VC you own or moderate.")
+        return
+    if kbps < 8 or kbps > 96:
+        await ctx.send("❌ Bitrate must be 8–96 kbps.")
+        return
+    await ch.edit(bitrate=kbps * 1000)
+    await ctx.send(embed=_vc_embed("🔊 Bitrate Updated", f"**{ch.name}** bitrate is now **{kbps}kbps**."))
+    await _vc_announce(ctx.guild, ch, f"🔊 **{ctx.author.display_name}** set bitrate to **{kbps}kbps**.")
+
+
+@bot.command()
+async def vcregion(ctx, *, region: str = "auto"):
+    ch = get_owned_temp_vc(ctx.author)
+    if not ch:
+        await ctx.send("❌ You must be in a VC you own or moderate.")
+        return
+    raw = region.strip().lower()
+    region_val = None if raw == "auto" else raw
+    try:
+        await ch.edit(rtc_region=region_val)
+        label = f"**{raw}**" if region_val else "**auto**"
+        await ctx.send(embed=_vc_embed("🌐 Region Set", f"**{ch.name}** region is now {label}."))
+        await _vc_announce(ctx.guild, ch, f"🌐 **{ctx.author.display_name}** set the region to {label}.")
+    except discord.HTTPException:
+        await ctx.send("❌ Invalid region. Try: `auto`, `us-east`, `us-west`, `eu-west`, `singapore`, `sydney`, `brazil`, `hongkong`, `japan`, `russia`, `southafrica`, `india`.")
 
 
 @bot.command()
 async def vckick(ctx, member: discord.Member):
-    channel = get_owned_temp_vc(ctx.author)
-    if not channel:
-        await ctx.send("❌ You must be in your own temporary VC.")
+    ch = get_owned_temp_vc(ctx.author)
+    if not ch:
+        await ctx.send("❌ You must be in a VC you own or moderate.")
         return
-
-    if not member.voice or member.voice.channel != channel:
+    if not member.voice or member.voice.channel != ch:
         await ctx.send("❌ That user is not in your VC.")
         return
-
     await member.move_to(None)
-    await ctx.send(f"👢 Kicked {member.mention} from **{channel.name}**")
+    await ctx.send(embed=_vc_embed("👢 Member Kicked", f"{member.mention} was kicked from **{ch.name}**.", discord.Color.orange()))
+    await _vc_announce(ctx.guild, ch, f"👢 **{ctx.author.display_name}** kicked **{member.display_name}** from the VC.")
 
 
 @bot.command()
 async def vcban(ctx, member: discord.Member):
-    channel = get_owned_temp_vc(ctx.author)
-
-    if not channel:
-        await ctx.send("❌ You must be in your own temporary VC.")
+    ch = get_owned_temp_vc(ctx.author)
+    if not ch:
+        await ctx.send("❌ You must be in a VC you own or moderate.")
         return
-
     if member == ctx.author:
         await ctx.send("❌ You cannot VC ban yourself.")
         return
-
-    try:
-        await channel.set_permissions(member, connect=False, view_channel=False)
-
-        if member.voice and member.voice.channel == channel:
-            await member.move_to(None)
-
-        embed = discord.Embed(
-            title="🔨 VC Ban Applied",
-            description=f"{member.mention} has been banned from **{channel.name}**.",
-            color=discord.Color.red(),
-            timestamp=datetime.utcnow()
-        )
-
-        embed.set_footer(text=f"VC Owner: {ctx.author}")
-
-        await ctx.send(embed=embed)
-
-    except discord.Forbidden:
-        await ctx.send("❌ I don't have permission to do that.")
+    if _is_vc_owner(member, ch):
+        await ctx.send("❌ You can't ban the VC owner.")
+        return
+    await ch.set_permissions(member, connect=False, view_channel=False)
+    vc_banned.setdefault(ch.id, set()).add(member.id)
+    if member.voice and member.voice.channel == ch:
+        await member.move_to(None)
+    await ctx.send(embed=_vc_embed("🚫 VC Ban Applied", f"{member.mention} was banned from **{ch.name}**.", discord.Color.red()))
+    await _vc_announce(ctx.guild, ch, f"🚫 **{ctx.author.display_name}** banned **{member.display_name}** from the VC.")
 
 
 @bot.command()
 async def vcunban(ctx, member: discord.Member):
-    channel = get_owned_temp_vc(ctx.author)
-
-    if not channel:
-        await ctx.send("❌ You must be in your own temporary VC.")
+    ch = get_owned_temp_vc(ctx.author)
+    if not ch:
+        await ctx.send("❌ You must be in a VC you own or moderate.")
         return
-
-    try:
-        await channel.set_permissions(member, overwrite=None)
-
-        embed = discord.Embed(
-            title="✅ VC Ban Removed",
-            description=f"{member.mention} can now join **{channel.name}** again.",
-            color=discord.Color.green(),
-            timestamp=datetime.utcnow()
-        )
-
-        embed.set_footer(text=f"VC Owner: {ctx.author}")
-
-        await ctx.send(embed=embed)
-
-    except discord.Forbidden:
-        await ctx.send("❌ I don't have permission to do that.")
-
-
-@bot.command()
-async def vctransfer(ctx, member: discord.Member):
-    channel = get_owned_temp_vc(ctx.author)
-
-    if not channel:
-        await ctx.send("❌ You must be in your own temporary VC.")
-        return
-
-    if not member.voice or member.voice.channel != channel:
-        await ctx.send("❌ That user must be in your VC.")
-        return
-
-    temp_vc_owners[channel.id] = member.id
-
-    await channel.set_permissions(
-        member,
-        manage_channels=True,
-        manage_permissions=True,
-        move_members=True,
-        connect=True,
-        speak=True
-    )
-
-    embed = discord.Embed(
-        title="👑 VC Ownership Transferred",
-        description=f"{member.mention} is now the owner of **{channel.name}**.",
-        color=discord.Color.gold(),
-        timestamp=datetime.utcnow()
-    )
-
-    embed.set_footer(text=f"Transferred by {ctx.author}")
-    await ctx.send(embed=embed)
+    await ch.set_permissions(member, overwrite=None)
+    vc_banned.get(ch.id, set()).discard(member.id)
+    await ctx.send(embed=_vc_embed("✔️ VC Ban Removed", f"{member.mention} can join **{ch.name}** again.", discord.Color.green()))
+    await _vc_announce(ctx.guild, ch, f"✔️ **{ctx.author.display_name}** unbanned **{member.display_name}**.")
 
 
 @bot.command()
 async def vcpermit(ctx, member: discord.Member):
-    channel = get_owned_temp_vc(ctx.author)
-
-    if not channel:
-        await ctx.send("❌ You must be in your own temporary VC.")
+    ch = get_owned_temp_vc(ctx.author)
+    if not ch:
+        await ctx.send("❌ You must be in a VC you own or moderate.")
         return
+    await ch.set_permissions(member, connect=True, view_channel=True)
+    await ctx.send(embed=_vc_embed("✅ Access Granted", f"{member.mention} can now join **{ch.name}**.", discord.Color.green()))
+    await _vc_announce(ctx.guild, ch, f"✅ **{ctx.author.display_name}** permitted **{member.display_name}** to join.")
 
-    try:
-        await channel.set_permissions(member, connect=True, view_channel=True)
 
-        embed = discord.Embed(
-            title="✅ VC Access Granted",
-            description=f"{member.mention} can now join **{channel.name}**.",
-            color=discord.Color.green(),
-            timestamp=datetime.utcnow()
-        )
+@bot.command()
+async def vcmute(ctx, member: discord.Member):
+    ch = get_owned_temp_vc(ctx.author)
+    if not ch:
+        await ctx.send("❌ You must be in a VC you own or moderate.")
+        return
+    if not member.voice or member.voice.channel != ch:
+        await ctx.send("❌ That user is not in your VC.")
+        return
+    await member.edit(mute=True)
+    await ctx.send(embed=_vc_embed("🔇 Member Muted", f"{member.mention} has been server-muted.", discord.Color.orange()))
+    await _vc_announce(ctx.guild, ch, f"🔇 **{ctx.author.display_name}** muted **{member.display_name}**.")
 
-        await ctx.send(embed=embed)
 
-    except discord.Forbidden:
-        await ctx.send("❌ I don't have permission to do that.")
+@bot.command()
+async def vcunmute(ctx, member: discord.Member):
+    ch = get_owned_temp_vc(ctx.author)
+    if not ch:
+        await ctx.send("❌ You must be in a VC you own or moderate.")
+        return
+    await member.edit(mute=False)
+    await ctx.send(embed=_vc_embed("🔊 Member Unmuted", f"{member.mention} has been unmuted.", discord.Color.green()))
+    await _vc_announce(ctx.guild, ch, f"🔊 **{ctx.author.display_name}** unmuted **{member.display_name}**.")
+
+
+@bot.command()
+async def vcdeafen(ctx, member: discord.Member):
+    ch = get_owned_temp_vc(ctx.author)
+    if not ch:
+        await ctx.send("❌ You must be in a VC you own or moderate.")
+        return
+    if not member.voice or member.voice.channel != ch:
+        await ctx.send("❌ That user is not in your VC.")
+        return
+    await member.edit(deafen=True)
+    await ctx.send(embed=_vc_embed("🔕 Member Deafened", f"{member.mention} has been server-deafened.", discord.Color.orange()))
+    await _vc_announce(ctx.guild, ch, f"🔕 **{ctx.author.display_name}** deafened **{member.display_name}**.")
+
+
+@bot.command()
+async def vcundeafen(ctx, member: discord.Member):
+    ch = get_owned_temp_vc(ctx.author)
+    if not ch:
+        await ctx.send("❌ You must be in a VC you own or moderate.")
+        return
+    await member.edit(deafen=False)
+    await ctx.send(embed=_vc_embed("🔊 Member Undeafened", f"{member.mention} has been undeafened.", discord.Color.green()))
+    await _vc_announce(ctx.guild, ch, f"🔊 **{ctx.author.display_name}** undeafened **{member.display_name}**.")
+
+
+@bot.command()
+async def vctransfer(ctx, member: discord.Member):
+    ch = get_strictly_owned_vc(ctx.author)
+    if not ch:
+        await ctx.send("❌ You must be the **owner** of a temporary VC.")
+        return
+    if not member.voice or member.voice.channel != ch:
+        await ctx.send("❌ That user must be in your VC.")
+        return
+    temp_vc_owners[ch.id] = member.id
+    await ch.set_permissions(member, manage_channels=True, manage_permissions=True, move_members=True, connect=True, speak=True)
+    text_id = temp_vc_text_channels.get(ch.id)
+    if text_id:
+        text_ch = ctx.guild.get_channel(text_id)
+        if text_ch:
+            await text_ch.set_permissions(member, view_channel=True, send_messages=True, read_message_history=True)
+    await ctx.send(embed=_vc_embed("👑 Ownership Transferred", f"{member.mention} is now the owner of **{ch.name}**.", discord.Color.gold()))
+    await _vc_announce(ctx.guild, ch, f"👑 **{ctx.author.display_name}** transferred ownership to **{member.display_name}**.")
 
 
 @bot.command()
 async def vcmod(ctx, member: discord.Member):
-    channel = get_owned_temp_vc(ctx.author)
-
-    if not channel:
-        await ctx.send("❌ You must be in your own temporary VC.")
+    ch = get_strictly_owned_vc(ctx.author)
+    if not ch:
+        await ctx.send("❌ You must be the **owner** of a temporary VC.")
         return
-
-    if not member.voice or member.voice.channel != channel:
+    if not member.voice or member.voice.channel != ch:
         await ctx.send("❌ That user must be in your VC.")
         return
-
-    try:
-        await channel.set_permissions(
-            member,
-            move_members=True,
-            mute_members=True,
-            deafen_members=True,
-            manage_channels=True
-        )
-
-        embed = discord.Embed(
-            title="🛡 VC Moderator Granted",
-            description=f"{member.mention} is now a VC moderator in **{channel.name}**.",
-            color=discord.Color.blurple(),
-            timestamp=datetime.utcnow()
-        )
-
-        await ctx.send(embed=embed)
-
-    except discord.Forbidden:
-        await ctx.send("❌ I don't have permission to do that.")
+    vc_mods.setdefault(ch.id, set()).add(member.id)
+    await ch.set_permissions(member, move_members=True, mute_members=True, deafen_members=True, manage_channels=True)
+    await ctx.send(embed=_vc_embed("🛡 VC Mod Granted", f"{member.mention} is now a VC moderator in **{ch.name}**.", discord.Color.blurple()))
+    await _vc_announce(ctx.guild, ch, f"🛡 **{ctx.author.display_name}** made **{member.display_name}** a VC moderator.")
 
 
+@bot.command()
+async def vcremovemod(ctx, member: discord.Member):
+    ch = get_strictly_owned_vc(ctx.author)
+    if not ch:
+        await ctx.send("❌ You must be the **owner** of a temporary VC.")
+        return
+    vc_mods.get(ch.id, set()).discard(member.id)
+    await ch.set_permissions(member, overwrite=None)
+    await ctx.send(embed=_vc_embed("🗑️ VC Mod Removed", f"{member.mention} is no longer a VC moderator in **{ch.name}**.", discord.Color.orange()))
+    await _vc_announce(ctx.guild, ch, f"🗑️ **{ctx.author.display_name}** removed **{member.display_name}** as VC moderator.")
+
+
+# ============================================================
+# ADMIN COMMANDS
+# ============================================================
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def setup(ctx):
     guild = ctx.guild
-
-    await ctx.send("⚙️ Setting up Smokers Island...")
+    await ctx.send("⚙️ Setting up The Hood...")
 
     unverified_role = discord.utils.get(guild.roles, name=UNVERIFIED_ROLE)
     verified_role = discord.utils.get(guild.roles, name=VERIFIED_ROLE)
@@ -1342,9 +2259,9 @@ async def setup(ctx):
     if arrival_category is None:
         arrival_category = await guild.create_category("🤖 TrapAI Arrival Zone")
 
-    island_category = discord.utils.get(guild.categories, name="🌴 Smokers Island")
+    island_category = discord.utils.get(guild.categories, name="🏘️ The Hood")
     if island_category is None:
-        island_category = await guild.create_category("🌴 Smokers Island")
+        island_category = await guild.create_category("🏘️ The Hood")
 
     staff_category = discord.utils.get(guild.categories, name="🛡 Staff HQ")
     if staff_category is None:
@@ -1357,6 +2274,10 @@ async def setup(ctx):
     temp_vc_category = discord.utils.get(guild.categories, name=TEMP_VC_CATEGORY_NAME)
     if temp_vc_category is None:
         temp_vc_category = await guild.create_category(TEMP_VC_CATEGORY_NAME)
+
+    ticket_category = discord.utils.get(guild.categories, name="🎫 Tickets")
+    if ticket_category is None:
+        ticket_category = await guild.create_category("🎫 Tickets")
 
     await arrival_category.set_permissions(everyone, view_channel=False)
     await arrival_category.set_permissions(unverified_role, view_channel=True, send_messages=False, read_message_history=True)
@@ -1377,6 +2298,8 @@ async def setup(ctx):
     await restricted_category.set_permissions(unverified_role, view_channel=False)
     await restricted_category.set_permissions(verified_role, view_channel=False)
     await restricted_category.set_permissions(jail_role, view_channel=True, send_messages=False, read_message_history=True)
+
+    await ticket_category.set_permissions(everyone, view_channel=False)
 
     async def get_or_create_text_channel(name, category):
         channel = discord.utils.get(guild.text_channels, name=name)
@@ -1407,12 +2330,12 @@ async def setup(ctx):
     jail_logs_channel = await get_or_create_text_channel("jail-logs", restricted_category)
 
     await get_or_create_voice_channel(JOIN_TO_CREATE_CHANNEL_NAME, island_category)
-    await get_or_create_voice_channel("💨 General VC", island_category)
-    await get_or_create_voice_channel("🌴 Chill VC", island_category)
+    await get_or_create_voice_channel("🔥 Hood VC", island_category)
+    await get_or_create_voice_channel("🎮 Chill VC", island_category)
 
-    await welcome_channel.edit(topic="🌴 Arrival Zone • New users are scanned by TrapAI before entering the island")
+    await welcome_channel.edit(topic="🏘️ Arrival Zone • New members are scanned by TrapAI before entering The Hood")
     await rules_channel.edit(topic="📜 TrapAI server rules and enforcement")
-    await verify_channel.edit(topic="🤖 TrapAI Security Gateway • Click the verify button below to unlock Smokers Island")
+    await verify_channel.edit(topic="🤖 TrapAI Security Gateway • Click the verify button below to enter The Hood")
     await bot_channel.edit(topic="🤖 Use bot commands here")
     await vc_logs_channel.edit(topic="🎤 Voice channel logs")
     await mod_logs_channel.edit(topic="🛡 Moderator actions and security logs")
@@ -1433,21 +2356,79 @@ async def setup(ctx):
     await jail_logs_channel.set_permissions(jail_role, view_channel=False)
 
     embed = discord.Embed(
-        title="✅ Smokers Island Setup Complete",
+        title="✅ The Hood Setup Complete",
         description=(
             "TrapAI setup finished.\n\n"
             "Next steps:\n"
             "1. Move your bot role above the server roles\n"
             "2. Run `,sendverify`\n"
             "3. Run `,rules`\n"
-            "4. Update your `LOG_CHANNELS` IDs to the new channels"
+            "4. Run `,sendtickets` in a support channel\n"
+            "5. Update your `LOG_CHANNELS` IDs to the new channels"
         ),
-        color=discord.Color.green(),
+        color=discord.Color.dark_grey(),
         timestamp=datetime.utcnow()
     )
-    embed.set_footer(text="TrapAI Setup System")
-
+    embed.set_footer(text="TrapAI Setup System • The Hood")
     await ctx.send(embed=embed)
+
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def setupvc(ctx, category_name: str = None):
+    """Create the ➕ Create VC trigger channel in this server.
+    Optionally pass a category name to place it in: ,setupvc "Hood VCs"
+    If omitted, it uses the default TEMP_VC_CATEGORY_NAME category."""
+    guild = ctx.guild
+
+    # Resolve category
+    if category_name:
+        category = discord.utils.get(guild.categories, name=category_name)
+        if category is None:
+            category = await guild.create_category(category_name)
+            await ctx.send(f"📁 Created new category **{category_name}**.")
+    else:
+        category = discord.utils.get(guild.categories, name=TEMP_VC_CATEGORY_NAME)
+        if category is None:
+            category = await guild.create_category(TEMP_VC_CATEGORY_NAME)
+
+    # Check if trigger channel already exists
+    existing = discord.utils.get(guild.voice_channels, name=JOIN_TO_CREATE_CHANNEL_NAME)
+    if existing:
+        await ctx.send(f"✅ The **{JOIN_TO_CREATE_CHANNEL_NAME}** channel already exists: {existing.mention if hasattr(existing, 'mention') else existing.name}\nMove it to your preferred category if needed.")
+        return
+
+    # Create the trigger VC
+    trigger_vc = await guild.create_voice_channel(
+        name=JOIN_TO_CREATE_CHANNEL_NAME,
+        category=category,
+        reason=f"Setup VC trigger by {ctx.author}"
+    )
+
+    embed = discord.Embed(
+        title="✅ Create VC Setup Complete",
+        description=(
+            f"**{JOIN_TO_CREATE_CHANNEL_NAME}** has been created in **{category.name}**.\n\n"
+            "When any member joins that channel:\n"
+            "• A private voice channel is created for them\n"
+            "• A private text chat is created alongside it\n"
+            "• They get full button controls to manage their VC\n"
+            "• Both channels delete automatically when empty\n\n"
+            f"Channel: {trigger_vc.mention if hasattr(trigger_vc, 'mention') else trigger_vc.name}"
+        ),
+        color=discord.Color.dark_grey(),
+        timestamp=datetime.utcnow()
+    )
+    embed.set_footer(text="TrapAI VC System • The Hood")
+    await ctx.send(embed=embed)
+
+    await log(
+        guild,
+        LOG_CHANNELS["vc"],
+        "Create VC Setup",
+        f"Administrator: {ctx.author.mention}\nTrigger Channel: {JOIN_TO_CREATE_CHANNEL_NAME}\nCategory: {category.name}",
+        discord.Color.green()
+    )
 
 
 @bot.command()
@@ -1456,49 +2437,83 @@ async def sendverify(ctx):
     embed = discord.Embed(
         title="🤖 TrapAI Security Gateway",
         description=(
-            "Welcome to **Smokers Island** 🌴💨\n\n"
-            "Before entering the island, your account must pass **TrapAI Security Verification**.\n\n"
+            "Welcome to **The Hood** 🏘️🔥\n\n"
+            "Before entering, your account must pass **TrapAI Security Verification**.\n\n"
             "### Access Requirements\n"
             "• Account must not be restricted\n"
             "• Verification must be completed\n"
             "• Entry is locked until approved\n\n"
-            "Click the button below to begin your scan and unlock the full server."
+            "Click the button below to begin your scan and get access."
         ),
-        color=discord.Color.green(),
+        color=discord.Color.dark_grey(),
         timestamp=datetime.utcnow()
     )
-
     embed.add_field(
         name="🔓 What You Unlock",
         value=(
             "💬 General Chat\n"
             "🎤 Voice Channels\n"
-            "📈 Level System\n"
-            "🔥 Community Access\n"
+            "🔥 Hood Community Access\n"
             "🛡 Protected Server Entry"
         ),
         inline=False
     )
-
     embed.add_field(
         name="⚠ Security Notice",
         value="Unverified users remain locked in the arrival zone until TrapAI approves access.",
         inline=False
     )
-
     if ctx.guild.icon:
         embed.set_thumbnail(url=ctx.guild.icon.url)
-
-    embed.set_footer(text="TrapAI Security • Smokers Island Protection")
-
+    embed.set_footer(text="TrapAI Security • The Hood Protection")
     await ctx.send(embed=embed, view=VerifyView())
+
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def sendtickets(ctx):
+    """Send the ticket panel to the current channel."""
+    embed = discord.Embed(
+        title="🎫 TrapAI Support Tickets",
+        description=(
+            "Need help from staff? Open a private support ticket.\n\n"
+            "```yaml\n"
+            "Ticket System: ACTIVE\n"
+            "Response Time: As soon as possible\n"
+            "Privacy: Staff only\n"
+            "```\n"
+            "Click **Open Ticket** below to create your private ticket channel."
+        ),
+        color=discord.Color.blurple(),
+        timestamp=datetime.utcnow()
+    )
+    embed.add_field(
+        name="📌 Before Opening",
+        value=(
+            "• Describe your issue clearly\n"
+            "• Include screenshots if relevant\n"
+            "• One ticket at a time per user"
+        ),
+        inline=False
+    )
+    if ctx.guild.icon:
+        embed.set_thumbnail(url=ctx.guild.icon.url)
+    embed.set_footer(text="TrapAI Ticket System • The Hood Support")
+    await ctx.send(embed=embed, view=TicketOpenView())
+
+    await log(
+        ctx.guild,
+        LOG_CHANNELS["tickets"],
+        "Ticket Panel Sent",
+        f"Administrator: {ctx.author.mention}\nChannel: {ctx.channel.mention}",
+        discord.Color.blurple()
+    )
 
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def rules(ctx):
     rules_channel = discord.utils.get(ctx.guild.text_channels, name="rules")
-
     if not rules_channel:
         await ctx.send("❌ I couldn't find a channel named **rules**.")
         return
@@ -1506,18 +2521,17 @@ async def rules(ctx):
     embed = discord.Embed(
         title="🤖 TrapAI Server Rules",
         description=(
-            "Welcome to **Smokers Island** 🌴💨\n\n"
-            "Before entering deeper into the island, all members must follow the rules below.\n\n"
+            "Welcome to **The Hood** 🏘️🔥\n\n"
+            "To stay in The Hood, all members must follow the rules below.\n\n"
             "```yaml\n"
             "TrapAI Status: ACTIVE\n"
             "Rule Enforcement: ENABLED\n"
             "Violation Response: WARNING / TIMEOUT / JAIL / BAN\n"
             "```"
         ),
-        color=discord.Color.green(),
+        color=discord.Color.dark_grey(),
         timestamp=datetime.utcnow()
     )
-
     embed.add_field(name="1️⃣ Respect Everyone", value="No harassment, racism, hate speech, threats, or bullying.", inline=False)
     embed.add_field(name="2️⃣ No Spamming", value="Do not flood chats, mass mention, or spam messages, emojis, or reactions.", inline=False)
     embed.add_field(name="3️⃣ No Ads or Links", value="No self-promo, invite links, or outside advertising without staff approval.", inline=False)
@@ -1531,15 +2545,12 @@ async def rules(ctx):
         value="Breaking rules may result in:\n• Warning\n• Timeout\n• Jail\n• Ban",
         inline=False
     )
-
     if ctx.guild.icon:
         embed.set_thumbnail(url=ctx.guild.icon.url)
-
-    embed.set_footer(text="TrapAI Security • Smokers Island Rules")
+    embed.set_footer(text="TrapAI Security • The Hood Rules")
 
     await rules_channel.send(embed=embed)
     await ctx.send(f"✅ TrapAI rules sent to {rules_channel.mention}")
-
     await log(
         ctx.guild,
         LOG_CHANNELS["mod"],
@@ -1549,6 +2560,9 @@ async def rules(ctx):
     )
 
 
+# ============================================================
+# VERIFICATION COMMANDS
+# ============================================================
 @bot.command()
 @commands.has_permissions(manage_roles=True)
 async def verify(ctx, member: discord.Member):
@@ -1559,7 +2573,6 @@ async def verify(ctx, member: discord.Member):
     if jail_role and jail_role in member.roles:
         await ctx.send("❌ That user is jailed and cannot be verified.")
         return
-
     if not verified_role:
         await ctx.send(f"❌ Role **{VERIFIED_ROLE}** was not found.")
         return
@@ -1567,27 +2580,18 @@ async def verify(ctx, member: discord.Member):
     try:
         if unverified_role and unverified_role in member.roles:
             await member.remove_roles(unverified_role, reason=f"Verified by {ctx.author}")
-
         if verified_role not in member.roles:
             await member.add_roles(verified_role, reason=f"Verified by {ctx.author}")
 
         embed = discord.Embed(
-            title="💨 Member Verified",
-            description=f"{member.mention} is now a **Verified Smoker** 🌴🔥",
+            title="✅ Member Verified",
+            description=f"{member.mention} is now a **Hood Member** 🏘️🔥",
             color=discord.Color.green(),
             timestamp=datetime.utcnow()
         )
         embed.set_footer(text=f"Verified by {ctx.author}", icon_url=ctx.author.display_avatar.url)
-
         await ctx.send(embed=embed)
-
-        await log(
-            ctx.guild,
-            LOG_CHANNELS["roles"],
-            "Member Verified",
-            f"Staff: {ctx.author.mention}\nUser: {member.mention}",
-            discord.Color.green()
-        )
+        await log(ctx.guild, LOG_CHANNELS["verification"], "Member Verified", f"Staff: {ctx.author.mention}\nUser: {member.mention}", discord.Color.green())
 
     except discord.Forbidden:
         await ctx.send("❌ I can't manage that member's roles. Move my bot role higher.")
@@ -1608,7 +2612,6 @@ async def unverify(ctx, member: discord.Member):
     try:
         if verified_role and verified_role in member.roles:
             await member.remove_roles(verified_role, reason=f"Unverified by {ctx.author}")
-
         if unverified_role not in member.roles:
             await member.add_roles(unverified_role, reason=f"Unverified by {ctx.author}")
 
@@ -1619,16 +2622,8 @@ async def unverify(ctx, member: discord.Member):
             timestamp=datetime.utcnow()
         )
         embed.set_footer(text=f"Unverified by {ctx.author}", icon_url=ctx.author.display_avatar.url)
-
         await ctx.send(embed=embed)
-
-        await log(
-            ctx.guild,
-            LOG_CHANNELS["roles"],
-            "Member Unverified",
-            f"Staff: {ctx.author.mention}\nUser: {member.mention}",
-            discord.Color.orange()
-        )
+        await log(ctx.guild, LOG_CHANNELS["verification"], "Member Unverified", f"Staff: {ctx.author.mention}\nUser: {member.mention}", discord.Color.orange())
 
     except discord.Forbidden:
         await ctx.send("❌ I can't manage that member's roles. Move my bot role higher.")
@@ -1645,30 +2640,18 @@ async def denyverify(ctx, member: discord.Member, *, reason="Verification denied
     try:
         if verified_role and verified_role in member.roles:
             await member.remove_roles(verified_role, reason=reason)
-
         if unverified_role and unverified_role not in member.roles:
             await member.add_roles(unverified_role, reason=reason)
 
         embed = discord.Embed(
             title="🚫 TrapAI Verification Denied",
-            description=(
-                f"{member.mention} has been moved to restricted access.\n\n"
-                f"**Reason:** {reason}"
-            ),
+            description=f"{member.mention} has been moved to restricted access.\n\n**Reason:** {reason}",
             color=discord.Color.red(),
             timestamp=datetime.utcnow()
         )
         embed.set_footer(text=f"Action by {ctx.author}", icon_url=ctx.author.display_avatar.url)
-
         await ctx.send(embed=embed)
-
-        await log(
-            ctx.guild,
-            LOG_CHANNELS["roles"],
-            "TrapAI Verification Denied",
-            f"Staff: {ctx.author.mention}\nUser: {member.mention}\nReason: {reason}",
-            discord.Color.red()
-        )
+        await log(ctx.guild, LOG_CHANNELS["verification"], "TrapAI Verification Denied", f"Staff: {ctx.author.mention}\nUser: {member.mention}\nReason: {reason}", discord.Color.red())
 
     except discord.Forbidden:
         await ctx.send("❌ I can't manage that member's roles.")
@@ -1676,6 +2659,9 @@ async def denyverify(ctx, member: discord.Member, *, reason="Verification denied
         await ctx.send("❌ Something went wrong while denying verification.")
 
 
+# ============================================================
+# SECURITY COMMANDS
+# ============================================================
 @bot.command()
 @commands.has_permissions(manage_messages=True)
 async def trapwarn(ctx, member: discord.Member, *, reason="Suspicious activity detected"):
@@ -1690,16 +2676,8 @@ async def trapwarn(ctx, member: discord.Member, *, reason="Suspicious activity d
         timestamp=datetime.utcnow()
     )
     embed.set_footer(text=f"Issued by {ctx.author}", icon_url=ctx.author.display_avatar.url)
-
     await ctx.send(embed=embed)
-
-    await log(
-        ctx.guild,
-        LOG_CHANNELS["mod"],
-        "TrapAI Warning Issued",
-        f"Staff: {ctx.author.mention}\nUser: {member.mention}\nReason: {reason}",
-        discord.Color.orange()
-    )
+    await log(ctx.guild, LOG_CHANNELS["mod"], "TrapAI Warning Issued", f"Staff: {ctx.author.mention}\nUser: {member.mention}\nReason: {reason}", discord.Color.orange())
 
 
 @bot.command()
@@ -1724,25 +2702,24 @@ async def trapscan(ctx, member: discord.Member):
     )
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.set_footer(text="TrapAI Security • Live User Analysis")
-
     await ctx.send(embed=embed)
 
 
+# ============================================================
+# JAIL COMMANDS
+# ============================================================
 @bot.command()
 @commands.has_permissions(manage_roles=True)
 async def jail(ctx, member: discord.Member, duration: str, *, reason="No reason provided"):
     if member == ctx.author:
         await ctx.send("❌ You can't jail yourself.")
         return
-
     if member == ctx.guild.owner:
         await ctx.send("❌ You can't jail the server owner.")
         return
-
     if member.top_role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
         await ctx.send("❌ You can't jail someone with the same or higher role than you.")
         return
-
     if member.top_role >= ctx.guild.me.top_role:
         await ctx.send("❌ I can't jail that user because their role is higher than mine.")
         return
@@ -1763,10 +2740,8 @@ async def jail(ctx, member: discord.Member, duration: str, *, reason="No reason 
     try:
         if verified_role and verified_role in member.roles:
             await member.remove_roles(verified_role, reason=f"Jailed by {ctx.author}")
-
         if unverified_role and unverified_role in member.roles:
             await member.remove_roles(unverified_role, reason=f"Jailed by {ctx.author}")
-
         if jail_role not in member.roles:
             await member.add_roles(jail_role, reason=f"Jailed by {ctx.author} | {reason}")
 
@@ -1793,16 +2768,8 @@ async def jail(ctx, member: discord.Member, duration: str, *, reason="No reason 
             timestamp=datetime.utcnow()
         )
         embed.set_footer(text="TrapAI Enforcement • Restriction Active")
-
         await ctx.send(embed=embed)
-
-        await log(
-            ctx.guild,
-            LOG_CHANNELS["jail"],
-            "Member Jailed",
-            f"Moderator: {ctx.author.mention}\nUser: {member.mention}\nDuration: {duration}\nReason: {reason}",
-            discord.Color.red()
-        )
+        await log(ctx.guild, LOG_CHANNELS["jail"], "Member Jailed", f"Moderator: {ctx.author.mention}\nUser: {member.mention}\nDuration: {duration}\nReason: {reason}", discord.Color.red())
 
     except discord.Forbidden:
         await ctx.send("❌ I can't manage that member's roles. Move my bot role higher.")
@@ -1819,14 +2786,12 @@ async def unjail(ctx, member: discord.Member, *, reason="No reason provided"):
     if not jail_role:
         await ctx.send(f"❌ Role **{JAIL_ROLE}** was not found.")
         return
-
     if jail_role not in member.roles:
         await ctx.send("❌ That user is not jailed.")
         return
 
     try:
         await member.remove_roles(jail_role, reason=f"Unjailed by {ctx.author} | {reason}")
-
         if unverified_role and unverified_role not in member.roles:
             await member.add_roles(unverified_role, reason="Returned to unverified after unjail")
 
@@ -1849,16 +2814,8 @@ async def unjail(ctx, member: discord.Member, *, reason="No reason provided"):
             timestamp=datetime.utcnow()
         )
         embed.set_footer(text="TrapAI Enforcement • Access Updated")
-
         await ctx.send(embed=embed)
-
-        await log(
-            ctx.guild,
-            LOG_CHANNELS["jail"],
-            "Member Unjailed",
-            f"Moderator: {ctx.author.mention}\nUser: {member.mention}\nReason: {reason}",
-            discord.Color.green()
-        )
+        await log(ctx.guild, LOG_CHANNELS["jail"], "Member Unjailed", f"Moderator: {ctx.author.mention}\nUser: {member.mention}\nReason: {reason}", discord.Color.green())
 
     except discord.Forbidden:
         await ctx.send("❌ I can't manage that member's roles. Move my bot role higher.")
@@ -1866,17 +2823,14 @@ async def unjail(ctx, member: discord.Member, *, reason="No reason provided"):
         await ctx.send("❌ Something went wrong while unjailing that member.")
 
 
+# ============================================================
+# MODERATION COMMANDS
+# ============================================================
 @bot.command()
 @commands.has_permissions(manage_messages=True)
 async def clear(ctx, amount: int):
     await ctx.channel.purge(limit=amount + 1)
-    await log(
-        ctx.guild,
-        LOG_CHANNELS["mod"],
-        "Messages Cleared",
-        f"Moderator: {ctx.author.mention}\nChannel: {ctx.channel.mention}\nAmount: {amount}",
-        discord.Color.orange()
-    )
+    await log(ctx.guild, LOG_CHANNELS["clears"], "Messages Cleared", f"Moderator: {ctx.author.mention}\nChannel: {ctx.channel.mention}\nAmount: {amount}", discord.Color.orange())
 
 
 @bot.command()
@@ -1884,13 +2838,7 @@ async def clear(ctx, amount: int):
 async def lock(ctx):
     await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=False)
     await ctx.send("🔒 Channel locked")
-    await log(
-        ctx.guild,
-        LOG_CHANNELS["mod"],
-        "Channel Locked",
-        f"Moderator: {ctx.author.mention}\nChannel: {ctx.channel.mention}",
-        discord.Color.red()
-    )
+    await log(ctx.guild, LOG_CHANNELS["mod"], "Channel Locked", f"Moderator: {ctx.author.mention}\nChannel: {ctx.channel.mention}", discord.Color.red())
 
 
 @bot.command()
@@ -1898,26 +2846,14 @@ async def lock(ctx):
 async def unlock(ctx):
     await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=True)
     await ctx.send("🔓 Channel unlocked")
-    await log(
-        ctx.guild,
-        LOG_CHANNELS["mod"],
-        "Channel Unlocked",
-        f"Moderator: {ctx.author.mention}\nChannel: {ctx.channel.mention}",
-        discord.Color.green()
-    )
+    await log(ctx.guild, LOG_CHANNELS["mod"], "Channel Unlocked", f"Moderator: {ctx.author.mention}\nChannel: {ctx.channel.mention}", discord.Color.green())
 
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def restart(ctx):
     await ctx.send("🔄 Restarting bot...")
-    await log(
-        ctx.guild,
-        LOG_CHANNELS["mod"],
-        "Bot Restarted",
-        f"Administrator: {ctx.author.mention}",
-        discord.Color.blurple()
-    )
+    await log(ctx.guild, LOG_CHANNELS["mod"], "Bot Restarted", f"Administrator: {ctx.author.mention}", discord.Color.blurple())
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
@@ -1926,13 +2862,7 @@ async def restart(ctx):
 async def kick(ctx, member: discord.Member, *, reason="No reason provided"):
     await member.kick(reason=reason)
     await ctx.send(f"👢 {member} was kicked.\nReason: {reason}")
-    await log(
-        ctx.guild,
-        LOG_CHANNELS["mod"],
-        "Member Kicked",
-        f"Moderator: {ctx.author.mention}\nUser: {member}\nReason: {reason}",
-        discord.Color.orange()
-    )
+    await log(ctx.guild, LOG_CHANNELS["kicks"], "Member Kicked", f"Moderator: {ctx.author.mention}\nUser: {member}\nReason: {reason}", discord.Color.orange())
 
 
 @bot.command()
@@ -1940,13 +2870,7 @@ async def kick(ctx, member: discord.Member, *, reason="No reason provided"):
 async def ban(ctx, member: discord.Member, *, reason="No reason provided"):
     await member.ban(reason=reason)
     await ctx.send(f"🔨 {member} was banned.\nReason: {reason}")
-    await log(
-        ctx.guild,
-        LOG_CHANNELS["mod"],
-        "Member Banned",
-        f"Moderator: {ctx.author.mention}\nUser: {member}\nReason: {reason}",
-        discord.Color.red()
-    )
+    await log(ctx.guild, LOG_CHANNELS["bans"], "Member Banned", f"Moderator: {ctx.author.mention}\nUser: {member}\nReason: {reason}", discord.Color.red())
 
 
 @bot.command()
@@ -1955,19 +2879,82 @@ async def timeout(ctx, member: discord.Member, minutes: int, *, reason="No reaso
     until = discord.utils.utcnow() + timedelta(minutes=minutes)
     await member.timeout(until, reason=reason)
     await ctx.send(f"⏳ {member} was timed out for {minutes} minute(s).\nReason: {reason}")
-    await log(
-        ctx.guild,
-        LOG_CHANNELS["mod"],
-        "Member Timed Out",
-        f"Moderator: {ctx.author.mention}\nUser: {member}\nDuration: {minutes} minute(s)\nReason: {reason}",
-        discord.Color.gold()
-    )
+    await log(ctx.guild, LOG_CHANNELS["timeouts"], "Member Timed Out", f"Moderator: {ctx.author.mention}\nUser: {member}\nDuration: {minutes} minute(s)\nReason: {reason}", discord.Color.gold())
 
 
 @bot.command()
+@commands.has_permissions(administrator=True)
+async def strip(ctx, member: discord.Member):
+    staff_roles = [
+        role for role in member.roles
+        if role.name != "@everyone" and (
+            role.permissions.administrator or
+            role.permissions.manage_guild or
+            role.permissions.manage_roles or
+            role.permissions.manage_channels
+        )
+    ]
+    if not staff_roles:
+        await ctx.send("❌ That user has no staff roles.")
+        return
+
+    role_names = ", ".join([role.name for role in staff_roles])
+    await member.remove_roles(*staff_roles, reason=f"Stripped by {ctx.author}")
+    await ctx.send(f"✅ Removed all staff roles from {member.mention}")
+    await log(ctx.guild, LOG_CHANNELS["strips"], "Staff Roles Stripped", f"Administrator: {ctx.author.mention}\nUser: {member}\nRemoved Roles: {role_names}", discord.Color.dark_red())
+
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def nuke(ctx):
+    old_channel = ctx.channel
+    channel_name = old_channel.name
+    new_channel = await old_channel.clone(reason=f"Nuked by {ctx.author}")
+    await old_channel.delete()
+    await new_channel.send("💥 Channel nuked.")
+    await log(ctx.guild, LOG_CHANNELS["mod"], "Channel Nuked", f"Administrator: {ctx.author.mention}\nChannel: #{channel_name}", discord.Color.dark_red())
+
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def lockdown(ctx):
+    for channel in ctx.guild.text_channels:
+        await channel.set_permissions(ctx.guild.default_role, send_messages=False)
+    await ctx.send("🔒 Server lockdown activated.")
+    await log(ctx.guild, LOG_CHANNELS["lockdowns"], "Server Lockdown Enabled", f"Administrator: {ctx.author.mention}", discord.Color.red())
+
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def unlockdown(ctx):
+    for channel in ctx.guild.text_channels:
+        await channel.set_permissions(ctx.guild.default_role, send_messages=True)
+    await ctx.send("🔓 Server lockdown removed.")
+    await log(ctx.guild, LOG_CHANNELS["unlockdowns"], "Server Lockdown Removed", f"Administrator: {ctx.author.mention}", discord.Color.green())
+
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def roleall(ctx, role: discord.Role):
+    count = 0
+    for member in ctx.guild.members:
+        try:
+            if role not in member.roles:
+                await member.add_roles(role, reason=f"Roleall used by {ctx.author}")
+                count += 1
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    await ctx.send(f"✅ Gave **{role.name}** to {count} member(s).")
+    await log(ctx.guild, LOG_CHANNELS["roleall"], "Role Given To All", f"Administrator: {ctx.author.mention}\nRole: {role.name}\nMembers Affected: {count}", discord.Color.blue())
+
+
+# ============================================================
+# STATS COMMANDS
+# ============================================================
+@bot.command()
 async def vcstats(ctx, member: discord.Member = None):
     member = member or ctx.author
-
     total_seconds = vc_stats.get(member.id, 0)
     if member.id in vc_join_time:
         total_seconds += int(time.time() - vc_join_time[member.id])
@@ -1983,209 +2970,15 @@ async def vcstats(ctx, member: discord.Member = None):
     embed.add_field(name="User", value=member.mention, inline=False)
     embed.add_field(name="Time in VC", value=f"**{hours}h {minutes}m {sec}s**", inline=False)
     embed.add_field(name="User ID", value=str(member.id), inline=False)
-
-    if member.avatar:
-        embed.set_thumbnail(url=member.avatar.url)
-    else:
-        embed.set_thumbnail(url=member.default_avatar.url)
-
-    embed.set_footer(text=f"Requested by {ctx.author}", icon_url=ctx.author.display_avatar.url)
-    await ctx.send(embed=embed)
-
-
-@bot.command()
-async def level(ctx, member: discord.Member = None):
-    member = member or ctx.author
-
-    user_level = levels.get(member.id, 1)
-    user_xp = xp.get(member.id, 0)
-    required = user_level * 100
-
-    embed = discord.Embed(
-        title="📊 Level Stats",
-        color=discord.Color.blue(),
-        timestamp=datetime.utcnow()
-    )
-    embed.add_field(name="User", value=member.mention, inline=False)
-    embed.add_field(name="Level", value=f"**{user_level}**", inline=True)
-    embed.add_field(name="XP", value=f"**{user_xp}/{required}**", inline=True)
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.set_footer(text=f"Requested by {ctx.author}", icon_url=ctx.author.display_avatar.url)
-
     await ctx.send(embed=embed)
-
-
-@bot.command()
-async def leaderboard(ctx):
-    if not levels:
-        await ctx.send("❌ No leaderboard data yet.")
-        return
-
-    sorted_users = sorted(
-        levels.items(),
-        key=lambda x: (x[1], xp.get(x[0], 0)),
-        reverse=True
-    )
-    top_users = sorted_users[:10]
-
-    medals = {
-        1: "🥇",
-        2: "🥈",
-        3: "🥉"
-    }
-
-    embed = discord.Embed(
-        title="🏆 TrapAI Level Leaderboard",
-        description="Top Smokers rising through the island ranks.",
-        color=discord.Color.gold(),
-        timestamp=datetime.utcnow()
-    )
-
-    lines = []
-
-    for position, (user_id, user_level) in enumerate(top_users, start=1):
-        member = ctx.guild.get_member(user_id)
-        if not member:
-            continue
-
-        user_xp = xp.get(user_id, 0)
-        required_xp = user_level * 100
-        progress_bar = make_bar(user_xp, required_xp)
-
-        role_name = LEVEL_ROLES.get(user_level)
-        role = discord.utils.get(ctx.guild.roles, name=role_name) if role_name else None
-        role_text = role.mention if role else (role_name if role_name else "No role")
-
-        medal = medals.get(position, f"`#{position}`")
-        crown = " 👑" if position == 1 else ""
-
-        lines.append(
-            f"{medal} **{member.display_name}**{crown}\n"
-            f"📈 Level: **{user_level}**\n"
-            f"⭐ XP: `{user_xp}/{required_xp}`\n"
-            f"📊 `{progress_bar}`\n"
-            f"🎖 Role: {role_text}"
-        )
-
-    if not lines:
-        await ctx.send("❌ No leaderboard members found.")
-        return
-
-    embed.description = "\n\n".join(lines)
-
-    if ctx.guild.icon:
-        embed.set_thumbnail(url=ctx.guild.icon.url)
-
-    embed.set_footer(text="TrapAI Security • Smokers Island")
-    await ctx.send(embed=embed)
-
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def strip(ctx, member: discord.Member):
-    staff_roles = [
-        role for role in member.roles
-        if role.name != "@everyone" and (
-            role.permissions.administrator or
-            role.permissions.manage_guild or
-            role.permissions.manage_roles or
-            role.permissions.manage_channels
-        )
-    ]
-
-    if not staff_roles:
-        await ctx.send("❌ That user has no staff roles.")
-        return
-
-    role_names = ", ".join([role.name for role in staff_roles])
-
-    await member.remove_roles(*staff_roles, reason=f"Stripped by {ctx.author}")
-    await ctx.send(f"✅ Removed all staff roles from {member.mention}")
-    await log(
-        ctx.guild,
-        LOG_CHANNELS["mod"],
-        "Staff Roles Stripped",
-        f"Administrator: {ctx.author.mention}\nUser: {member}\nRemoved Roles: {role_names}",
-        discord.Color.dark_red()
-    )
-
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def nuke(ctx):
-    old_channel = ctx.channel
-    channel_name = old_channel.name
-    new_channel = await old_channel.clone(reason=f"Nuked by {ctx.author}")
-    await old_channel.delete()
-    await new_channel.send("💥 Channel nuked.")
-    await log(
-        ctx.guild,
-        LOG_CHANNELS["mod"],
-        "Channel Nuked",
-        f"Administrator: {ctx.author.mention}\nChannel: #{channel_name}",
-        discord.Color.dark_red()
-    )
-
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def lockdown(ctx):
-    for channel in ctx.guild.text_channels:
-        await channel.set_permissions(ctx.guild.default_role, send_messages=False)
-    await ctx.send("🔒 Server lockdown activated.")
-    await log(
-        ctx.guild,
-        LOG_CHANNELS["mod"],
-        "Server Lockdown Enabled",
-        f"Administrator: {ctx.author.mention}",
-        discord.Color.red()
-    )
-
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def unlockdown(ctx):
-    for channel in ctx.guild.text_channels:
-        await channel.set_permissions(ctx.guild.default_role, send_messages=True)
-    await ctx.send("🔓 Server lockdown removed.")
-    await log(
-        ctx.guild,
-        LOG_CHANNELS["mod"],
-        "Server Lockdown Removed",
-        f"Administrator: {ctx.author.mention}",
-        discord.Color.green()
-    )
-
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def roleall(ctx, role: discord.Role):
-    count = 0
-    for member in ctx.guild.members:
-        try:
-            if role not in member.roles:
-                await member.add_roles(role, reason=f"Roleall used by {ctx.author}")
-                count += 1
-        except discord.Forbidden:
-            pass
-        except discord.HTTPException:
-            pass
-
-    await ctx.send(f"✅ Gave **{role.name}** to {count} member(s).")
-    await log(
-        ctx.guild,
-        LOG_CHANNELS["mod"],
-        "Role Given To All",
-        f"Administrator: {ctx.author.mention}\nRole: {role.name}\nMembers Affected: {count}",
-        discord.Color.blue()
-    )
 
 
 @bot.command()
 async def whois(ctx, member: discord.Member = None):
     member = member or ctx.author
     roles = ", ".join(r.mention for r in member.roles if r.name != "@everyone") or "None"
-
     embed = discord.Embed(
         title=f"User Info — {member}",
         color=discord.Color.blue(),
@@ -2194,14 +2987,278 @@ async def whois(ctx, member: discord.Member = None):
     embed.add_field(name="ID", value=str(member.id))
     embed.add_field(name="Created", value=member.created_at.strftime('%Y-%m-%d'))
     embed.add_field(name="Joined", value=member.joined_at.strftime('%Y-%m-%d') if member.joined_at else "Unknown")
-    embed.add_field(name="Level", value=str(levels.get(member.id, 1)))
-    embed.add_field(name="XP", value=f"{xp.get(member.id, 0)}/{levels.get(member.id, 1) * 100}")
     embed.add_field(name="Roles", value=roles, inline=False)
     embed.set_thumbnail(url=member.display_avatar.url)
-
     await ctx.send(embed=embed)
 
 
+# ============================================================
+# WARN SYSTEM
+# ============================================================
+@bot.command()
+@commands.has_permissions(moderate_members=True)
+async def warn(ctx, member: discord.Member, *, reason="No reason provided"):
+    if member == ctx.author:
+        await ctx.send("❌ You can't warn yourself.")
+        return
+
+    guild_warns = WARNINGS.setdefault(ctx.guild.id, {})
+    user_warns = guild_warns.setdefault(member.id, [])
+    user_warns.append({
+        "reason": reason,
+        "moderator": str(ctx.author),
+        "moderator_id": ctx.author.id,
+        "time": datetime.utcnow()
+    })
+    count = len(user_warns)
+
+    embed = discord.Embed(
+        title="⚠ Member Warned",
+        description=f"{member.mention} has received a warning.",
+        color=discord.Color.orange(),
+        timestamp=datetime.utcnow()
+    )
+    embed.add_field(name="Reason", value=reason, inline=False)
+    embed.add_field(name="Total Warnings", value=str(count), inline=False)
+    embed.set_footer(text=f"Issued by {ctx.author}", icon_url=ctx.author.display_avatar.url)
+    await ctx.send(embed=embed)
+    await log(ctx.guild, LOG_CHANNELS["warns"], "Member Warned", f"Moderator: {ctx.author.mention}\nUser: {member.mention}\nReason: {reason}\nTotal Warnings: {count}", discord.Color.orange())
+
+
+@bot.command()
+async def warnings(ctx, member: discord.Member = None):
+    member = member or ctx.author
+    user_warns = WARNINGS.get(ctx.guild.id, {}).get(member.id, [])
+
+    embed = discord.Embed(
+        title=f"⚠ Warnings — {member}",
+        color=discord.Color.orange(),
+        timestamp=datetime.utcnow()
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+
+    if not user_warns:
+        embed.description = "This user has no warnings."
+    else:
+        for index, warn_entry in enumerate(user_warns, start=1):
+            embed.add_field(
+                name=f"Warning #{index}",
+                value=(
+                    f"**Reason:** {warn_entry['reason']}\n"
+                    f"**Moderator:** {warn_entry['moderator']}\n"
+                    f"**Date:** {warn_entry['time'].strftime('%Y-%m-%d %H:%M UTC')}"
+                ),
+                inline=False
+            )
+
+    embed.set_footer(text=f"Requested by {ctx.author}")
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+@commands.has_permissions(moderate_members=True)
+async def clearwarnings(ctx, member: discord.Member):
+    guild_warns = WARNINGS.setdefault(ctx.guild.id, {})
+    count = len(guild_warns.get(member.id, []))
+    guild_warns[member.id] = []
+
+    embed = discord.Embed(
+        title="✅ Warnings Cleared",
+        description=f"Cleared **{count}** warning(s) for {member.mention}.",
+        color=discord.Color.green(),
+        timestamp=datetime.utcnow()
+    )
+    embed.set_footer(text=f"Cleared by {ctx.author}", icon_url=ctx.author.display_avatar.url)
+    await ctx.send(embed=embed)
+    await log(ctx.guild, LOG_CHANNELS["warns"], "Warnings Cleared", f"Moderator: {ctx.author.mention}\nUser: {member.mention}\nWarnings Removed: {count}", discord.Color.green())
+
+
+# ============================================================
+# MUTE SYSTEM
+# ============================================================
+@bot.command()
+@commands.has_permissions(moderate_members=True)
+async def mute(ctx, member: discord.Member, *, reason="No reason provided"):
+    if member == ctx.author:
+        await ctx.send("❌ You can't mute yourself.")
+        return
+    if member.top_role >= ctx.guild.me.top_role:
+        await ctx.send("❌ I can't mute that user because their role is higher than mine.")
+        return
+
+    role = await get_or_create_muted_role(ctx.guild)
+    if role in member.roles:
+        await ctx.send("❌ That user is already muted.")
+        return
+
+    try:
+        await member.add_roles(role, reason=f"Muted by {ctx.author} | {reason}")
+        embed = discord.Embed(
+            title="🔇 Member Muted",
+            description=f"{member.mention} has been muted.",
+            color=discord.Color.red(),
+            timestamp=datetime.utcnow()
+        )
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.set_footer(text=f"Muted by {ctx.author}", icon_url=ctx.author.display_avatar.url)
+        await ctx.send(embed=embed)
+        await log(ctx.guild, LOG_CHANNELS["mutes"], "Member Muted", f"Moderator: {ctx.author.mention}\nUser: {member.mention}\nReason: {reason}", discord.Color.red())
+
+    except discord.Forbidden:
+        await ctx.send("❌ I can't manage that member's roles. Move my bot role higher.")
+
+
+@bot.command()
+@commands.has_permissions(moderate_members=True)
+async def unmute(ctx, member: discord.Member, *, reason="No reason provided"):
+    role = discord.utils.get(ctx.guild.roles, name=MUTED_ROLE)
+    if not role or role not in member.roles:
+        await ctx.send("❌ That user is not muted.")
+        return
+
+    try:
+        await member.remove_roles(role, reason=f"Unmuted by {ctx.author} | {reason}")
+        embed = discord.Embed(
+            title="🔊 Member Unmuted",
+            description=f"{member.mention} has been unmuted.",
+            color=discord.Color.green(),
+            timestamp=datetime.utcnow()
+        )
+        embed.set_footer(text=f"Unmuted by {ctx.author}", icon_url=ctx.author.display_avatar.url)
+        await ctx.send(embed=embed)
+        await log(ctx.guild, LOG_CHANNELS["mutes"], "Member Unmuted", f"Moderator: {ctx.author.mention}\nUser: {member.mention}\nReason: {reason}", discord.Color.green())
+
+    except discord.Forbidden:
+        await ctx.send("❌ I can't manage that member's roles. Move my bot role higher.")
+
+
+# ============================================================
+# NICKNAME / CHANNEL VISIBILITY / SLOWMODE / PURGE / MASSROLE
+# ============================================================
+@bot.command()
+@commands.has_permissions(manage_nicknames=True)
+async def nickname(ctx, member: discord.Member, *, new_nick: str = None):
+    if member.top_role >= ctx.guild.me.top_role:
+        await ctx.send("❌ I can't change that user's nickname because their role is higher than mine.")
+        return
+    try:
+        await member.edit(nick=new_nick, reason=f"Nickname changed by {ctx.author}")
+        embed = discord.Embed(
+            title="✏ Nickname Updated",
+            description=f"{member.mention}'s nickname is now **{new_nick or member.name}**.",
+            color=discord.Color.blurple(),
+            timestamp=datetime.utcnow()
+        )
+        embed.set_footer(text=f"Changed by {ctx.author}", icon_url=ctx.author.display_avatar.url)
+        await ctx.send(embed=embed)
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have permission to change that member's nickname.")
+
+
+@bot.command()
+@commands.has_permissions(manage_channels=True)
+async def hide(ctx):
+    await ctx.channel.set_permissions(ctx.guild.default_role, view_channel=False)
+    await ctx.send(f"👻 {ctx.channel.mention} is now hidden from everyone.")
+    await log(ctx.guild, LOG_CHANNELS["hides"], "Channel Hidden", f"Moderator: {ctx.author.mention}\nChannel: {ctx.channel.mention}", discord.Color.orange())
+
+
+@bot.command()
+@commands.has_permissions(manage_channels=True)
+async def unhide(ctx):
+    await ctx.channel.set_permissions(ctx.guild.default_role, view_channel=True)
+    await ctx.send(f"👀 {ctx.channel.mention} is now visible to everyone.")
+    await log(ctx.guild, LOG_CHANNELS["hides"], "Channel Unhidden", f"Moderator: {ctx.author.mention}\nChannel: {ctx.channel.mention}", discord.Color.green())
+
+
+@bot.command()
+@commands.has_permissions(manage_channels=True)
+async def slowmode(ctx, seconds: int, channel: discord.TextChannel = None):
+    channel = channel or ctx.channel
+    if seconds < 0 or seconds > 21600:
+        await ctx.send("❌ Slowmode must be between 0 and 21600 seconds.")
+        return
+    await channel.edit(slowmode_delay=seconds)
+    if seconds == 0:
+        await ctx.send(f"✅ Slowmode disabled in {channel.mention}.")
+    else:
+        await ctx.send(f"🐌 Slowmode set to **{seconds}s** in {channel.mention}.")
+
+
+@bot.command()
+@commands.has_permissions(manage_messages=True)
+async def purge(ctx, amount: int, member: discord.Member = None):
+    if amount < 1 or amount > 500:
+        await ctx.send("❌ Amount must be between 1 and 500.")
+        return
+
+    def check(msg):
+        if member:
+            return msg.author.id == member.id
+        return True
+
+    deleted = await ctx.channel.purge(limit=amount + 1, check=check)
+    deleted_count = max(len(deleted) - 1, 0)
+
+    confirmation = await ctx.send(f"🧹 Purged **{deleted_count}** message(s)" + (f" from {member.mention}." if member else "."))
+    await confirmation.delete(delay=5)
+
+    await log(
+        ctx.guild,
+        LOG_CHANNELS["purges"],
+        "Messages Purged",
+        f"Moderator: {ctx.author.mention}\nChannel: {ctx.channel.mention}\nAmount: {deleted_count}" + (f"\nFiltered User: {member.mention}" if member else ""),
+        discord.Color.orange()
+    )
+
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def massrole(ctx, role: discord.Role, filter_role: discord.Role = None):
+    if role >= ctx.guild.me.top_role:
+        await ctx.send("❌ I can't assign a role higher than or equal to my own top role.")
+        return
+
+    count = 0
+    for member in ctx.guild.members:
+        if member.bot or role in member.roles:
+            continue
+        if filter_role and filter_role not in member.roles:
+            continue
+        try:
+            await member.add_roles(role, reason=f"Massrole by {ctx.author}")
+            count += 1
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    scope = f"members with {filter_role.mention}" if filter_role else "all members"
+    await ctx.send(f"✅ Gave **{role.name}** to **{count}** {scope}.")
+    await log(ctx.guild, LOG_CHANNELS["massroles"], "Mass Role Added", f"Administrator: {ctx.author.mention}\nRole: {role.name}\nScope: {scope}\nMembers Affected: {count}", discord.Color.blue())
+
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def massunrole(ctx, role: discord.Role, filter_role: discord.Role = None):
+    count = 0
+    for member in ctx.guild.members:
+        if role not in member.roles:
+            continue
+        if filter_role and filter_role not in member.roles:
+            continue
+        try:
+            await member.remove_roles(role, reason=f"Massunrole by {ctx.author}")
+            count += 1
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    scope = f"members with {filter_role.mention}" if filter_role else "all members"
+    await ctx.send(f"✅ Removed **{role.name}** from **{count}** {scope}.")
+    await log(ctx.guild, LOG_CHANNELS["massroles"], "Mass Role Removed", f"Administrator: {ctx.author.mention}\nRole: {role.name}\nScope: {scope}\nMembers Affected: {count}", discord.Color.blue())
+
+
+# ============================================================
+# RUN
+# ============================================================
 token = os.getenv("DISCORD_TOKEN")
 
 if not token:
