@@ -306,7 +306,7 @@ async def log(guild, key_or_id, title, description, color, fields: list = None, 
     if actor:
         embed.set_footer(
             text=f"{guild.name} • Logs  |  Action by {actor} ({actor.id})",
-            icon_url=actor.display_avatar.url if hasattr(actor, "display_avatar") else discord.Embed.Empty
+            icon_url=actor.display_avatar.url if hasattr(actor, "display_avatar") else None
         )
     else:
         embed.set_footer(text=f"{guild.name} • Logs")
@@ -422,7 +422,7 @@ class TicketControlView(discord.ui.View):
 
         await log(
             interaction.guild,
-            LOG_CHANNELS["tickets"],
+            "tickets",
             "Ticket Claimed",
             (
                 f"**Channel:** {channel.mention}\n"
@@ -462,7 +462,7 @@ class TicketControlView(discord.ui.View):
 
         await log(
             interaction.guild,
-            LOG_CHANNELS["tickets"],
+            "tickets",
             "Ticket Unclaimed",
             (
                 f"**Channel:** {channel.mention}\n"
@@ -538,7 +538,7 @@ class TicketControlView(discord.ui.View):
 
         await log(
             guild,
-            LOG_CHANNELS["tickets"],
+            "tickets",
             "Ticket Closed",
             (
                 f"**Channel:** `{channel.name}`\n"
@@ -627,7 +627,7 @@ class TicketControlView(discord.ui.View):
         )
         await log(
             interaction.guild,
-            LOG_CHANNELS["tickets"],
+            "tickets",
             "Ticket Transcript Saved",
             (
                 f"**Channel:** {channel.mention}\n"
@@ -815,7 +815,7 @@ class TicketPriorityModal(discord.ui.Modal, title="🔴 Set Ticket Priority"):
         await interaction.response.send_message(embed=embed)
         await log(
             interaction.guild,
-            LOG_CHANNELS["tickets"],
+            "tickets",
             "Ticket Priority Set",
             (
                 f"**Channel:** {interaction.channel.mention}\n"
@@ -939,7 +939,7 @@ class VerifyView(discord.ui.View):
 
             await log(
                 guild,
-                LOG_CHANNELS["verification"],
+                "verification",
                 "TrapAI Verification Approved",
                 f"User: {member.mention}\nMethod: Verify Button\nStatus: Approved",
                 discord.Color.green()
@@ -978,6 +978,7 @@ TICKET_TYPES = {
     "bug":       ("🐛 Bug Report",         "Report a bot or server bug",           discord.Color.dark_orange()),
     "unban":     ("🔓 Unban Request",      "Request to be unbanned",               discord.Color.dark_red()),
     "staff":     ("📋 Staff Application",  "Apply to join the staff team",         discord.Color.from_rgb(88, 101, 242)),
+    "division":  ("🏛️ Division Application", "Apply to join a division",          discord.Color.dark_teal()),
 }
 
 
@@ -1045,7 +1046,7 @@ async def _create_ticket_channel(guild, member, ticket_key: str):
 
     await log(
         guild,
-        LOG_CHANNELS["tickets"],
+        "tickets",
         "Ticket Opened",
         (
             f"**User:** {member.mention} (`{member.id}`)\n"
@@ -1102,6 +1103,12 @@ class TicketTypeSelect(discord.ui.Select):
                 value="staff",
                 emoji="📋",
                 description="Apply to join the staff team"
+            ),
+            discord.SelectOption(
+                label="Division Application",
+                value="division",
+                emoji="🏛️",
+                description="Apply to join a division"
             ),
         ]
         super().__init__(
@@ -2340,7 +2347,7 @@ class CmdsView(discord.ui.View):
                 "Row 1: 🙋 Claim  ↩️ Unclaim  ➕ Add User  ➖ Remove\n"
                 "Row 2: 🔒 Close  ✏️ Rename  🔴 Priority  📄 Transcript\n"
                 "Row 3: 🔐 Lock  🔓 Unlock\n"
-                "**Categories (7):** General • Report • Appeal • Form a Alliance • Bug • Unban • Staff App"
+                "**Categories (8):** General • Report • Appeal • Form a Alliance • Bug • Unban • Staff App • Division App"
             ),
             inline=False
         )
@@ -2699,7 +2706,7 @@ async def auto_unjail(guild_id: int, user_id: int, delay: int, reason: str = "Ja
             await _remove_jail_overwrites(member)
             await log(
                 guild,
-                LOG_CHANNELS["jail"],
+                "jail",
                 "Member Auto Unjailed",
                 f"User: {member.mention}\nReason: {reason}",
                 discord.Color.green()
@@ -2707,7 +2714,7 @@ async def auto_unjail(guild_id: int, user_id: int, delay: int, reason: str = "Ja
         except discord.Forbidden:
             await log(
                 guild,
-                LOG_CHANNELS["jail"],
+                "jail",
                 "Auto Unjail Failed",
                 f"Could not unjail {member.mention}. Check bot permissions and role position.",
                 discord.Color.red()
@@ -2751,7 +2758,7 @@ async def handle_spam(message):
             await message.channel.send(embed=embed, delete_after=8)
             await log(
                 message.guild,
-                LOG_CHANNELS["mod"],
+                "mod",
                 "Spam Warning Issued",
                 f"User: {message.author.mention}\nWarnings: {warning_count}/{SPAM_WARNING_LIMIT}\nChannel: {message.channel.mention}",
                 discord.Color.orange()
@@ -2776,7 +2783,7 @@ async def handle_spam(message):
                 await message.channel.send(embed=embed)
                 await log(
                     message.guild,
-                    LOG_CHANNELS["mod"],
+                    "mod",
                     "User Auto Timed Out",
                     f"User: {message.author.mention}\nReason: Reached {SPAM_WARNING_LIMIT} spam warnings\nDuration: {SPAM_TIMEOUT_MINUTES} minute(s)\nChannel: {message.channel.mention}",
                     discord.Color.red()
@@ -2784,7 +2791,7 @@ async def handle_spam(message):
             except discord.Forbidden:
                 await log(
                     message.guild,
-                    LOG_CHANNELS["mod"],
+                    "mod",
                     "Auto Timeout Failed",
                     f"Could not timeout {message.author.mention}. Check bot permissions and role position.",
                     discord.Color.red()
@@ -2933,7 +2940,7 @@ async def on_member_join(member):
         reason = hb_guild[member.id]
         try:
             await member.ban(reason=f"Hard-ban re-applied: {reason}")
-            await log(member.guild, LOG_CHANNELS["bans"], "🔴 Hard-Ban Re-Applied",
+            await log(member.guild, "bans", "🔴 Hard-Ban Re-Applied",
                       f"{member.mention} attempted to rejoin but is hard-banned.",
                       discord.Color.dark_red(),
                       fields=[
@@ -2954,7 +2961,7 @@ async def on_member_join(member):
             await member.ban(reason="Anti-raid triggered")
             await log(
                 member.guild,
-                LOG_CHANNELS["raids"],
+                "raids",
                 "Anti-Raid Triggered",
                 "A member was auto-banned by the anti-raid system.",
                 discord.Color.red(),
@@ -2975,7 +2982,7 @@ async def on_member_join(member):
         except discord.Forbidden:
             await log(
                 member.guild,
-                LOG_CHANNELS["mod"],
+                "mod",
                 "Verification Role Failed",
                 f"Could not assign {UNVERIFIED_ROLE} — check bot role position.",
                 discord.Color.red(),
@@ -2995,7 +3002,7 @@ async def on_member_join(member):
 
     await log(
         member.guild,
-        LOG_CHANNELS["joins"],
+        "joins",
         "Member Joined",
         f"{member.mention} just joined **{member.guild.name}**.",
         discord.Color.green(),
@@ -3124,7 +3131,7 @@ async def on_member_remove(member):
     roles = [r.mention for r in member.roles if r.name != "@everyone"]
     await log(
         member.guild,
-        LOG_CHANNELS["leaves"],
+        "leaves",
         "Member Left",
         f"{member.mention} left **{member.guild.name}**.",
         discord.Color.red(),
@@ -3145,7 +3152,7 @@ async def on_member_update(before, after):
     if before.premium_since is None and after.premium_since is not None:
         await log(
             after.guild,
-            LOG_CHANNELS["boost"],
+            "boost",
             "Server Boosted 🚀",
             f"{after.mention} just boosted **{after.guild.name}**!",
             discord.Color.purple(),
@@ -3179,7 +3186,7 @@ async def on_member_update(before, after):
             except (discord.Forbidden, discord.HTTPException):
                 pass
             await log(
-                after.guild, LOG_CHANNELS["mod"],
+                after.guild, "mod",
                 "Protected Role Auto-Stripped",
                 f"{after.mention} was manually given the protected role {role.mention} and it was auto-removed.",
                 discord.Color.dark_red(),
@@ -3213,7 +3220,7 @@ async def on_member_update(before, after):
                 continue  # Already handled above
             await log(
                 after.guild,
-                LOG_CHANNELS["roles"],
+                "roles",
                 "Role Added",
                 None,
                 discord.Color.green(),
@@ -3228,7 +3235,7 @@ async def on_member_update(before, after):
         for role in removed_roles:
             await log(
                 after.guild,
-                LOG_CHANNELS["roles"],
+                "roles",
                 "Role Removed",
                 None,
                 discord.Color.red(),
@@ -3243,7 +3250,7 @@ async def on_member_update(before, after):
     if before.nick != after.nick:
         await log(
             after.guild,
-            LOG_CHANNELS["nicknames"],
+            "nicknames",
             "Nickname Changed",
             None,
             discord.Color.blurple(),
@@ -3260,7 +3267,7 @@ async def on_member_update(before, after):
 async def on_guild_role_create(role):
     await log(
         role.guild,
-        LOG_CHANNELS["role_create"],
+        "role_create",
         "Role Created",
         None,
         discord.Color.green(),
@@ -3277,7 +3284,7 @@ async def on_guild_role_create(role):
 async def on_guild_role_delete(role):
     await log(
         role.guild,
-        LOG_CHANNELS["role_delete"],
+        "role_delete",
         "Role Deleted",
         None,
         discord.Color.red(),
@@ -3311,7 +3318,7 @@ async def on_guild_role_delete(role):
             roles_to_remove = [r for r in actor.roles if not r.is_default() and r < guild.me.top_role]
             if roles_to_remove:
                 await actor.remove_roles(*roles_to_remove, reason="🚨 Anti-nuke: rapid role deletion detected")
-            await log(guild, LOG_CHANNELS["mod"], "🚨 Anti-Nuke Triggered — Role Deletions", None,
+            await log(guild, "mod", "🚨 Anti-Nuke Triggered — Role Deletions", None,
                       discord.Color.red(),
                       fields=[
                           ("⚠️ Action",       "Rapid Role Deletes Detected",                          True),
@@ -3329,7 +3336,7 @@ async def on_guild_channel_create(channel):
     cat = channel.category.name if channel.category else "No category"
     await log(
         channel.guild,
-        LOG_CHANNELS["channel_create"],
+        "channel_create",
         "Channel Created",
         None,
         discord.Color.green(),
@@ -3346,7 +3353,7 @@ async def on_guild_channel_delete(channel):
     cat = channel.category.name if channel.category else "No category"
     await log(
         channel.guild,
-        LOG_CHANNELS["channel_delete"],
+        "channel_delete",
         "Channel Deleted",
         None,
         discord.Color.red(),
@@ -3378,7 +3385,7 @@ async def on_guild_channel_delete(channel):
             roles_to_remove = [r for r in actor.roles if not r.is_default() and r < guild.me.top_role]
             if roles_to_remove:
                 await actor.remove_roles(*roles_to_remove, reason="🚨 Anti-nuke: rapid channel deletion detected")
-            await log(guild, LOG_CHANNELS["mod"], "🚨 Anti-Nuke Triggered — Channel Deletions", None,
+            await log(guild, "mod", "🚨 Anti-Nuke Triggered — Channel Deletions", None,
                       discord.Color.red(),
                       fields=[
                           ("⚠️ Action",       "Rapid Channel Deletes Detected",                          True),
@@ -3408,7 +3415,7 @@ async def on_guild_channel_update(before, after):
         ch_ref = after.mention if hasattr(after, "mention") else after.name
         await log(
             after.guild,
-            LOG_CHANNELS["channel_update"],
+            "channel_update",
             "Channel Updated",
             f"Changes made to {ch_ref}",
             discord.Color.gold(),
@@ -3422,11 +3429,11 @@ async def on_guild_emojis_update(guild, before, after):
     removed = [e for e in before if e not in after]
 
     for emoji in added:
-        await log(guild, LOG_CHANNELS["emoji"], "Emoji Added", None, discord.Color.green(),
+        await log(guild, "emoji", "Emoji Added", None, discord.Color.green(),
                   fields=[("😀 Emoji", f"{emoji} `:{emoji.name}:`", True), ("🆔 ID", str(emoji.id), True)])
 
     for emoji in removed:
-        await log(guild, LOG_CHANNELS["emoji"], "Emoji Removed", None, discord.Color.red(),
+        await log(guild, "emoji", "Emoji Removed", None, discord.Color.red(),
                   fields=[("🗑️ Name", f"`:{emoji.name}:`", True), ("🆔 ID", str(emoji.id), True)])
 
 
@@ -3436,11 +3443,11 @@ async def on_guild_stickers_update(guild, before, after):
     removed = [s for s in before if s not in after]
 
     for sticker in added:
-        await log(guild, LOG_CHANNELS["stickers"], "Sticker Added", None, discord.Color.green(),
+        await log(guild, "stickers", "Sticker Added", None, discord.Color.green(),
                   fields=[("🖼️ Sticker", f"`{sticker.name}`", True), ("🆔 ID", str(sticker.id), True)])
 
     for sticker in removed:
-        await log(guild, LOG_CHANNELS["stickers"], "Sticker Removed", None, discord.Color.red(),
+        await log(guild, "stickers", "Sticker Removed", None, discord.Color.red(),
                   fields=[("🗑️ Name", f"`{sticker.name}`", True), ("🆔 ID", str(sticker.id), True)])
 
 
@@ -3452,7 +3459,7 @@ async def on_message_delete(message):
     attachments = ", ".join(a.filename for a in message.attachments) if message.attachments else "None"
     await log(
         message.guild,
-        LOG_CHANNELS["messages"],
+        "messages",
         "Message Deleted",
         None,
         discord.Color.red(),
@@ -3473,7 +3480,7 @@ async def on_message_edit(before, after):
         return
     await log(
         before.guild,
-        LOG_CHANNELS["messages"],
+        "messages",
         "Message Edited",
         None,
         discord.Color.gold(),
@@ -3494,7 +3501,7 @@ async def on_voice_state_update(member, before, after):
 
     if before.channel is None and after.channel is not None:
         vc_join_time[member.id] = now
-        await log(member.guild, LOG_CHANNELS["vc"], "VC Join", None, discord.Color.blue(),
+        await log(member.guild, "vc", "VC Join", None, discord.Color.blue(),
                   fields=[
                       ("👤 Member",  f"{member.mention} (`{member.id}`)", True),
                       ("🎤 Channel", f"**{after.channel.name}**",         True),
@@ -3508,7 +3515,7 @@ async def on_voice_state_update(member, before, after):
             vc_stats[member.id] = vc_stats.get(member.id, 0) + secs
             h, rem = divmod(secs, 3600); m = rem // 60; s = rem % 60
             duration = f"{h}h {m}m {s}s"
-        await log(member.guild, LOG_CHANNELS["vc"], "VC Left", None, discord.Color.red(),
+        await log(member.guild, "vc", "VC Left", None, discord.Color.red(),
                   fields=[
                       ("👤 Member",    f"{member.mention} (`{member.id}`)", True),
                       ("🎤 Channel",   f"**{before.channel.name}**",        True),
@@ -3520,7 +3527,7 @@ async def on_voice_state_update(member, before, after):
         if joined:
             vc_stats[member.id] = vc_stats.get(member.id, 0) + int(now - joined)
         vc_join_time[member.id] = now
-        await log(member.guild, LOG_CHANNELS["vc"], "VC Moved", None, discord.Color.gold(),
+        await log(member.guild, "vc", "VC Moved", None, discord.Color.gold(),
                   fields=[
                       ("👤 Member", f"{member.mention} (`{member.id}`)", True),
                       ("📤 From",   f"**{before.channel.name}**",        True),
@@ -3627,7 +3634,7 @@ async def on_voice_state_update(member, before, after):
 
         await log(
             guild,
-            LOG_CHANNELS["vc"],
+            "vc",
             "Temporary VC Created",
             f"Owner: {member.mention}\nVC: **{new_vc.name}**\nText Chat: {new_text.mention}",
             discord.Color.green()
@@ -3650,7 +3657,7 @@ async def on_voice_state_update(member, before, after):
                 await before.channel.delete(reason="Temp VC empty")
                 await log(
                     guild,
-                    LOG_CHANNELS["vc"],
+                    "vc",
                     "Temporary VC Deleted",
                     f"VC: **{old_name}** was deleted because it became empty.",
                     discord.Color.orange()
@@ -3691,7 +3698,7 @@ async def on_message(message):
                 await message.delete()
                 await log(
                     message.guild,
-                    LOG_CHANNELS["messages"],
+                    "messages",
                     "AutoMod Deleted Message",
                     f"Author: {message.author}\nChannel: {message.channel.mention}\nContent: {message.content or 'None'}",
                     discord.Color.orange()
@@ -3699,7 +3706,7 @@ async def on_message(message):
             except discord.Forbidden:
                 await log(
                     message.guild,
-                    LOG_CHANNELS["mod"],
+                    "mod",
                     "AutoMod Delete Failed",
                     f"Could not delete a message from {message.author.mention} in {message.channel.mention}. Check permissions.",
                     discord.Color.red()
@@ -3795,9 +3802,9 @@ async def _send_welcome_embeds(channel, member: discord.Member):
     age_str     = discord.utils.format_dt(member.created_at, "R")
 
     def _ordinal(n: int) -> str:
-        s = ["th", "st", "nd", "rd"]
         v = n % 100
-        return f"{n:,}{s[min(v - 20, v, 3) if v > 3 else 0] if v > 20 else s[min(v, 3)]}"
+        suffix = "th" if 11 <= v <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+        return f"{n:,}{suffix}"
 
     banner = discord.Embed(
         description=(
@@ -3979,7 +3986,7 @@ async def setwelcome(ctx, channel: discord.TextChannel = None, *, option: str = 
     try:
         await log(
             ctx.guild,
-            LOG_CHANNELS["mod"],
+            "mod",
             "Auto-Welcome Channel Set",
             f"{ctx.author.mention} configured the welcome channel to {channel.mention}.",
             discord.Color.green(),
@@ -4470,7 +4477,7 @@ async def setupvc(ctx, category_name: str = None):
 
     await log(
         guild,
-        LOG_CHANNELS["vc"],
+        "vc",
         "Create VC Setup",
         f"Administrator: {ctx.author.mention}\nTrigger Channel: {JOIN_TO_CREATE_CHANNEL_NAME}\nCategory: {category.name}",
         discord.Color.green()
@@ -4571,7 +4578,7 @@ async def setupjail(ctx, channel: discord.TextChannel = None):
 
     await log(
         guild,
-        LOG_CHANNELS["jail"],
+        "jail",
         "Jail System Setup",
         (
             f"**Setup By:** {ctx.author.mention} (`{ctx.author.id}`)\n"
@@ -4712,15 +4719,13 @@ async def sendtickets(ctx):
         name="📂 Ticket Categories",
         value=(
             "🎫 **General Support** — General questions or help\n"
-            "💳 **Billing / Purchase** — Payments, refunds\n"
             "🚨 **Report a Member** — Report rule-breaking\n"
             "📝 **Ban / Mute Appeal** — Appeal a mod action\n"
-            "🤝 **Partnership** — Collab requests\n"
+            "🤝 **Form a Alliance** — Alliance or collab requests\n"
             "🐛 **Bug Report** — Report a bot or server bug\n"
             "🔓 **Unban Request** — Request to be unbanned\n"
             "📋 **Staff Application** — Apply to join the staff team\n"
-            "💰 **Trade / Deal** — Trade enquiry or deal verification\n"
-            "❓ **Other** — Anything that doesn't fit above"
+            "🏛️ **Division Application** — Apply to join a division"
         ),
         inline=False
     )
@@ -4740,7 +4745,7 @@ async def sendtickets(ctx):
 
     await log(
         ctx.guild,
-        LOG_CHANNELS["tickets"],
+        "tickets",
         "Ticket Panel Sent",
         f"**Administrator:** {ctx.author.mention}\n**Channel:** {ctx.channel.mention}",
         discord.Color.blurple()
@@ -4781,7 +4786,7 @@ async def claimticket(ctx):
 
     await log(
         ctx.guild,
-        LOG_CHANNELS["tickets"],
+        "tickets",
         "Ticket Claimed",
         (
             f"**Channel:** {channel.mention}\n"
@@ -4830,7 +4835,7 @@ async def closeticket(ctx):
 
     await log(
         guild,
-        LOG_CHANNELS["tickets"],
+        "tickets",
         "Ticket Closed",
         (
             f"**Channel:** `{channel.name}`\n"
@@ -4897,7 +4902,7 @@ async def rules(ctx):
         pass
     await log(
         ctx.guild,
-        LOG_CHANNELS["mod"],
+        "mod",
         "TrapAI Rules Sent",
         f"Administrator: {ctx.author.mention}\nChannel: {ctx.channel.mention}",
         discord.Color.blurple()
@@ -4935,7 +4940,7 @@ async def verify(ctx, member: discord.Member):
         )
         embed.set_footer(text=f"Verified by {ctx.author}", icon_url=ctx.author.display_avatar.url)
         await ctx.send(embed=embed)
-        await log(ctx.guild, LOG_CHANNELS["verification"], "Member Verified", None, discord.Color.green(),
+        await log(ctx.guild, "verification", "Member Verified", None, discord.Color.green(),
                   fields=[("🛡 Staff", f"{ctx.author.mention} (`{ctx.author.id}`)", True), ("✅ User", f"{member.mention} (`{member.id}`)", True)],
                   actor=ctx.author, target=member)
 
@@ -4969,7 +4974,7 @@ async def unverify(ctx, member: discord.Member):
         )
         embed.set_footer(text=f"Unverified by {ctx.author}", icon_url=ctx.author.display_avatar.url)
         await ctx.send(embed=embed)
-        await log(ctx.guild, LOG_CHANNELS["verification"], "Member Unverified", None, discord.Color.orange(),
+        await log(ctx.guild, "verification", "Member Unverified", None, discord.Color.orange(),
                   fields=[("🛡 Staff", f"{ctx.author.mention} (`{ctx.author.id}`)", True), ("🚫 User", f"{member.mention} (`{member.id}`)", True)],
                   actor=ctx.author, target=member)
 
@@ -4999,7 +5004,7 @@ async def denyverify(ctx, member: discord.Member, *, reason="Verification denied
         )
         embed.set_footer(text=f"Action by {ctx.author}", icon_url=ctx.author.display_avatar.url)
         await ctx.send(embed=embed)
-        await log(ctx.guild, LOG_CHANNELS["verification"], "TrapAI Verification Denied", None, discord.Color.red(),
+        await log(ctx.guild, "verification", "TrapAI Verification Denied", None, discord.Color.red(),
                   fields=[("🛡 Staff", f"{ctx.author.mention} (`{ctx.author.id}`)", True), ("🚫 User", f"{member.mention} (`{member.id}`)", True), ("📝 Reason", reason, False)],
                   actor=ctx.author, target=member)
 
@@ -5027,7 +5032,7 @@ async def trapwarn(ctx, member: discord.Member, *, reason="Suspicious activity d
     )
     embed.set_footer(text=f"Issued by {ctx.author}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
-    await log(ctx.guild, LOG_CHANNELS["mod"], "TrapAI Warning Issued", None, discord.Color.orange(),
+    await log(ctx.guild, "mod", "TrapAI Warning Issued", None, discord.Color.orange(),
               fields=[("🛡 Staff", f"{ctx.author.mention} (`{ctx.author.id}`)", True), ("⚠️ User", f"{member.mention} (`{member.id}`)", True), ("📝 Reason", reason, False)],
               actor=ctx.author, target=member)
 
@@ -5219,7 +5224,7 @@ async def trapscan(ctx, member: discord.Member):
 
     await log(
         ctx.guild,
-        LOG_CHANNELS["mod"],
+        "mod",
         "TrapAI Scan",
         f"**Target:** {member.mention} (`{member.id}`)\n**Rating:** {threat_label}\n**Verdict:** {verdict}",
         threat_color,
@@ -5303,7 +5308,7 @@ async def jail(ctx, member: discord.Member, duration: str, *, reason="No reason 
         )
         embed.set_footer(text="TrapAI Enforcement • Restriction Active")
         await ctx.send(embed=embed)
-        await log(ctx.guild, LOG_CHANNELS["jail"], "Member Jailed", None, discord.Color.red(),
+        await log(ctx.guild, "jail", "Member Jailed", None, discord.Color.red(),
                   fields=[
                       ("🛡 Moderator", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
                       ("🔒 User",      f"{member.mention} (`{member.id}`)",          True),
@@ -5359,7 +5364,7 @@ async def unjail(ctx, member: discord.Member, *, reason="No reason provided"):
         )
         embed.set_footer(text="TrapAI Enforcement • Access Updated")
         await ctx.send(embed=embed)
-        await log(ctx.guild, LOG_CHANNELS["jail"], "Member Unjailed", None, discord.Color.green(),
+        await log(ctx.guild, "jail", "Member Unjailed", None, discord.Color.green(),
                   fields=[("🛡 Moderator", f"{ctx.author.mention} (`{ctx.author.id}`)", True), ("🔓 User", f"{member.mention} (`{member.id}`)", True), ("📝 Reason", reason, False)],
                   actor=ctx.author, target=member)
 
@@ -5376,7 +5381,7 @@ async def unjail(ctx, member: discord.Member, *, reason="No reason provided"):
 @commands.has_permissions(manage_messages=True)
 async def clear(ctx, amount: int):
     await ctx.channel.purge(limit=amount + 1)
-    await log(ctx.guild, LOG_CHANNELS["clears"], "Messages Cleared", None, discord.Color.orange(),
+    await log(ctx.guild, "clears", "Messages Cleared", None, discord.Color.orange(),
               fields=[("🛡 Moderator", f"{ctx.author.mention} (`{ctx.author.id}`)", True), ("📍 Channel", ctx.channel.mention, True), ("🧹 Amount", str(amount), True)],
               actor=ctx.author)
 
@@ -5386,7 +5391,7 @@ async def clear(ctx, amount: int):
 async def lock(ctx):
     await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=False)
     await ctx.send("🔒 Channel locked")
-    await log(ctx.guild, LOG_CHANNELS["mod"], "Channel Locked", None, discord.Color.red(),
+    await log(ctx.guild, "mod", "Channel Locked", None, discord.Color.red(),
               fields=[("🛡 Moderator", f"{ctx.author.mention} (`{ctx.author.id}`)", True), ("🔐 Channel", ctx.channel.mention, True)],
               actor=ctx.author)
 
@@ -5396,7 +5401,7 @@ async def lock(ctx):
 async def unlock(ctx):
     await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=True)
     await ctx.send("🔓 Channel unlocked")
-    await log(ctx.guild, LOG_CHANNELS["mod"], "Channel Unlocked", None, discord.Color.green(),
+    await log(ctx.guild, "mod", "Channel Unlocked", None, discord.Color.green(),
               fields=[("🛡 Moderator", f"{ctx.author.mention} (`{ctx.author.id}`)", True), ("🔓 Channel", ctx.channel.mention, True)],
               actor=ctx.author)
 
@@ -5405,7 +5410,7 @@ async def unlock(ctx):
 @commands.has_permissions(administrator=True)
 async def restart(ctx):
     await ctx.send("🔄 Restarting bot...")
-    await log(ctx.guild, LOG_CHANNELS["mod"], "Bot Restarted", None, discord.Color.blurple(),
+    await log(ctx.guild, "mod", "Bot Restarted", None, discord.Color.blurple(),
               fields=[("👑 Administrator", f"{ctx.author.mention} (`{ctx.author.id}`)", True)],
               actor=ctx.author)
     os.execv(sys.executable, [sys.executable] + sys.argv)
@@ -5429,7 +5434,7 @@ async def kick(ctx, member: discord.Member, *, reason="No reason provided"):
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.set_footer(text=f"TrapAI Moderation • {ctx.guild.name}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
-    await log(ctx.guild, LOG_CHANNELS["kicks"], "Member Kicked", None, discord.Color.orange(),
+    await log(ctx.guild, "kicks", "Member Kicked", None, discord.Color.orange(),
               fields=[
                   ("🛡 Moderator", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
                   ("👢 User",      f"{member.mention} (`{member.id}`)",         True),
@@ -5457,7 +5462,7 @@ async def ban(ctx, member: discord.Member, *, reason="No reason provided"):
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.set_footer(text=f"TrapAI Moderation • {ctx.guild.name}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
-    await log(ctx.guild, LOG_CHANNELS["bans"], "Member Banned", None, discord.Color.red(),
+    await log(ctx.guild, "bans", "Member Banned", None, discord.Color.red(),
               fields=[
                   ("🛡 Moderator", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
                   ("🔨 User",      f"{member.mention} (`{member.id}`)",          True),
@@ -5489,7 +5494,7 @@ async def timeout(ctx, member: discord.Member, minutes: int, *, reason="No reaso
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.set_footer(text=f"TrapAI Moderation • {ctx.guild.name}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
-    await log(ctx.guild, LOG_CHANNELS["timeouts"], "Member Timed Out", None, discord.Color.gold(),
+    await log(ctx.guild, "timeouts", "Member Timed Out", None, discord.Color.gold(),
               fields=[
                   ("🛡 Moderator", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
                   ("⏳ User",      f"{member.mention} (`{member.id}`)",          True),
@@ -5527,7 +5532,7 @@ async def strip(ctx, member: discord.Member):
         f"✅ Removed all staff roles from {member.mention}\n"
         f"📸 Snapshot saved — use `,restoreallroles {member.mention}` to restore."
     )
-    await log(ctx.guild, LOG_CHANNELS["strips"], "Staff Roles Stripped", None, discord.Color.dark_red(),
+    await log(ctx.guild, "strips", "Staff Roles Stripped", None, discord.Color.dark_red(),
               fields=[
                   ("👑 Admin",         f"{ctx.author.mention} (`{ctx.author.id}`)", True),
                   ("⚔️ User",          f"{member.mention} (`{member.id}`)",         True),
@@ -5582,7 +5587,7 @@ async def restoreallroles(ctx, member: discord.Member):
     # Clear the snapshot after restore
     ROLE_SNAPSHOTS.get(ctx.guild.id, {}).pop(member.id, None)
 
-    await log(ctx.guild, LOG_CHANNELS["strips"], "Roles Snapshot Restored", None, discord.Color.green(),
+    await log(ctx.guild, "strips", "Roles Snapshot Restored", None, discord.Color.green(),
               fields=[
                   ("👑 Admin",         f"{ctx.author.mention} (`{ctx.author.id}`)", True),
                   ("👤 Member",        f"{member.mention} (`{member.id}`)",         True),
@@ -5624,7 +5629,7 @@ async def nuke(ctx):
 
     await log(
         guild,
-        LOG_CHANNELS["mod"],
+        "mod",
         "Channel Nuked",
         None,
         discord.Color.dark_red(),
@@ -5643,7 +5648,7 @@ async def lockdown(ctx):
     for channel in ctx.guild.text_channels:
         await channel.set_permissions(ctx.guild.default_role, send_messages=False)
     await ctx.send("🔒 Server lockdown activated.")
-    await log(ctx.guild, LOG_CHANNELS["lockdowns"], "Server Lockdown Enabled", "All text channels locked.", discord.Color.red(),
+    await log(ctx.guild, "lockdowns", "Server Lockdown Enabled", "All text channels locked.", discord.Color.red(),
               fields=[("👑 Admin", f"{ctx.author.mention} (`{ctx.author.id}`)", True), ("🔐 Channels Locked", str(len(ctx.guild.text_channels)), True)],
               actor=ctx.author)
 
@@ -5654,7 +5659,7 @@ async def unlockdown(ctx):
     for channel in ctx.guild.text_channels:
         await channel.set_permissions(ctx.guild.default_role, send_messages=True)
     await ctx.send("🔓 Server lockdown removed.")
-    await log(ctx.guild, LOG_CHANNELS["unlockdowns"], "Server Lockdown Removed", "All text channels unlocked.", discord.Color.green(),
+    await log(ctx.guild, "unlockdowns", "Server Lockdown Removed", "All text channels unlocked.", discord.Color.green(),
               fields=[("👑 Admin", f"{ctx.author.mention} (`{ctx.author.id}`)", True), ("🔓 Channels Unlocked", str(len(ctx.guild.text_channels)), True)],
               actor=ctx.author)
 
@@ -5672,7 +5677,7 @@ async def roleall(ctx, role: discord.Role):
             pass
 
     await ctx.send(f"✅ Gave **{role.name}** to {count} member(s).")
-    await log(ctx.guild, LOG_CHANNELS["roleall"], "Role Given To All", None, discord.Color.blue(),
+    await log(ctx.guild, "roleall", "Role Given To All", None, discord.Color.blue(),
               fields=[("👑 Admin", f"{ctx.author.mention} (`{ctx.author.id}`)", True), ("🏷️ Role", f"{role.mention}", True), ("👥 Members Affected", str(count), True)],
               actor=ctx.author)
 
@@ -6275,7 +6280,7 @@ async def role_add(ctx, member: discord.Member, role: discord.Role):
     )
     embed.set_footer(text=f"By {ctx.author}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
-    await log(ctx.guild, LOG_CHANNELS["roles"], "Role Manually Added",
+    await log(ctx.guild, "roles", "Role Manually Added",
               f"**Staff:** {ctx.author.mention}\n**User:** {member.mention}\n**Role:** {role.mention}",
               discord.Color.green())
 
@@ -6299,7 +6304,7 @@ async def role_remove(ctx, member: discord.Member, role: discord.Role):
     )
     embed.set_footer(text=f"By {ctx.author}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
-    await log(ctx.guild, LOG_CHANNELS["roles"], "Role Manually Removed",
+    await log(ctx.guild, "roles", "Role Manually Removed",
               f"**Staff:** {ctx.author.mention}\n**User:** {member.mention}\n**Role:** {role.mention}",
               discord.Color.orange())
 
@@ -6329,7 +6334,7 @@ async def role_create(ctx, name: str, color: str = "#000000", hoist: bool = Fals
     embed.add_field(name="Hoist", value=str(hoist),     inline=True)
     embed.set_footer(text=f"By {ctx.author}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
-    await log(ctx.guild, LOG_CHANNELS["role_create"], "Role Created (cmd)",
+    await log(ctx.guild, "role_create", "Role Created (cmd)",
               f"**Staff:** {ctx.author.mention}\n**Role:** {new_role.mention}\n**Color:** {color}\n**Hoist:** {hoist}",
               discord.Color.green())
 
@@ -6354,7 +6359,7 @@ async def role_delete(ctx, role: discord.Role):
     )
     embed.set_footer(text=f"By {ctx.author}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
-    await log(ctx.guild, LOG_CHANNELS["role_delete"], "Role Deleted (cmd)",
+    await log(ctx.guild, "role_delete", "Role Deleted (cmd)",
               f"**Staff:** {ctx.author.mention}\n**Role Name:** `{name}`",
               discord.Color.red())
 
@@ -6425,7 +6430,7 @@ async def role_color(ctx, role: discord.Role, hex_color: str):
     )
     embed.set_footer(text=f"By {ctx.author}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
-    await log(ctx.guild, LOG_CHANNELS["roles"], "Role Color Changed",
+    await log(ctx.guild, "roles", "Role Color Changed",
               f"**Staff:** {ctx.author.mention}\n**Role:** {role.mention}\n**Old:** `{old_color}`\n**New:** `{new_color}`",
               discord.Color.blurple())
 
@@ -6523,7 +6528,7 @@ async def warn(ctx, member: discord.Member, *, reason="No reason provided"):
     embed.add_field(name="Total Warnings", value=str(count), inline=False)
     embed.set_footer(text=f"Issued by {ctx.author}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
-    await log(ctx.guild, LOG_CHANNELS["warns"], "Member Warned", None, discord.Color.orange(),
+    await log(ctx.guild, "warns", "Member Warned", None, discord.Color.orange(),
               fields=[("🛡 Moderator", f"{ctx.author.mention} (`{ctx.author.id}`)", True), ("⚠️ User", f"{member.mention} (`{member.id}`)", True), ("🔢 Total Warnings", str(count), True), ("📝 Reason", reason, False)],
               actor=ctx.author, target=member)
 
@@ -6575,7 +6580,7 @@ async def clearwarnings(ctx, member: discord.Member):
     )
     embed.set_footer(text=f"Cleared by {ctx.author}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
-    await log(ctx.guild, LOG_CHANNELS["warns"], "Warnings Cleared", None, discord.Color.green(),
+    await log(ctx.guild, "warns", "Warnings Cleared", None, discord.Color.green(),
               fields=[("🛡 Moderator", f"{ctx.author.mention} (`{ctx.author.id}`)", True), ("👤 User", f"{member.mention} (`{member.id}`)", True), ("🗑️ Warnings Removed", str(count), True)],
               actor=ctx.author, target=member)
 
@@ -6609,7 +6614,7 @@ async def mute(ctx, member: discord.Member, *, reason="No reason provided"):
         embed.add_field(name="Reason", value=reason, inline=False)
         embed.set_footer(text=f"Muted by {ctx.author}", icon_url=ctx.author.display_avatar.url)
         await ctx.send(embed=embed)
-        await log(ctx.guild, LOG_CHANNELS["mutes"], "Member Muted", None, discord.Color.red(),
+        await log(ctx.guild, "mutes", "Member Muted", None, discord.Color.red(),
                   fields=[("🛡 Moderator", f"{ctx.author.mention} (`{ctx.author.id}`)", True), ("🔇 User", f"{member.mention} (`{member.id}`)", True), ("📝 Reason", reason, False)],
                   actor=ctx.author, target=member)
 
@@ -6635,7 +6640,7 @@ async def unmute(ctx, member: discord.Member, *, reason="No reason provided"):
         )
         embed.set_footer(text=f"Unmuted by {ctx.author}", icon_url=ctx.author.display_avatar.url)
         await ctx.send(embed=embed)
-        await log(ctx.guild, LOG_CHANNELS["mutes"], "Member Unmuted", None, discord.Color.green(),
+        await log(ctx.guild, "mutes", "Member Unmuted", None, discord.Color.green(),
                   fields=[("🛡 Moderator", f"{ctx.author.mention} (`{ctx.author.id}`)", True), ("🔊 User", f"{member.mention} (`{member.id}`)", True), ("📝 Reason", reason, False)],
                   actor=ctx.author, target=member)
 
@@ -6671,7 +6676,7 @@ async def nickname(ctx, member: discord.Member, *, new_nick: str = None):
 async def hide(ctx):
     await ctx.channel.set_permissions(ctx.guild.default_role, view_channel=False)
     await ctx.send(f"👻 {ctx.channel.mention} is now hidden from everyone.")
-    await log(ctx.guild, LOG_CHANNELS["hides"], "Channel Hidden", None, discord.Color.orange(),
+    await log(ctx.guild, "hides", "Channel Hidden", None, discord.Color.orange(),
               fields=[("🛡 Moderator", f"{ctx.author.mention} (`{ctx.author.id}`)", True), ("👁️ Channel", ctx.channel.mention, True)],
               actor=ctx.author)
 
@@ -6681,7 +6686,7 @@ async def hide(ctx):
 async def unhide(ctx):
     await ctx.channel.set_permissions(ctx.guild.default_role, view_channel=True)
     await ctx.send(f"👀 {ctx.channel.mention} is now visible to everyone.")
-    await log(ctx.guild, LOG_CHANNELS["hides"], "Channel Unhidden", None, discord.Color.green(),
+    await log(ctx.guild, "hides", "Channel Unhidden", None, discord.Color.green(),
               fields=[("🛡 Moderator", f"{ctx.author.mention} (`{ctx.author.id}`)", True), ("👁️ Channel", ctx.channel.mention, True)],
               actor=ctx.author)
 
@@ -6720,7 +6725,7 @@ async def purge(ctx, amount: int, member: discord.Member = None):
 
     await log(
         ctx.guild,
-        LOG_CHANNELS["purges"],
+        "purges",
         "Messages Purged",
         f"Moderator: {ctx.author.mention}\nChannel: {ctx.channel.mention}\nAmount: {deleted_count}" + (f"\nFiltered User: {member.mention}" if member else ""),
         discord.Color.orange()
@@ -6748,7 +6753,7 @@ async def massrole(ctx, role: discord.Role, filter_role: discord.Role = None):
 
     scope = f"members with {filter_role.mention}" if filter_role else "all members"
     await ctx.send(f"✅ Gave **{role.name}** to **{count}** {scope}.")
-    await log(ctx.guild, LOG_CHANNELS["massroles"], "Mass Role Added", None, discord.Color.blue(),
+    await log(ctx.guild, "massroles", "Mass Role Added", None, discord.Color.blue(),
               fields=[("👑 Admin", f"{ctx.author.mention} (`{ctx.author.id}`)", True), ("🏷️ Role", f"{role.mention}", True), ("🎯 Scope", scope, True), ("👥 Affected", str(count), True)],
               actor=ctx.author)
 
@@ -6770,7 +6775,7 @@ async def massunrole(ctx, role: discord.Role, filter_role: discord.Role = None):
 
     scope = f"members with {filter_role.mention}" if filter_role else "all members"
     await ctx.send(f"✅ Removed **{role.name}** from **{count}** {scope}.")
-    await log(ctx.guild, LOG_CHANNELS["massroles"], "Mass Role Removed", None, discord.Color.blue(),
+    await log(ctx.guild, "massroles", "Mass Role Removed", None, discord.Color.blue(),
               fields=[("👑 Admin", f"{ctx.author.mention} (`{ctx.author.id}`)", True), ("🏷️ Role", f"{role.mention}", True), ("🎯 Scope", scope, True), ("👥 Affected", str(count), True)],
               actor=ctx.author)
 
@@ -7120,7 +7125,7 @@ async def backup(ctx, *, label: str = None):
 
     await log(
         ctx.guild,
-        LOG_CHANNELS["mod"],
+        "mod",
         "Server Backup Created",
         f"Administrator: {ctx.author.mention}\nLabel: `{label}`",
         discord.Color.green()
@@ -7216,7 +7221,7 @@ async def restore(ctx, *, label: str):
 
     await log(
         ctx.guild,
-        LOG_CHANNELS["mod"],
+        "mod",
         "Server Restore Started",
         f"Administrator: {ctx.author.mention}\nLabel: `{label}`\nBackup taken: {taken_at} UTC",
         discord.Color.orange()
@@ -7226,7 +7231,7 @@ async def restore(ctx, *, label: str):
 
     await log(
         ctx.guild,
-        LOG_CHANNELS["mod"],
+        "mod",
         "Server Restore Completed",
         f"Administrator: {ctx.author.mention}\nLabel: `{label}`",
         discord.Color.green()
@@ -7256,7 +7261,7 @@ async def deletebackup(ctx, *, label: str):
 
     await log(
         ctx.guild,
-        LOG_CHANNELS["mod"],
+        "mod",
         "Server Backup Deleted",
         f"Administrator: {ctx.author.mention}\nLabel: `{label}`",
         discord.Color.orange()
@@ -7699,7 +7704,7 @@ async def staffpsa(ctx, psa_type: str = "info", *, message: str):
 
     # ── Log ───────────────────────────────────────────────────
     await log(
-        ctx.guild, LOG_CHANNELS["mod"], f"Staff PSA Posted — {label}", None, color,
+        ctx.guild, "mod", f"Staff PSA Posted — {label}", None, color,
         fields=[
             ("🛡 Posted By",  f"{ctx.author.mention} (`{ctx.author.id}`)",           True),
             ("📍 Channel",    ctx.channel.mention,                                    True),
@@ -8048,7 +8053,7 @@ async def task(ctx, priority: str = "medium", assigned: discord.Member = None, *
             pass
 
     await log(
-        ctx.guild, LOG_CHANNELS["mod"], "Staff Task Created", None, discord.Color.blurple(),
+        ctx.guild, "mod", "Staff Task Created", None, discord.Color.blurple(),
         fields=[
             ("🛡 Created By",  f"{ctx.author.mention} (`{ctx.author.id}`)",   True),
             ("👤 Assigned To", assigned.mention if assigned else "Unassigned", True),
@@ -8221,7 +8226,7 @@ class VouchRoleApprovalView(discord.ui.View):
             except (discord.Forbidden, discord.HTTPException):
                 pass
 
-            await log(guild, LOG_CHANNELS["mod"], "Vouch-Role Request Approved", None, discord.Color.green(),
+            await log(guild, "mod", "Vouch-Role Request Approved", None, discord.Color.green(),
                       fields=[
                           ("👤 Member",     f"{member.mention} (`{member.id}`)",         True),
                           ("🏷️ Role",       f"{role.mention}",                           True),
@@ -8258,7 +8263,7 @@ class VouchRoleApprovalView(discord.ui.View):
                     pass
 
             if guild and role:
-                await log(guild, LOG_CHANNELS["mod"], "Vouch-Role Request Rejected", None, discord.Color.red(),
+                await log(guild, "mod", "Vouch-Role Request Rejected", None, discord.Color.red(),
                           fields=[
                               ("👤 Member",     f"{member.mention} (`{member.id}`)" if member else str(pending["member_id"]), True),
                               ("🏷️ Role",       f"{role.mention}",                  True),
@@ -8374,7 +8379,7 @@ async def vouch(ctx, member: discord.Member = None, role: discord.Role = None, *
         confirm.set_footer(text=f"Awaiting owner approval • TrapAI • {ctx.guild.name}")
         await ctx.send(embed=confirm)
 
-        await log(ctx.guild, LOG_CHANNELS["mod"], "Vouch-Role Request Submitted", None, discord.Color.gold(),
+        await log(ctx.guild, "mod", "Vouch-Role Request Submitted", None, discord.Color.gold(),
                   fields=[
                       ("📨 Requester", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
                       ("👤 Member",    f"{member.mention} (`{member.id}`)",          True),
@@ -8408,7 +8413,7 @@ async def vouch(ctx, member: discord.Member = None, role: discord.Role = None, *
     embed.set_footer(text=f"TrapAI Vouch System • {ctx.guild.name}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
 
-    await log(ctx.guild, LOG_CHANNELS["mod"], "Member Vouched", None, discord.Color.green(),
+    await log(ctx.guild, "mod", "Member Vouched", None, discord.Color.green(),
               fields=[
                   ("🛡 By",     f"{ctx.author.mention} (`{ctx.author.id}`)", True),
                   ("✅ For",    f"{member.mention} (`{member.id}`)",           True),
@@ -8449,7 +8454,7 @@ async def unvouch(ctx, member: discord.Member, *, reason: str = "No reason provi
     embed.set_footer(text=f"TrapAI Vouch System • {ctx.guild.name}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
 
-    await log(ctx.guild, LOG_CHANNELS["mod"], "Vouch Removed", None, discord.Color.orange(),
+    await log(ctx.guild, "mod", "Vouch Removed", None, discord.Color.orange(),
               fields=[
                   ("🛡 By",     f"{ctx.author.mention} (`{ctx.author.id}`)", True),
                   ("↩️ From",   f"{member.mention} (`{member.id}`)",          True),
@@ -8560,7 +8565,7 @@ async def vouchconfig(ctx, setting: str = None, value: str = None):
         )
         embed.set_footer(text=f"Set by {ctx.author}", icon_url=ctx.author.display_avatar.url)
         await ctx.send(embed=embed)
-        await log(ctx.guild, LOG_CHANNELS["mod"], "Vouch Threshold Changed", None, discord.Color.blurple(),
+        await log(ctx.guild, "mod", "Vouch Threshold Changed", None, discord.Color.blurple(),
                   fields=[("👑 Admin", f"{ctx.author.mention} (`{ctx.author.id}`)", True), ("🎯 New Threshold", str(n), True)],
                   actor=ctx.author)
     else:
@@ -8634,7 +8639,7 @@ async def protectedrole(ctx, action: str = None, role: discord.Role = None):
         embed.add_field(name="🏷️ Role", value=f"{role.mention} (`{role.id}`)", inline=True)
         embed.set_footer(text=f"Set by {ctx.author} • TrapAI")
         await ctx.send(embed=embed)
-        await log(guild, LOG_CHANNELS["mod"], "Protected Role Added", None, discord.Color.dark_red(),
+        await log(guild, "mod", "Protected Role Added", None, discord.Color.dark_red(),
                   fields=[("🏷️ Role", f"{role.mention} (`{role.id}`)", True),
                            ("👑 By",   f"{ctx.author.mention}",         True)],
                   actor=ctx.author)
@@ -8654,7 +8659,7 @@ async def protectedrole(ctx, action: str = None, role: discord.Role = None):
         embed.add_field(name="🏷️ Role", value=f"{role.mention} (`{role.id}`)", inline=True)
         embed.set_footer(text=f"Set by {ctx.author} • TrapAI")
         await ctx.send(embed=embed)
-        await log(guild, LOG_CHANNELS["mod"], "Protected Role Removed", None, discord.Color.green(),
+        await log(guild, "mod", "Protected Role Removed", None, discord.Color.green(),
                   fields=[("🏷️ Role", f"{role.mention} (`{role.id}`)", True),
                            ("👑 By",   f"{ctx.author.mention}",         True)],
                   actor=ctx.author)
@@ -8791,7 +8796,7 @@ async def cancelvouch(ctx, member: discord.Member = None, role: discord.Role = N
     embed.set_footer(text=f"Cancelled by {ctx.author} • TrapAI • {guild.name}")
     await ctx.send(embed=embed)
 
-    await log(guild, LOG_CHANNELS["mod"], "Vouch Request Cancelled", None, discord.Color.orange(),
+    await log(guild, "mod", "Vouch Request Cancelled", None, discord.Color.orange(),
               fields=[
                   ("👤 Member",       f"{member.mention} (`{member.id}`)", True),
                   ("🏷️ Role",         f"{role.mention}",                   True),
@@ -8941,7 +8946,7 @@ async def autorole(ctx, action: str = None, role: discord.Role = None):
         embed.add_field(name="📋 Total Roles",  value=str(len(auto_roles)),            inline=True)
         embed.set_footer(text=f"Set by {ctx.author} • TrapAI")
         await ctx.send(embed=embed)
-        await log(guild, LOG_CHANNELS["mod"], "Auto-Role Added", None, discord.Color.green(),
+        await log(guild, "mod", "Auto-Role Added", None, discord.Color.green(),
                   fields=[("🏷️ Role", f"{role.mention} (`{role.id}`)", True),
                            ("👑 By",   f"{ctx.author.mention}",         True)],
                   actor=ctx.author)
@@ -8965,7 +8970,7 @@ async def autorole(ctx, action: str = None, role: discord.Role = None):
         embed.add_field(name="📋 Remaining",    value=str(len(auto_roles)),            inline=True)
         embed.set_footer(text=f"Set by {ctx.author} • TrapAI")
         await ctx.send(embed=embed)
-        await log(guild, LOG_CHANNELS["mod"], "Auto-Role Removed", None, discord.Color.orange(),
+        await log(guild, "mod", "Auto-Role Removed", None, discord.Color.orange(),
                   fields=[("🏷️ Role", f"{role.mention} (`{role.id}`)", True),
                            ("👑 By",   f"{ctx.author.mention}",         True)],
                   actor=ctx.author)
@@ -8982,7 +8987,7 @@ async def autorole(ctx, action: str = None, role: discord.Role = None):
         )
         embed.set_footer(text=f"Cleared by {ctx.author} • TrapAI")
         await ctx.send(embed=embed)
-        await log(guild, LOG_CHANNELS["mod"], "Auto-Roles Cleared", None, discord.Color.red(),
+        await log(guild, "mod", "Auto-Roles Cleared", None, discord.Color.red(),
                   fields=[("🗑️ Removed", f"**{count}** role(s)", True),
                            ("👑 By",      f"{ctx.author.mention}", True)],
                   actor=ctx.author)
@@ -9033,7 +9038,7 @@ async def hardban(ctx, user: discord.User, *, reason: str = "No reason provided"
     embed.set_footer(text=f"TrapAI Hard-Ban System • {ctx.guild.name}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
 
-    await log(guild, LOG_CHANNELS["bans"], "Hard-Ban Applied", None, discord.Color.dark_red(),
+    await log(guild, "bans", "Hard-Ban Applied", None, discord.Color.dark_red(),
               fields=[
                   ("🛡 Moderator",        f"{ctx.author.mention} (`{ctx.author.id}`)", True),
                   ("🔴 User",             f"{user} (`{user.id}`)",                      True),
@@ -9083,7 +9088,7 @@ async def unhardban(ctx, user_id: int, *, reason: str = "No reason provided"):
     embed.set_footer(text=f"TrapAI Hard-Ban System • {ctx.guild.name}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
 
-    await log(guild, LOG_CHANNELS["bans"], "Hard-Ban Removed", None, discord.Color.green(),
+    await log(guild, "bans", "Hard-Ban Removed", None, discord.Color.green(),
               fields=[
                   ("🛡 Moderator",     f"{ctx.author.mention} (`{ctx.author.id}`)", True),
                   ("✅ Unbanned User", user_str,                                     True),
@@ -9164,7 +9169,7 @@ async def setinvite(ctx, invite_link: str = None):
     )
     embed.set_footer(text=f"Set by {ctx.author} • TrapAI", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
-    await log(ctx.guild, LOG_CHANNELS["mod"], "Server Invite Link Set", None, discord.Color.green(),
+    await log(ctx.guild, "mod", "Server Invite Link Set", None, discord.Color.green(),
               fields=[
                   ("🛡 Admin",  f"{ctx.author.mention} (`{ctx.author.id}`)", True),
                   ("🔗 Link",   invite_link,                                   True),
@@ -10860,4 +10865,11 @@ async def games(ctx):
     await ctx.send(embed=_games_home_embed(ctx.guild), view=view)
 
 
-bot.run()
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+if not DISCORD_TOKEN:
+    raise SystemExit(
+        "DISCORD_TOKEN is not set. Add it to a .env file in the project root:\n"
+        "DISCORD_TOKEN=your-bot-token-here"
+    )
+
+bot.run(DISCORD_TOKEN)
