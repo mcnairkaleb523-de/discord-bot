@@ -1,0 +1,152 @@
+From de15541f3273d2b223afbeb36ed969155d466961 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 6 Aug 2026 03:32:19 +0000
+Subject: [PATCH] Add media perms role gated by boosting or server tag
+
+Auto-creates a role granting Attach Files/Embed Links/Stream and strips
+those perms from @everyone, then syncs membership on join, boost status
+change, and server-tag ("repping") change, plus a startup backfill sweep.
+---
+ bot (10).py | 84 +++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 84 insertions(+)
+
+diff --git a/bot (10).py b/bot (10).py
+index 5a28424..6e1f0d3 100644
+--- a/bot (10).py	
++++ b/bot (10).py	
+@@ -463,6 +463,7 @@ UNVERIFIED_ROLE = "🚫 Unverified"
+ VERIFIED_ROLE = "✅ Hood Member"
+ JAIL_ROLE = "🔒 Jailed"
+ MUTED_ROLE = "🔇 Muted"
++MEDIA_PERMS_ROLE = "📸 Media Perms"
+ 
+ JOIN_TO_CREATE_CHANNEL_NAME = "➕ Create VC"
+ TEMP_VC_CATEGORY_NAME = "🎤 Private VCs"
+@@ -3112,6 +3113,55 @@ async def get_or_create_muted_role(guild: discord.Guild):
+     return role
+ 
+ 
++async def get_or_create_media_role(guild: discord.Guild):
++    """Role granting Attach Files / Embed Links / Video (stream). Auto-created
++    the first time it's needed — creation also strips those three perms from
++    @everyone so only boosters and members repping the server via Discord's
++    server tag can post images or use their camera."""
++    role = discord.utils.get(guild.roles, name=MEDIA_PERMS_ROLE)
++    if role is None:
++        role = await guild.create_role(
++            name=MEDIA_PERMS_ROLE,
++            permissions=discord.Permissions(attach_files=True, embed_links=True, stream=True),
++            reason="Auto-created media perms role"
++        )
++        everyone = guild.default_role
++        stripped = everyone.permissions
++        stripped.update(attach_files=False, embed_links=False, stream=False)
++        try:
++            await everyone.edit(
++                permissions=stripped,
++                reason="Lock pic/cam perms behind boosting or repping the server"
++            )
++        except discord.HTTPException:
++            pass
++    return role
++
++
++def _reps_server(member: discord.Member) -> bool:
++    pg = member.primary_guild
++    return bool(pg and pg.identity_enabled and pg.id == member.guild.id)
++
++
++def _qualifies_for_media_perms(member: discord.Member) -> bool:
++    return member.premium_since is not None or _reps_server(member)
++
++
++async def _sync_media_perms(member: discord.Member, *, reason: str):
++    if member.bot:
++        return
++    role = await get_or_create_media_role(member.guild)
++    has_role = role in member.roles
++    qualifies = _qualifies_for_media_perms(member)
++    try:
++        if qualifies and not has_role:
++            await member.add_roles(role, reason=reason)
++        elif not qualifies and has_role:
++            await member.remove_roles(role, reason=reason)
++    except (discord.Forbidden, discord.HTTPException):
++        pass
++
++
+ def get_owned_temp_vc(member: discord.Member):
+     """Return the VC if member is the owner OR a VC-mod, else None."""
+     voice = member.voice
+@@ -3603,6 +3653,17 @@ async def _birthday_loop():
+         await asyncio.sleep(60)
+ 
+ 
++async def _media_perms_backfill():
++    """One-time startup sweep so members who were already boosting or repping
++    the server before this feature existed get the media role retroactively."""
++    for guild in bot.guilds:
++        for member in guild.members:
++            try:
++                await _sync_media_perms(member, reason="Startup backfill")
++            except Exception:
++                pass
++
++
+ # ============================================================
+ # EVENTS
+ # ============================================================
+@@ -3644,6 +3705,7 @@ async def on_ready():
+         _startup_resumed = True
+         asyncio.create_task(_autosave_loop())
+         asyncio.create_task(_birthday_loop())
++        asyncio.create_task(_media_perms_backfill())
+ 
+         # Resume jail auto-release timers that were interrupted by a restart
+         now = time.time()
+@@ -3744,6 +3806,9 @@ async def on_member_join(member):
+             except (discord.Forbidden, discord.HTTPException):
+                 pass
+ 
++    # ── Media perms: grant on join if already boosting/repping ────
++    await _sync_media_perms(member, reason="Join sync — boost/server-tag check")
++
+     await log(
+         member.guild,
+         "joins",
+@@ -3890,6 +3955,22 @@ async def on_member_remove(member):
+     await _check_milestone(member.guild)
+ 
+ 
++@bot.event
++async def on_user_update(before, after):
++    # Server-tag ("repping") changed — re-sync media perms in every mutual guild
++    before_pg, after_pg = before.primary_guild, after.primary_guild
++    before_id = before_pg.id if before_pg else None
++    after_id = after_pg.id if after_pg else None
++    before_enabled = bool(before_pg and before_pg.identity_enabled)
++    after_enabled = bool(after_pg and after_pg.identity_enabled)
++    if before_id == after_id and before_enabled == after_enabled:
++        return
++    for guild in bot.guilds:
++        member = guild.get_member(after.id)
++        if member:
++            await _sync_media_perms(member, reason="Server-tag status changed")
++
++
+ @bot.event
+ async def on_member_update(before, after):
+     # Boost detection
+@@ -3908,6 +3989,9 @@ async def on_member_update(before, after):
+             target=after
+         )
+ 
++    if before.premium_since != after.premium_since:
++        await _sync_media_perms(after, reason="Boost status changed")
++
+     if before.roles != after.roles:
+         removed_roles = [role for role in before.roles if role not in after.roles]
+         added_roles   = [role for role in after.roles  if role not in before.roles]
+-- 
+2.43.0
+
