@@ -47,7 +47,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger("verify-oauth")
 
 CLIENT_ID     = os.getenv("1468003600620982458")
-CLIENT_SECRET = os.getenv("cnRK1yZCvfKr8l-Cy9IZuDuXyZhNPco2")
+CLIENT_SECRET = os.getenv("Client_Secret")
 BOT_TOKEN     = os.getenv("Bot Token")
 REDIRECT_URI  = os.getenv("https://discord.com/channels/1523188439980179557/1523274401741803602")
 PORT          = int(os.getenv("PORT", "8080"))
