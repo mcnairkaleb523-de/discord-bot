@@ -405,6 +405,7 @@ def _save_all_state() -> None:
     _save_unmute_vc_channels()
     _save_welcome_config()
     _save_boost_channel()
+    _save_booster_roles()
     _save_economy()
     _save_cooldowns()
     _save_gamble_wins()
@@ -493,6 +494,35 @@ def _resolve_boost_channel(guild: discord.Guild):
         if ch:
             return ch
     return discord.utils.get(guild.text_channels, name=BOOST_CHANNEL)
+
+
+# BOOSTER_ROLES[guild_id][user_id] = role_id — a booster's own custom
+# cosmetic role, managed via ,br. Persisted so it survives restarts and so
+# on_member_update can find + delete it if the member stops boosting.
+BOOSTER_ROLES: dict[int, dict[int, int]] = _load_depth(_load_data("booster_roles", {}), 2)
+
+
+def _save_booster_roles():
+    _save_data("booster_roles", _dump_depth(BOOSTER_ROLES, 2))
+
+
+async def _delete_booster_role(guild: discord.Guild, user_id: int, reason: str):
+    """Remove a member's tracked booster role entry and delete the Discord
+    role itself, if it still exists. Shared by the un-boost handler, member
+    departure cleanup, and ,br delete."""
+    guild_roles = BOOSTER_ROLES.get(guild.id)
+    if not guild_roles:
+        return
+    role_id = guild_roles.pop(user_id, None)
+    if role_id is None:
+        return
+    _save_booster_roles()
+    role = guild.get_role(role_id)
+    if role:
+        try:
+            await role.delete(reason=reason)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
 
 # ── Birthday tracker ──────────────────────────────────────────
 # BIRTHDAYS[guild_id][user_id] = "MM-DD"
@@ -2948,6 +2978,17 @@ class CmdsView(discord.ui.View):
             ),
             inline=False
         )
+        embed.add_field(
+            name="🌟 Booster Role (self-service)",
+            value=(
+                "`,br` — show your custom booster role\n"
+                "`,br create <name>` — create it (boosters only)\n"
+                "`,br name <new name>` — rename it\n"
+                "`,br color <hex>` — recolor it\n"
+                "`,br delete` — remove it"
+            ),
+            inline=False
+        )
         if guild.icon:
             embed.set_thumbnail(url=guild.icon.url)
         embed.set_footer(text=f"TrapAI • {guild.name}  •  Roles")
@@ -4338,6 +4379,8 @@ async def on_invite_delete(invite):
 
 @bot.event
 async def on_member_remove(member):
+    await _delete_booster_role(member.guild, member.id, reason="Member left the server")
+
     roles = [r.mention for r in member.roles if r.name != "@everyone"]
     await log(
         member.guild,
@@ -4397,6 +4440,19 @@ async def on_member_update(before, after):
                 await boost_channel.send(content=after.mention, embed=thank_you_embed)
             except (discord.Forbidden, discord.HTTPException):
                 pass
+
+    # Un-boost detection — clean up their custom booster role, if any
+    elif before.premium_since is not None and after.premium_since is None:
+        await _delete_booster_role(after.guild, after.id, reason="Member stopped boosting")
+        await log(
+            after.guild,
+            "boost",
+            "Server Boost Ended",
+            f"{after.mention} is no longer boosting **{after.guild.name}**.",
+            discord.Color.dark_grey(),
+            fields=[("👤 Member", f"{after.mention} (`{after.id}`)", True)],
+            target=after
+        )
 
     if before.roles != after.roles:
         removed_roles = [role for role in before.roles if role not in after.roles]
@@ -5775,6 +5831,161 @@ async def setboostchannel(ctx, channel: discord.TextChannel = None):
     )
     embed.set_footer(text=f"Set by {ctx.author}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
+
+
+def _br_embed(title, description, color):
+    embed = discord.Embed(title=title, description=description, color=color, timestamp=discord.utils.utcnow())
+    embed.set_footer(text="TrapAI Booster Roles")
+    return embed
+
+
+@bot.command(name="br", aliases=["boosterrole", "boostrole"])
+async def br(ctx, action: str = None, *, arg: str = None):
+    """
+    Manage your custom booster role — a perk for active server boosters.
+    Usage:
+      ,br                    — show your booster role status
+      ,br create <name>      — create your custom role
+      ,br name <new name>    — rename your role
+      ,br color <hex>        — change your role's color (e.g. #ff0055)
+      ,br delete             — remove your custom role
+    """
+    import random
+    member = ctx.author
+    guild = ctx.guild
+    guild_roles = BOOSTER_ROLES.setdefault(guild.id, {})
+    role_id = guild_roles.get(member.id)
+    role = guild.get_role(role_id) if role_id else None
+    if role_id and not role:
+        # Stale entry — role was deleted outside of ,br (e.g. manually in Discord)
+        guild_roles.pop(member.id, None)
+        _save_booster_roles()
+        role_id = None
+
+    is_booster = member.premium_since is not None
+
+    if action is None:
+        embed = discord.Embed(
+            title="🌟 Booster Role",
+            color=role.color if role else discord.Color.gold(),
+            timestamp=discord.utils.utcnow()
+        )
+        embed.add_field(name="🎭 Your Role", value=role.mention if role else "*None yet*", inline=True)
+        if role:
+            embed.add_field(name="🎨 Color", value=f"`#{role.color.value:06x}`", inline=True)
+        embed.add_field(
+            name="📖 Commands",
+            value=(
+                "`,br create <name>` — create your custom role\n"
+                "`,br name <new name>` — rename it\n"
+                "`,br color <hex>` — change its color\n"
+                "`,br delete` — remove it"
+            ),
+            inline=False
+        )
+        if not is_booster:
+            embed.set_footer(text="⚠️ You're not currently boosting — booster roles are a boost perk.")
+        else:
+            embed.set_footer(text="TrapAI Booster Roles")
+        await ctx.send(embed=embed)
+        return
+
+    action = action.lower()
+
+    if not is_booster:
+        await ctx.send("❌ You need to be actively boosting this server to manage a booster role.", delete_after=8)
+        return
+
+    if action == "create":
+        if role:
+            await ctx.send(f"❌ You already have a booster role: {role.mention}. Use `,br name`/`,br color` to edit it.", delete_after=8)
+            return
+        if not arg or not arg.strip():
+            await ctx.send("❌ Give it a name: `,br create <name>`", delete_after=8)
+            return
+        name = arg.strip()[:100]
+        try:
+            new_role = await guild.create_role(
+                name=name,
+                color=discord.Color(random.randint(0, 0xFFFFFF)),
+                permissions=discord.Permissions.none(),
+                reason=f"Booster role for {member} ({member.id})"
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            await ctx.send("❌ I couldn't create a role — check my Manage Roles permission.", delete_after=8)
+            return
+        try:
+            await new_role.edit(position=max(1, guild.me.top_role.position - 1))
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+        try:
+            await member.add_roles(new_role, reason="Booster role created")
+        except (discord.Forbidden, discord.HTTPException):
+            try:
+                await new_role.delete(reason="Cleanup — failed to assign new booster role")
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+            await ctx.send("❌ Created the role but couldn't assign it to you — try again.", delete_after=8)
+            return
+        guild_roles[member.id] = new_role.id
+        _save_booster_roles()
+        await ctx.send(embed=_br_embed("✅ Booster Role Created", f"Created {new_role.mention} and assigned it to you!", new_role.color))
+        return
+
+    if action in ("name", "rename"):
+        if not role:
+            await ctx.send("❌ You don't have a booster role yet. Use `,br create <name>`.", delete_after=8)
+            return
+        if not arg or not arg.strip():
+            await ctx.send("❌ Give it a new name: `,br name <new name>`", delete_after=8)
+            return
+        new_name = arg.strip()[:100]
+        try:
+            await role.edit(name=new_name, reason=f"Booster role renamed by {member}")
+        except (discord.Forbidden, discord.HTTPException):
+            await ctx.send("❌ Couldn't rename your role — check my role position/permissions.", delete_after=8)
+            return
+        await ctx.send(embed=_br_embed("✅ Role Renamed", f"Your booster role is now **{new_name}**.", role.color))
+        return
+
+    if action == "color":
+        if not role:
+            await ctx.send("❌ You don't have a booster role yet. Use `,br create <name>`.", delete_after=8)
+            return
+        if not arg or not arg.strip():
+            await ctx.send("❌ Give a hex color: `,br color #ff0055`", delete_after=8)
+            return
+        hex_str = arg.strip().lstrip("#")
+        try:
+            if len(hex_str) != 6:
+                raise ValueError
+            color_val = int(hex_str, 16)
+        except ValueError:
+            await ctx.send("❌ Invalid hex color. Example: `,br color #ff0055`", delete_after=8)
+            return
+        try:
+            await role.edit(color=discord.Color(color_val), reason=f"Booster role recolored by {member}")
+        except (discord.Forbidden, discord.HTTPException):
+            await ctx.send("❌ Couldn't recolor your role — check my role position/permissions.", delete_after=8)
+            return
+        await ctx.send(embed=_br_embed("✅ Color Updated", f"Your booster role color is now `#{color_val:06x}`.", discord.Color(color_val)))
+        return
+
+    if action == "delete":
+        if not role:
+            await ctx.send("❌ You don't have a booster role to delete.", delete_after=8)
+            return
+        try:
+            await role.delete(reason=f"Booster role deleted by {member}")
+        except (discord.Forbidden, discord.HTTPException):
+            await ctx.send("❌ Couldn't delete your role — check my role position/permissions.", delete_after=8)
+            return
+        guild_roles.pop(member.id, None)
+        _save_booster_roles()
+        await ctx.send(embed=_br_embed("🗑️ Role Deleted", "Your booster role has been removed.", discord.Color.red()))
+        return
+
+    await ctx.send("❌ Unknown action. Use `,br create`, `,br name`, `,br color`, or `,br delete`.", delete_after=8)
 
 
 @bot.command()
