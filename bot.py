@@ -414,6 +414,7 @@ def _save_all_state() -> None:
     _save_giveaways()
     _save_chat_stats()
     _save_vc_stats()
+    _save_temp_vcs()
     _save_birthdays()
     _save_birthday_channels()
     _save_birthday_timezones()
@@ -610,12 +611,24 @@ VC_STATS: dict[int, dict[int, int]] = _load_depth(_load_data("vc_stats", {}), 2)
 # in progress, which then gets folded into VC_STATS when it ends.
 vc_join_time = {}
 
-temp_vc_owners = {}
-temp_vc_text_channels = {}
+# Persisted (not just in-memory) — without this, a bot restart while a temp
+# VC still has people in it forgets the channel was ever "temp," so the
+# empty-channel auto-delete never fires for it again and it's orphaned
+# forever. See _sweep_temp_vcs() for the startup pass that also catches VCs
+# that emptied out entirely while the bot was offline.
+temp_vc_owners = _load_depth(_load_data("temp_vc_owners", {}), 1)
+temp_vc_text_channels = _load_depth(_load_data("temp_vc_text_channels", {}), 1)
 # vc_banned[vc_id] = {user_id, ...}  — users explicitly banned from a VC
-vc_banned = {}
+vc_banned = {int(k): set(v) for k, v in _load_data("vc_banned", {}).items()}
 # vc_mods[vc_id] = {user_id, ...}  — users with VC-mod privileges
-vc_mods = {}
+vc_mods = {int(k): set(v) for k, v in _load_data("vc_mods", {}).items()}
+
+
+def _save_temp_vcs():
+    _save_data("temp_vc_owners", _dump_depth(temp_vc_owners, 1))
+    _save_data("temp_vc_text_channels", _dump_depth(temp_vc_text_channels, 1))
+    _save_data("vc_banned", {str(vid): list(users) for vid, users in vc_banned.items()})
+    _save_data("vc_mods", {str(vid): list(users) for vid, users in vc_mods.items()})
 
 # jailed_users[(guild_id, user_id)] = asyncio.Task — the pending auto_unjail
 # timer. Keyed by (guild_id, user_id), NOT just user_id, so jailing the same
@@ -3456,6 +3469,27 @@ def get_strictly_owned_vc(member: discord.Member):
     return channel
 
 
+async def _sweep_temp_vcs():
+    """Startup-only pass over persisted temp VCs. Catches two things a
+    running bot handles live via on_voice_state_update but a restart can't:
+    channels that were deleted (manually, or the guild is gone) while the
+    bot was offline, and channels that sat empty the whole time — nobody
+    was around to trigger the leave event that would've cleaned them up."""
+    for vc_id in list(temp_vc_owners.keys()):
+        channel = bot.get_channel(vc_id)
+        if channel is None or len(channel.members) == 0:
+            if channel is not None:
+                try:
+                    await channel.delete(reason="Temp VC empty (cleaned up on startup)")
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+            temp_vc_owners.pop(vc_id, None)
+            temp_vc_text_channels.pop(vc_id, None)
+            vc_banned.pop(vc_id, None)
+            vc_mods.pop(vc_id, None)
+    _save_temp_vcs()
+
+
 async def send_vc_control_panel(channel, owner, voice_channel):
     embed = discord.Embed(
         title="🎛 TrapAI VC Control Panel",
@@ -4103,6 +4137,8 @@ async def on_ready():
 
             asyncio.create_task(_resume_giveaway())
         _save_giveaways()
+
+        await _sweep_temp_vcs()
 
     print(f"Logged in as {bot.user}")
 
