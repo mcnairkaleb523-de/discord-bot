@@ -83,16 +83,170 @@ for _name, _val in (
         )
 
 
+# Plain (non-f-string) constant — its braces are literal CSS/JS syntax, never
+# interpreted by Python, so nothing here needs escaping. _page() interpolates
+# this whole block in as one variable rather than writing CSS/JS directly
+# inside an f-string, which is what keeps that f-string itself brace-free.
+_STYLE_AND_SCRIPT = """
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; padding: 1rem; position: relative; overflow-x: hidden;
+    display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(circle at top, #23252b, #131418 70%);
+    color: #fff; font-family: 'Inter', -apple-system, "Segoe UI", sans-serif;
+  }
+  .orbs { position: fixed; inset: 0; overflow: hidden; z-index: 0; pointer-events: none; }
+  .orb { position: absolute; border-radius: 50%; filter: blur(70px); opacity: .35; }
+  .orb1 { width: 340px; height: 340px; top: -100px; left: -80px; animation: drift1 18s ease-in-out infinite alternate; }
+  .orb2 { width: 280px; height: 280px; bottom: -90px; right: -60px; animation: drift2 22s ease-in-out infinite alternate; }
+  .orb3 { width: 220px; height: 220px; bottom: 20%; left: 60%; animation: drift3 16s ease-in-out infinite alternate; }
+  body.ok .orb1 { background: #5865F2; } body.ok .orb2 { background: #57F287; } body.ok .orb3 { background: #FEE75C; }
+  body.err .orb1 { background: #ED4245; } body.err .orb2 { background: #EE7C43; } body.err .orb3 { background: #ED4245; }
+  @keyframes drift1 { to { transform: translate(60px, 40px) scale(1.15); } }
+  @keyframes drift2 { to { transform: translate(-50px, -30px) scale(1.1); } }
+  @keyframes drift3 { to { transform: translate(-40px, 50px) scale(.9); } }
+
+  .card {
+    position: relative; z-index: 1; max-width: 460px; width: calc(100% - 2rem);
+    padding: 2.75rem 2.5rem; border-radius: 20px; text-align: center;
+    background: rgba(24, 25, 29, .92); backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, .06);
+    box-shadow: 0 25px 70px rgba(0, 0, 0, .55), 0 0 0 1px rgba(255, 255, 255, .03) inset;
+    animation: cardIn .6s cubic-bezier(.16, 1, .3, 1) both;
+  }
+  #confetti { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5; }
+
+  .avatar-wrap { position: relative; width: 88px; height: 88px; margin: 0 auto 1.1rem;
+                 animation: popIn .5s .1s cubic-bezier(.34, 1.56, .64, 1) both; }
+  .icon { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; display: block;
+          border: 3px solid var(--accent); box-shadow: 0 0 0 6px var(--accent-soft), 0 0 30px var(--accent-soft); }
+  .icon-fallback { display: flex; align-items: center; justify-content: center; font-size: 2.2rem; background: #23272a; }
+  .badge { position: absolute; bottom: -2px; right: -2px; width: 30px; height: 30px; border-radius: 50%;
+           background: var(--accent); color: #0b0b0d; display: flex; align-items: center; justify-content: center;
+           font-weight: 800; font-size: 1rem; border: 3px solid #1e1f24; transform: scale(0);
+           animation: popIn .4s .4s cubic-bezier(.34, 1.56, .64, 1) both; }
+
+  .server-name { color: #8e9297; font-size: .8rem; letter-spacing: .05em; text-transform: uppercase; margin-bottom: .4rem; }
+  h1 { margin: 0 0 .6rem; font-size: 1.6rem; font-weight: 800; letter-spacing: -.02em;
+       color: #fff; text-shadow: 0 1px 3px rgba(0, 0, 0, .4); }
+  p { color: #a7abb3; line-height: 1.6; font-size: .95rem; margin: 0 0 1rem; }
+
+  .steps { list-style: none; padding: 0; margin: 1.1rem 0; text-align: left; display: flex; flex-direction: column; gap: .5rem; }
+  .step { display: flex; align-items: center; gap: .6rem; background: rgba(255, 255, 255, .04);
+          border: 1px solid rgba(255, 255, 255, .06); border-radius: 10px; padding: .55rem .8rem;
+          font-size: .85rem; color: #d4d6da; opacity: 0; transform: translateY(8px); animation: stepIn .45s ease forwards; }
+  .step:nth-child(1) { animation-delay: .5s; } .step:nth-child(2) { animation-delay: .65s; } .step:nth-child(3) { animation-delay: .8s; }
+  .step-icon { width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+               font-size: .7rem; font-weight: 800; flex-shrink: 0; }
+  .step.done .step-icon { background: #57F287; color: #0b0b0d; }
+  .step.pending .step-icon { background: #4f4f57; color: #dcddde; }
+
+  .stats { display: flex; gap: .5rem; justify-content: center; flex-wrap: wrap; margin: 1rem 0;
+           opacity: 0; transform: translateY(8px); animation: stepIn .45s .9s ease forwards; }
+  .stat { background: rgba(255, 255, 255, .05); border: 1px solid rgba(255, 255, 255, .07);
+          border-radius: 20px; padding: .4rem 1rem; font-size: .78rem; color: #dcddde; }
+
+  .btn { display: inline-flex; align-items: center; gap: .4rem; margin-top: .6rem;
+         background: linear-gradient(135deg, var(--accent), var(--accent) 60%, #ffffff22);
+         color: #0b0b0d; text-decoration: none; font-weight: 700; padding: .75rem 1.6rem;
+         border-radius: 10px; font-size: .9rem; box-shadow: 0 8px 24px var(--accent-soft);
+         transition: transform .2s ease, box-shadow .2s ease; opacity: 0; animation: stepIn .45s 1.05s ease forwards; }
+  .btn:hover { transform: translateY(-3px); box-shadow: 0 12px 30px var(--accent-soft); }
+  .btn .arrow { transition: transform .2s ease; }
+  .btn:hover .arrow { transform: translateX(4px); }
+
+  .footer { margin-top: 1.4rem; font-size: .7rem; color: #5c5f66; letter-spacing: .02em; }
+
+  @keyframes cardIn { from { opacity: 0; transform: translateY(16px) scale(.97); } to { opacity: 1; transform: none; } }
+  @keyframes popIn { to { transform: scale(1); } }
+  @keyframes stepIn { to { opacity: 1; transform: translateY(0); } }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition: none !important; }
+    .orb { animation: none !important; }
+  }
+</style>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  if (!document.body.classList.contains('ok')) return;
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  var canvas = document.getElementById('confetti');
+  if (!canvas) return;
+  var ctx = canvas.getContext('2d');
+  function resize() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+  resize();
+  window.addEventListener('resize', resize);
+  var colors = ['#5865F2', '#57F287', '#FEE75C', '#EB459E', '#ffffff'];
+  var particles = [];
+  for (var i = 0; i < 130; i++) {
+    particles.push({
+      x: Math.random() * canvas.width,
+      y: -20 - Math.random() * canvas.height * 0.5,
+      w: 6 + Math.random() * 6,
+      h: 8 + Math.random() * 10,
+      color: colors[Math.floor(Math.random() * colors.length)],
+      speed: 2 + Math.random() * 3,
+      drift: (Math.random() - 0.5) * 2,
+      rot: Math.random() * 360,
+      rotSpeed: (Math.random() - 0.5) * 10,
+      opacity: 1
+    });
+  }
+  var start = Date.now();
+  function frame() {
+    var elapsed = Date.now() - start;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    var alive = false;
+    particles.forEach(function (p) {
+      p.y += p.speed;
+      p.x += p.drift;
+      p.rot += p.rotSpeed;
+      if (elapsed > 2200) p.opacity -= 0.03;
+      if (p.opacity > 0 && p.y < canvas.height + 30) alive = true;
+      if (p.opacity <= 0) return;
+      ctx.save();
+      ctx.globalAlpha = Math.max(p.opacity, 0);
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.rot * Math.PI / 180);
+      ctx.fillStyle = p.color;
+      ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h);
+      ctx.restore();
+    });
+    if (alive) {
+      requestAnimationFrame(frame);
+    } else {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+  }
+  requestAnimationFrame(frame);
+});
+</script>
+"""
+
+
 def _page(title: str, message: str, ok: bool = True, *, guild_name: str = None,
           guild_icon_url: str = None, guild_id: str = None, role_name: str = None,
-          member_count: int = None) -> str:
-    color = "#2ecc71" if ok else "#e74c3c"
+          member_count: int = None, steps: list = None) -> str:
+    color = "#57F287" if ok else "#ED4245"
+    accent_style = f"<style>:root {{ --accent: {color}; --accent-soft: {color}33; }}</style>"
 
     icon_html = (
         f'<img class="icon" src="{guild_icon_url}" alt="">' if guild_icon_url
         else '<div class="icon icon-fallback">🌐</div>'
     )
+    icon_html = f'<div class="avatar-wrap">{icon_html}<div class="badge">{"✓" if ok else "✕"}</div></div>'
+
     server_line = f'<div class="server-name">{guild_name}</div>' if guild_name else ""
+
+    steps_html = ""
+    if steps:
+        items = "".join(
+            f'<li class="step {"done" if done else "pending"}">'
+            f'<span class="step-icon">{"✓" if done else "✕"}</span>{label}</li>'
+            for done, label in steps
+        )
+        steps_html = f'<ul class="steps">{items}</ul>'
 
     stats = []
     if member_count:
@@ -102,42 +256,38 @@ def _page(title: str, message: str, ok: bool = True, *, guild_name: str = None,
     stats_html = f'<div class="stats">{"".join(stats)}</div>' if stats else ""
 
     button_html = (
-        f'<a class="btn" href="https://discord.com/channels/{guild_id}" target="_blank">Return to Discord →</a>'
+        f'<a class="btn" href="https://discord.com/channels/{guild_id}" target="_blank">'
+        f'Return to Discord <span class="arrow">→</span></a>'
         if ok and guild_id else ""
     )
 
+    confetti_html = '<canvas id="confetti"></canvas>' if ok else ""
+
     return f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>{title}</title>
-<style>
-  * {{ box-sizing: border-box; }}
-  body {{ background: radial-gradient(circle at top, #2c2f36, #17181c 65%); color:#fff;
-          font-family: -apple-system, "Segoe UI", sans-serif;
-          display:flex; align-items:center; justify-content:center; height:100vh; margin:0; }}
-  .card {{ background:#2c2f33; padding:2.5rem 3rem; border-radius:16px; text-align:center;
-           border-top: 4px solid {color}; max-width: 440px;
-           box-shadow: 0 20px 60px rgba(0,0,0,.45); }}
-  .icon {{ width:72px; height:72px; border-radius:50%; object-fit:cover; margin:0 auto 1rem;
-           border: 3px solid {color}; display:block; }}
-  .icon-fallback {{ display:flex; align-items:center; justify-content:center; font-size:2rem;
-                     background:#23272a; }}
-  .server-name {{ color:#8e9297; font-size:.85rem; letter-spacing:.03em; text-transform:uppercase;
-                   margin-bottom:.4rem; }}
-  h1 {{ margin:0 0 .6rem; font-size:1.5rem; }}
-  p {{ color:#b9bbbe; line-height:1.55; margin:0 0 1rem; }}
-  .stats {{ display:flex; gap:.6rem; justify-content:center; flex-wrap:wrap; margin: 1rem 0; }}
-  .stat {{ background:#23272a; border-radius:20px; padding:.35rem .9rem; font-size:.8rem; color:#dcddde; }}
-  .btn {{ display:inline-block; margin-top:.5rem; background:{color}; color:#111; text-decoration:none;
-          font-weight:600; padding:.7rem 1.4rem; border-radius:8px; transition: transform .15s ease; }}
-  .btn:hover {{ transform: translateY(-2px); }}
-</style></head>
-<body><div class="card">
-  {icon_html}
-  {server_line}
-  <h1>{title}</h1>
-  <p>{message}</p>
-  {stats_html}
-  {button_html}
-</div></body></html>"""
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+{accent_style}
+{_STYLE_AND_SCRIPT}
+</head>
+<body class="{'ok' if ok else 'err'}">
+  <div class="orbs"><span class="orb orb1"></span><span class="orb orb2"></span><span class="orb orb3"></span></div>
+  <div class="card">
+    {icon_html}
+    {server_line}
+    <h1>{title}</h1>
+    <p>{message}</p>
+    {steps_html}
+    {stats_html}
+    {button_html}
+    <div class="footer">Secured by Discord OAuth2 • TrapAI</div>
+  </div>
+  {confetti_html}
+</body></html>"""
 
 
 async def _exchange_code(session: ClientSession, code: str) -> dict | None:
@@ -255,11 +405,12 @@ async def handle_callback(request: web.Request) -> web.Response:
         guild_icon = _guild_icon_url(origin_guild_id, guild_info.get("icon")) if guild_info else None
         member_count = guild_info.get("approximate_member_count") if guild_info else None
 
-        def page(title, message, ok=True, role_name=None):
+        def page(title, message, ok=True, role_name=None, steps=None):
             return _page(
                 title, message, ok,
                 guild_name=guild_name, guild_icon_url=guild_icon,
                 guild_id=origin_guild_id, role_name=role_name, member_count=member_count,
+                steps=steps,
             )
 
         error = request.query.get("error")
@@ -332,11 +483,19 @@ async def handle_callback(request: web.Request) -> web.Response:
         await _post_log_embed(session, log_channel_id, embed)
 
     extra = " You've also been added to our backup server, so you won't lose your place if this one ever goes away." if joined_backup else ""
+    steps = [
+        (True, "Discord identity confirmed"),
+        (role_granted, "Verified role granted" if role_granted else "Verified role not found on server"),
+    ]
+    if backup_guild_id:
+        steps.append((joined_backup, "Added to backup server" if joined_backup else "Couldn't join backup server"))
+
     return web.Response(
         text=page(
             "You're Verified! ✅",
             f"Welcome, {username} — you now have full access back in Discord.{extra} You can close this tab.",
             role_name=VERIFIED_ROLE_NAME if role_granted else None,
+            steps=steps,
         ),
         content_type="text/html", status=200,
     )
