@@ -83,19 +83,61 @@ for _name, _val in (
         )
 
 
-def _page(title: str, message: str, ok: bool = True) -> str:
+def _page(title: str, message: str, ok: bool = True, *, guild_name: str = None,
+          guild_icon_url: str = None, guild_id: str = None, role_name: str = None,
+          member_count: int = None) -> str:
     color = "#2ecc71" if ok else "#e74c3c"
+
+    icon_html = (
+        f'<img class="icon" src="{guild_icon_url}" alt="">' if guild_icon_url
+        else '<div class="icon icon-fallback">🌐</div>'
+    )
+    server_line = f'<div class="server-name">{guild_name}</div>' if guild_name else ""
+
+    stats = []
+    if member_count:
+        stats.append(f'<div class="stat">👥 {member_count:,} members</div>')
+    if role_name:
+        stats.append(f'<div class="stat">🏷️ {role_name}</div>')
+    stats_html = f'<div class="stats">{"".join(stats)}</div>' if stats else ""
+
+    button_html = (
+        f'<a class="btn" href="https://discord.com/channels/{guild_id}" target="_blank">Return to Discord →</a>'
+        if ok and guild_id else ""
+    )
+
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>{title}</title>
 <style>
-  body {{ background:#23272a; color:#fff; font-family: -apple-system, Segoe UI, sans-serif;
+  * {{ box-sizing: border-box; }}
+  body {{ background: radial-gradient(circle at top, #2c2f36, #17181c 65%); color:#fff;
+          font-family: -apple-system, "Segoe UI", sans-serif;
           display:flex; align-items:center; justify-content:center; height:100vh; margin:0; }}
-  .card {{ background:#2c2f33; padding:2.5rem 3rem; border-radius:12px; text-align:center;
-           border-top: 4px solid {color}; max-width: 420px; }}
-  h1 {{ margin:0 0 .5rem; font-size:1.4rem; }}
-  p {{ color:#b9bbbe; line-height:1.5; }}
+  .card {{ background:#2c2f33; padding:2.5rem 3rem; border-radius:16px; text-align:center;
+           border-top: 4px solid {color}; max-width: 440px;
+           box-shadow: 0 20px 60px rgba(0,0,0,.45); }}
+  .icon {{ width:72px; height:72px; border-radius:50%; object-fit:cover; margin:0 auto 1rem;
+           border: 3px solid {color}; display:block; }}
+  .icon-fallback {{ display:flex; align-items:center; justify-content:center; font-size:2rem;
+                     background:#23272a; }}
+  .server-name {{ color:#8e9297; font-size:.85rem; letter-spacing:.03em; text-transform:uppercase;
+                   margin-bottom:.4rem; }}
+  h1 {{ margin:0 0 .6rem; font-size:1.5rem; }}
+  p {{ color:#b9bbbe; line-height:1.55; margin:0 0 1rem; }}
+  .stats {{ display:flex; gap:.6rem; justify-content:center; flex-wrap:wrap; margin: 1rem 0; }}
+  .stat {{ background:#23272a; border-radius:20px; padding:.35rem .9rem; font-size:.8rem; color:#dcddde; }}
+  .btn {{ display:inline-block; margin-top:.5rem; background:{color}; color:#111; text-decoration:none;
+          font-weight:600; padding:.7rem 1.4rem; border-radius:8px; transition: transform .15s ease; }}
+  .btn:hover {{ transform: translateY(-2px); }}
 </style></head>
-<body><div class="card"><h1>{title}</h1><p>{message}</p></div></body></html>"""
+<body><div class="card">
+  {icon_html}
+  {server_line}
+  <h1>{title}</h1>
+  <p>{message}</p>
+  {stats_html}
+  {button_html}
+</div></body></html>"""
 
 
 async def _exchange_code(session: ClientSession, code: str) -> dict | None:
@@ -120,6 +162,25 @@ async def _get_identity(session: ClientSession, access_token: str) -> dict | Non
             log.warning("Fetching identity failed (%s): %s", resp.status, await resp.text())
             return None
         return await resp.json()
+
+
+async def _get_guild_info(session: ClientSession, guild_id: str) -> dict | None:
+    """Real per-guild name/icon/member count for the success page — this
+    bot serves many servers, so the page must reflect whichever one
+    actually sent the person here, not a hardcoded name."""
+    headers = {"Authorization": f"Bot {BOT_TOKEN}"}
+    async with session.get(f"{DISCORD_API}/guilds/{guild_id}?with_counts=true", headers=headers) as resp:
+        if resp.status != 200:
+            log.warning("Fetching guild info for %s failed (%s): %s", guild_id, resp.status, await resp.text())
+            return None
+        return await resp.json()
+
+
+def _guild_icon_url(guild_id: str, icon_hash: str) -> str | None:
+    if not icon_hash:
+        return None
+    ext = "gif" if icon_hash.startswith("a_") else "png"
+    return f"https://cdn.discordapp.com/icons/{guild_id}/{icon_hash}.{ext}?size=128"
 
 
 async def _get_guild_roles(session: ClientSession, guild_id: str) -> list:
@@ -179,38 +240,53 @@ async def _post_log_embed(session: ClientSession, channel_id, embed: dict):
 
 
 async def handle_callback(request: web.Request) -> web.Response:
-    error = request.query.get("error")
-    if error:
-        return web.Response(
-            text=_page("Verification Cancelled", "You declined the authorization request. You can close this tab and click the button again if that was a mistake.", ok=False),
-            content_type="text/html", status=200,
-        )
-
-    code  = request.query.get("code")
+    # state = "<origin_guild_id>" or "<origin_guild_id>:<backup_guild_id>" —
+    # parsed up front so even the error/declined pages below can show real
+    # per-guild branding instead of a generic page.
     state = request.query.get("state", "")
-    if not code:
-        return web.Response(text=_page("Missing Code", "Discord didn't send an authorization code. Try clicking the button again.", ok=False),
-                             content_type="text/html", status=400)
-
-    # state = "<origin_guild_id>" or "<origin_guild_id>:<backup_guild_id>"
     parts = state.split(":", 1)
-    origin_guild_id = parts[0] if parts and parts[0] else None
+    origin_guild_id = parts[0] if parts and parts[0] and parts[0].isdigit() else None
     backup_guild_id = parts[1] if len(parts) > 1 and parts[1] else None
-    if not origin_guild_id or not origin_guild_id.isdigit():
-        return web.Response(text=_page("Invalid Request", "This verification link is malformed or expired. Ask staff to re-post the verify panel.", ok=False),
-                             content_type="text/html", status=400)
 
     timeout = ClientTimeout(total=15)
     async with ClientSession(timeout=timeout) as session:
+        guild_info = await _get_guild_info(session, origin_guild_id) if origin_guild_id else None
+        guild_name = guild_info.get("name") if guild_info else None
+        guild_icon = _guild_icon_url(origin_guild_id, guild_info.get("icon")) if guild_info else None
+        member_count = guild_info.get("approximate_member_count") if guild_info else None
+
+        def page(title, message, ok=True, role_name=None):
+            return _page(
+                title, message, ok,
+                guild_name=guild_name, guild_icon_url=guild_icon,
+                guild_id=origin_guild_id, role_name=role_name, member_count=member_count,
+            )
+
+        error = request.query.get("error")
+        if error:
+            return web.Response(
+                text=page("Verification Cancelled", "You declined the authorization request. You can close this tab and click the button again if that was a mistake.", ok=False),
+                content_type="text/html", status=200,
+            )
+
+        code = request.query.get("code")
+        if not code:
+            return web.Response(text=page("Missing Code", "Discord didn't send an authorization code. Try clicking the button again.", ok=False),
+                                 content_type="text/html", status=400)
+
+        if not origin_guild_id:
+            return web.Response(text=page("Invalid Request", "This verification link is malformed or expired. Ask staff to re-post the verify panel.", ok=False),
+                                 content_type="text/html", status=400)
+
         token_data = await _exchange_code(session, code)
         if not token_data or "access_token" not in token_data:
-            return web.Response(text=_page("Authorization Failed", "Discord rejected that authorization code (it may have expired — codes are single-use and short-lived). Please try again.", ok=False),
+            return web.Response(text=page("Authorization Failed", "Discord rejected that authorization code (it may have expired — codes are single-use and short-lived). Please try again.", ok=False),
                                  content_type="text/html", status=400)
         access_token = token_data["access_token"]
 
         identity = await _get_identity(session, access_token)
         if not identity:
-            return web.Response(text=_page("Couldn't Identify You", "Got an access token but couldn't fetch your Discord profile. Please try again.", ok=False),
+            return web.Response(text=page("Couldn't Identify You", "Got an access token but couldn't fetch your Discord profile. Please try again.", ok=False),
                                  content_type="text/html", status=502)
         user_id = identity["id"]
         username = identity.get("username", "there")
@@ -257,7 +333,11 @@ async def handle_callback(request: web.Request) -> web.Response:
 
     extra = " You've also been added to our backup server, so you won't lose your place if this one ever goes away." if joined_backup else ""
     return web.Response(
-        text=_page("You're Verified! ✅", f"Welcome, {username} — you now have full access back in Discord.{extra} You can close this tab."),
+        text=page(
+            "You're Verified! ✅",
+            f"Welcome, {username} — you now have full access back in Discord.{extra} You can close this tab.",
+            role_name=VERIFIED_ROLE_NAME if role_granted else None,
+        ),
         content_type="text/html", status=200,
     )
 
