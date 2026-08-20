@@ -4139,6 +4139,7 @@ async def on_ready():
         _save_giveaways()
 
         await _sweep_temp_vcs()
+        _resume_vc_sessions()
 
     print(f"Logged in as {bot.user}")
 
@@ -5084,7 +5085,8 @@ async def on_voice_state_update(member, before, after):
 
     # ── Joined a channel ──────────────────────────────────────
     if before.channel is None and after.channel is not None:
-        vc_join_time[(guild.id, member.id)] = now
+        if not member.bot:
+            vc_join_time[(guild.id, member.id)] = now
         await log(guild, "vc", "VC Join",
                   f"**{member.display_name}** joined {after.channel.mention}.",
                   discord.Color.green(),
@@ -5132,7 +5134,8 @@ async def on_voice_state_update(member, before, after):
         if joined:
             guild_vc_stats = VC_STATS.setdefault(guild.id, {})
             guild_vc_stats[member.id] = guild_vc_stats.get(member.id, 0) + int(now - joined)
-        vc_join_time[(guild.id, member.id)] = now
+        if not member.bot:
+            vc_join_time[(guild.id, member.id)] = now
 
         mod, reason = await _find_voice_mod(guild, discord.AuditLogAction.member_move, member=member, channel=after.channel)
         if mod:
@@ -7812,11 +7815,58 @@ def _live_vc_stats(guild: discord.Guild) -> dict:
     return stats
 
 
+def _resume_vc_sessions():
+    """Startup-only: re-anchor vc_join_time for everyone already connected to
+    voice when the bot (re)starts. vc_join_time is deliberately in-memory
+    only (it's just a session-start marker, not a stat itself), but that
+    means a restart wipes it — and without an anchor, the member's NEXT
+    leave/move event finds no join time to compute a duration from and
+    silently adds zero, losing their entire current session's VC time
+    (not just the part before the restart). This can't recover time from
+    before the restart, but it stops losing everything from the restart
+    onward for sessions already in progress."""
+    now = time.time()
+    for guild in bot.guilds:
+        for vc in guild.voice_channels:
+            for member in vc.members:
+                if not member.bot:
+                    vc_join_time[(guild.id, member.id)] = now
+
+
 async def _resolve_stats_target(ctx, raw: str):
     """Resolve a ,chatstats/,vcstats argument to a Member, or None if it's a leaderboard request."""
     if not raw or raw.strip().lower() in ("leaderboard", "top", "lb"):
         return None
     return await commands.MemberConverter().convert(ctx, raw.strip())
+
+
+def _rank_medal(rank: int) -> str:
+    return {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, "")
+
+
+def _rank_percentile_label(rank: int, total: int) -> str:
+    """Human-friendly percentile tier for a 1-indexed rank out of `total` tracked members."""
+    if not rank or total <= 0:
+        return "Unranked"
+    pct = (rank / total) * 100
+    if pct <= 1:
+        return "🌟 Top 1%"
+    if pct <= 5:
+        return "🌟 Top 5%"
+    if pct <= 10:
+        return "✨ Top 10%"
+    if pct <= 25:
+        return "⭐ Top 25%"
+    if pct <= 50:
+        return "Top 50%"
+    return f"Top {round(pct)}%"
+
+
+def _days_since(dt) -> int:
+    """Whole days since `dt`, floored at 1 to keep it safe as a divisor."""
+    if not dt:
+        return 1
+    return max(1, (discord.utils.utcnow() - dt).days)
 
 
 @bot.command()
@@ -7847,28 +7897,43 @@ async def vcstats(ctx, *, target: str = None):
         if not sorted_stats:
             embed.description = "No VC time tracked yet."
         else:
+            top_secs = sorted_stats[0][1]
             medals = ["🥇", "🥈", "🥉"] + ["🔹"] * 7
-            lines = [
-                f"{medals[i]} {(ctx.guild.get_member(uid).mention if ctx.guild.get_member(uid) else f'<@{uid}>')} — **{_format_vc_duration(secs)}**"
-                for i, (uid, secs) in enumerate(sorted_stats)
-            ]
+            lines = []
+            for i, (uid, secs) in enumerate(sorted_stats):
+                m = ctx.guild.get_member(uid)
+                name = m.mention if m else f"<@{uid}>"
+                bar = _progress_bar(secs, top_secs, length=8)
+                lines.append(f"{medals[i]} {name} — **{_format_vc_duration(secs)}**\n`{bar}`")
             embed.description = "\n".join(lines)
-        embed.set_footer(text=f"Requested by {ctx.author}", icon_url=ctx.author.display_avatar.url)
+            embed.add_field(
+                name="📊 Server Totals",
+                value=f"**{len(guild_stats)}** member(s) tracked • **{_format_vc_duration(sum(guild_stats.values()))}** combined",
+                inline=False
+            )
+        embed.set_footer(text=f"Requested by {ctx.author} • ,vcstats @user for a personal card", icon_url=ctx.author.display_avatar.url)
         await ctx.send(embed=embed)
         return
 
     total_seconds = guild_stats.get(member.id, 0)
     ranking = sorted(guild_stats.items(), key=lambda x: x[1], reverse=True)
     rank = next((i for i, (uid, _) in enumerate(ranking, start=1) if uid == member.id), None)
+    medal = _rank_medal(rank)
+    server_total = sum(guild_stats.values())
+    share_pct = (total_seconds / server_total * 100) if server_total > 0 else 0.0
+    daily_avg = total_seconds / _days_since(member.joined_at)
 
     embed = discord.Embed(
-        title=f"🎤 Voice Stats — {member.display_name}",
+        title=f"🎤 Voice Stats — {medal + ' ' if medal else ''}{member.display_name}",
         color=member.color if member.color != discord.Color.default() else discord.Color.blue(),
         timestamp=discord.utils.utcnow()
     )
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.add_field(name="⏱️ Total VC Time", value=f"**{_format_vc_duration(total_seconds)}**", inline=True)
     embed.add_field(name="🏆 Rank", value=f"**#{rank}** of {len(ranking)}" if rank else "Unranked", inline=True)
+    embed.add_field(name="📊 Percentile", value=_rank_percentile_label(rank, len(ranking)), inline=True)
+    embed.add_field(name="🌍 Server Share", value=f"**{share_pct:.1f}%** of all tracked VC time", inline=True)
+    embed.add_field(name="📆 Daily Average", value=f"**{_format_vc_duration(int(daily_avg))}**/day since joining", inline=True)
 
     if rank and rank > 1:
         ahead_uid, ahead_secs = ranking[rank - 2]
@@ -7958,29 +8023,43 @@ async def chatstats(ctx, *, target: str = None):
         if not sorted_stats:
             embed.description = "No messages tracked yet."
         else:
+            top_count = sorted_stats[0][1]
             medals = ["🥇", "🥈", "🥉"] + ["🔹"] * 7
             lines = []
             for i, (uid, count) in enumerate(sorted_stats):
                 m = ctx.guild.get_member(uid)
                 name = m.mention if m else f"<@{uid}>"
-                lines.append(f"{medals[i]} {name} — **{count:,}** messages")
+                bar = _progress_bar(count, top_count, length=8)
+                lines.append(f"{medals[i]} {name} — **{count:,}** messages\n`{bar}`")
             embed.description = "\n".join(lines)
-        embed.set_footer(text=f"Requested by {ctx.author}", icon_url=ctx.author.display_avatar.url)
+            embed.add_field(
+                name="📊 Server Totals",
+                value=f"**{len(guild_stats)}** member(s) tracked • **{sum(guild_stats.values()):,}** messages combined",
+                inline=False
+            )
+        embed.set_footer(text=f"Requested by {ctx.author} • ,chatstats @user for a personal card", icon_url=ctx.author.display_avatar.url)
         await ctx.send(embed=embed)
         return
 
     count = guild_stats.get(member.id, 0)
     ranking = sorted(guild_stats.items(), key=lambda x: x[1], reverse=True)
     rank = next((i for i, (uid, _) in enumerate(ranking, start=1) if uid == member.id), None)
+    medal = _rank_medal(rank)
+    server_total = sum(guild_stats.values())
+    share_pct = (count / server_total * 100) if server_total > 0 else 0.0
+    daily_avg = count / _days_since(member.joined_at)
 
     embed = discord.Embed(
-        title=f"💬 Chat Stats — {member.display_name}",
+        title=f"💬 Chat Stats — {medal + ' ' if medal else ''}{member.display_name}",
         color=member.color if member.color != discord.Color.default() else discord.Color.blurple(),
         timestamp=discord.utils.utcnow()
     )
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.add_field(name="💬 Total Messages", value=f"**{count:,}**", inline=True)
     embed.add_field(name="🏆 Rank", value=f"**#{rank}** of {len(ranking)}" if rank else "Unranked", inline=True)
+    embed.add_field(name="📊 Percentile", value=_rank_percentile_label(rank, len(ranking)), inline=True)
+    embed.add_field(name="🌍 Server Share", value=f"**{share_pct:.1f}%** of all tracked messages", inline=True)
+    embed.add_field(name="📆 Daily Average", value=f"**{daily_avg:.1f}** messages/day since joining", inline=True)
 
     if rank and rank > 1:
         ahead_uid, ahead_count = ranking[rank - 2]
