@@ -5862,7 +5862,13 @@ async def br(ctx, action: str = None, *, arg: str = None):
         _save_booster_roles()
         role_id = None
 
-    is_booster = member.premium_since is not None
+    # Gate on actually holding Discord's integrated "Server Booster" role —
+    # not just member.premium_since — so this literally matches "only people
+    # with the booster role," including the split-second right after someone
+    # stops boosting where premium_since may already be cleared but Discord
+    # hasn't pulled the role yet (or vice versa).
+    booster_role = guild.premium_subscriber_role
+    is_booster = booster_role is not None and booster_role in member.roles
 
     if action is None:
         embed = discord.Embed(
