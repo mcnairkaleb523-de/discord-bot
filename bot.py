@@ -10904,8 +10904,13 @@ async def task(ctx, priority: str = "medium", assigned: Union[discord.Member, di
 
     if " — " in title_and_desc:
         title, description = title_and_desc.split(" — ", 1)
+    elif len(title_and_desc) > 100:
+        # No " — " separator and too long to fit as a title — instead of
+        # silently truncating the rest away, keep the whole thing as the
+        # description and use a shortened preview as the title.
+        title, description = title_and_desc[:97].rstrip() + "...", title_and_desc
     else:
-        title, description = title_and_desc[:100], ""
+        title, description = title_and_desc, ""
 
     assigned_is_role = isinstance(assigned, discord.Role)
 
