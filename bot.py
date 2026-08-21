@@ -881,6 +881,7 @@ JAIL_ROLE_SNAPSHOTS: dict[int, dict[int, list]] = _load_depth(_load_data("jail_r
 NUKE_TRACKER: dict[int, dict[int, list]] = {}
 NUKE_ROLE_LIMIT   = 3   # max role deletes within window
 NUKE_CHAN_LIMIT   = 3   # max channel deletes within window
+NUKE_BAN_LIMIT    = 3   # max member bans within window
 NUKE_WINDOW       = 10  # seconds
 
 # ANTINUKE_WHITELIST[guild_id] = {user_id, ...} — exempt from anti-nuke
@@ -4126,6 +4127,90 @@ async def on_guild_channel_delete(channel):
                           ("👤 Suspect",       f"{actor.mention} (`{actor.id}`)",                         True),
                           ("🔢 Deletes",       f"{NUKE_CHAN_LIMIT}+ channels deleted in {NUKE_WINDOW}s",  True),
                           ("⚔️ Roles Stripped", ", ".join(r.name for r in roles_to_remove)[:512] or "None", False),
+                      ],
+                      actor=actor)
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
+
+@bot.event
+async def on_member_ban(guild, user):
+    # This fires for EVERY ban regardless of how it happened — Discord's
+    # native ban button, another bot/integration, or ,ban / ,hardban here.
+    # Only one audit-log fetch, shared by both jobs below.
+    entry = None
+    try:
+        async for e in guild.audit_logs(limit=1, action=discord.AuditLogAction.ban):
+            entry = e
+            break
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+    actor = entry.user if entry else None
+
+    # ── General ban logging ─────────────────────────────────────
+    # ,ban and ,hardban already log themselves (with DM-sent status, etc.)
+    # at the moment they act — that shows up here as actor.bot == True,
+    # so skip it to avoid a duplicate entry. Everything else (the native
+    # Discord ban button, another bot) previously never reached #bans at
+    # all — this is what actually fixes that gap.
+    if not (actor and actor.bot):
+        await log(guild, "bans", "Member Banned (Discord)", None, discord.Color.red(),
+                  fields=[
+                      ("🛡 Moderator", f"{actor.mention} (`{actor.id}`)" if actor else "Unknown", True),
+                      ("🔨 User",      f"{user.mention} (`{user.id}`)", True),
+                      ("📝 Reason",    (entry.reason if entry else None) or "No reason provided", False),
+                  ],
+                  actor=actor, target=user)
+
+    # ── Anti-nuke: track rapid member bans — if it's not caught here, mass
+    # role/channel deletion isn't the only way to gut a server; someone
+    # with ban_members but not full trust can do just as much damage by
+    # banning the member list. Uses a separate NUKE_TRACKER key
+    # (actor.id + 2_000_000_000) so it doesn't collide with the role/channel
+    # delete counters, which already use +0 and +1_000_000_000.
+    try:
+        if not actor or actor.bot:
+            return
+        if actor.guild_permissions.administrator:
+            return
+        if actor.id in ANTINUKE_WHITELIST.get(guild.id, set()):
+            return
+
+        now = time.time()
+        key = actor.id + 2_000_000_000
+        tracker = NUKE_TRACKER.setdefault(guild.id, {}).setdefault(key, [])
+        tracker.append(now)
+        NUKE_TRACKER[guild.id][key] = [t for t in tracker if now - t <= NUKE_WINDOW]
+        if len(NUKE_TRACKER[guild.id][key]) >= NUKE_BAN_LIMIT:
+            NUKE_TRACKER[guild.id][key].clear()
+
+            actor_member = guild.get_member(actor.id)
+            roles_to_remove = []
+            if actor_member:
+                roles_to_remove = [r for r in actor_member.roles if not r.is_default() and r < guild.me.top_role]
+                if roles_to_remove:
+                    try:
+                        await actor_member.remove_roles(*roles_to_remove, reason="🚨 Anti-nuke: rapid mass-ban detected")
+                    except (discord.Forbidden, discord.HTTPException):
+                        pass
+
+            # Hardban them too, same as ,hardban — persisted so they're
+            # instantly re-banned if they somehow rejoin.
+            HARD_BANNED.setdefault(guild.id, {})[actor.id] = "🚨 Anti-nuke: rapid mass-ban detected"
+            _save_hard_banned()
+            try:
+                await guild.ban(actor, reason="🚨 Anti-nuke: rapid mass-ban detected", delete_message_days=1)
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+
+            await log(guild, "mod", "🚨 Anti-Nuke Triggered — Mass Ban Detected", None,
+                      discord.Color.dark_red(),
+                      fields=[
+                          ("⚠️ Action",        "Rapid Member Bans Detected",                          True),
+                          ("👤 Suspect",        f"{actor.mention} (`{actor.id}`)",                     True),
+                          ("🔢 Bans",           f"{NUKE_BAN_LIMIT}+ members banned in {NUKE_WINDOW}s", True),
+                          ("⚔️ Roles Stripped", ", ".join(r.name for r in roles_to_remove)[:512] or "None", False),
+                          ("🔴 Hard-Banned",    "✅ Yes — will be instantly re-banned if they rejoin", False),
                       ],
                       actor=actor)
     except (discord.Forbidden, discord.HTTPException):
