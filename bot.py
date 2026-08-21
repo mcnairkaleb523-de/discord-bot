@@ -402,6 +402,7 @@ def _save_all_state() -> None:
     _save_polls()
     _save_raid_whitelist()
     _save_anti_raid_enabled()
+    _save_antinuke_whitelist()
     _save_invite_data()
     _save_verify_backup_guild()
     _save_unmute_vc_channels()
@@ -880,6 +881,19 @@ NUKE_TRACKER: dict[int, dict[int, list]] = {}
 NUKE_ROLE_LIMIT   = 3   # max role deletes within window
 NUKE_CHAN_LIMIT   = 3   # max channel deletes within window
 NUKE_WINDOW       = 10  # seconds
+
+# ANTINUKE_WHITELIST[guild_id] = {user_id, ...} — exempt from anti-nuke
+# entirely (rapid role/channel deletion protection), persisted. Managed
+# via ,wl. Separate from WHITELIST above, which is anti-raid only.
+ANTINUKE_WHITELIST: dict = _load_depth(_load_data("antinuke_whitelist", {}), 1)
+for _gid in list(ANTINUKE_WHITELIST.keys()):
+    ANTINUKE_WHITELIST[_gid] = set(ANTINUKE_WHITELIST[_gid])
+
+
+def _save_antinuke_whitelist():
+    _save_data("antinuke_whitelist", _dump_depth(
+        {gid: list(uids) for gid, uids in ANTINUKE_WHITELIST.items()}, 1
+    ))
 
 # ── Server invite config ─────────────────────────────────────
 # GUILD_INVITE[guild_id] = "https://discord.gg/..."
@@ -4005,6 +4019,8 @@ async def on_guild_role_delete(role):
         actor = entry.user
         if actor.guild_permissions.administrator:
             return
+        if actor.id in ANTINUKE_WHITELIST.get(guild.id, set()):
+            return
         now = time.time()
         tracker = NUKE_TRACKER.setdefault(guild.id, {}).setdefault(actor.id, [])
         tracker.append(now)
@@ -4072,6 +4088,8 @@ async def on_guild_channel_delete(channel):
             return
         actor = entry.user
         if actor.guild_permissions.administrator:
+            return
+        if actor.id in ANTINUKE_WHITELIST.get(guild.id, set()):
             return
         now = time.time()
         tracker = NUKE_TRACKER.setdefault(guild.id, {}).setdefault(actor.id + 1_000_000_000, [])
@@ -11704,6 +11722,80 @@ async def raidwhitelist(ctx, action: str = None, member: discord.Member = None):
         await ctx.send(f"✅ {member.mention} removed from the anti-raid whitelist.")
     else:
         await ctx.send("❌ Unknown action. Use `add`, `remove`, or `list`.", delete_after=8)
+
+
+@bot.command(name="wl", aliases=["antinukewl"])
+@_permitted_check(administrator=True)
+async def wl(ctx, *, arg: str = None):
+    """
+    Whitelist a member from ever triggering anti-nuke (rapid role/channel
+    deletion protection) — for trusted staff who legitimately do bulk
+    deletes without getting auto-stripped.
+    Usage:
+      ,wl @user           — whitelist a member
+      ,wl remove @user    — un-whitelist a member
+      ,wl list            — view the whitelist
+    """
+    guild = ctx.guild
+    whitelist = ANTINUKE_WHITELIST.setdefault(guild.id, set())
+
+    if not arg or arg.strip().lower() == "list":
+        embed = discord.Embed(
+            title="🚨 Anti-Nuke Whitelist",
+            description="These members will never trigger anti-nuke, no matter how many roles/channels they delete.",
+            color=discord.Color.blurple(),
+            timestamp=discord.utils.utcnow()
+        )
+        if whitelist:
+            lines = [f"• <@{uid}> (`{uid}`)" for uid in whitelist]
+            embed.add_field(name=f"Whitelisted ({len(whitelist)})", value="\n".join(lines)[:1024], inline=False)
+        else:
+            embed.add_field(name="No one whitelisted", value="Use `,wl @user` to add one.", inline=False)
+        embed.set_footer(text=f"TrapAI • {guild.name}")
+        await ctx.send(embed=embed)
+        return
+
+    parts = arg.strip().split(maxsplit=1)
+    action = "add"
+    target_raw = arg.strip()
+    if parts[0].lower() in ("remove", "add") and len(parts) > 1:
+        action = parts[0].lower()
+        target_raw = parts[1]
+
+    try:
+        member = await commands.MemberConverter().convert(ctx, target_raw.strip())
+    except commands.MemberNotFound:
+        await ctx.send("❌ Member not found. Use `,wl @user`, `,wl remove @user`, or `,wl list`.", delete_after=8)
+        return
+
+    if action == "add":
+        if member.id in whitelist:
+            await ctx.send(f"❌ {member.mention} is already whitelisted.", delete_after=6)
+            return
+        whitelist.add(member.id)
+        _save_antinuke_whitelist()
+        await ctx.send(f"✅ {ctx.author.mention}: **{member.name}** is now whitelisted and will not trigger **antinuke**.")
+        await log(
+            guild, "mod", "Anti-Nuke Whitelist Added",
+            f"{ctx.author.mention} whitelisted {member.mention} from anti-nuke.",
+            discord.Color.green(),
+            fields=[("👤 Member", f"{member.mention} (`{member.id}`)", True)],
+            actor=ctx.author
+        )
+    else:
+        if member.id not in whitelist:
+            await ctx.send(f"❌ {member.mention} is not whitelisted.", delete_after=6)
+            return
+        whitelist.discard(member.id)
+        _save_antinuke_whitelist()
+        await ctx.send(f"✅ {ctx.author.mention}: **{member.name}** removed from the anti-nuke whitelist.")
+        await log(
+            guild, "mod", "Anti-Nuke Whitelist Removed",
+            f"{ctx.author.mention} removed {member.mention} from the anti-nuke whitelist.",
+            discord.Color.orange(),
+            fields=[("👤 Member", f"{member.mention} (`{member.id}`)", True)],
+            actor=ctx.author
+        )
 
 
 # ============================================================
