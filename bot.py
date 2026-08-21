@@ -8,6 +8,7 @@ import re
 import time
 import asyncio
 import json
+import aiohttp
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -21,7 +22,7 @@ intents.voice_states = True
 intents.invites = True
 intents.presences = True
 
-bot = commands.Bot(command_prefix=",", intents=intents)
+bot = commands.Bot(command_prefix=",", intents=intents, help_command=None)
 
 # ── ,restart "back online" notification ───────────────────────
 # os.execv wipes all in-memory state, so the only way the fresh process
@@ -607,6 +608,11 @@ def _save_unmute_vc_channels():
 DISCORD_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID")
 DISCORD_OAUTH_REDIRECT_URI = os.getenv("DISCORD_OAUTH_REDIRECT_URI")
 OAUTH_VERIFY_ENABLED = bool(DISCORD_CLIENT_ID and DISCORD_OAUTH_REDIRECT_URI)
+
+# Public URL of oauth_server.py's /commands page (the full interactive
+# command reference site) — e.g. https://your-service.up.railway.app/commands
+# Optional: if unset, ,help / ,cmds just omit the "browse online" link.
+COMMANDS_SITE_URL = os.getenv("COMMANDS_SITE_URL")
 
 # VERIFY_BACKUP_GUILD[origin_guild_id] = backup_guild_id — where verified
 # members get auto-joined via the guilds.join OAuth scope, set with
@@ -2726,814 +2732,58 @@ class VCAddModModal(discord.ui.Modal, title="🛡 Add VC Moderator"):
 
 
 # ============================================================
-# CMDS VIEW  — full command reference with every command
+# HELP  — one consolidated, scannable command reference
 # ============================================================
 
-_CMDS_DIVIDER = "────────────────────────────"
+# HELP_CATEGORIES[i] = (icon, category name, [bare command names]) —
+# every registered command, grouped for ,help / ,cmds. Kept in sync
+# manually with COMMAND_CATALOG in oauth_server.py (that file has no
+# import relationship with this one — see its docstring).
+HELP_CATEGORIES = [
+    ('🛡️', 'Moderation', ['kick', 'ban', 'mute', 'unmute', 'timeout', 'warn', 'warnings', 'clearwarnings', 'modhistory', 'hardban', 'unhardban', 'hardbans', 'clear', 'purge', 'lock', 'unlock', 'hide', 'unhide', 'slowmode', 'nuke', 'lockdown', 'unlockdown', 'nickname', 'strip', 'trapwarn', 'trapscan', 'restart']),
+    ('🔒', 'Jail & Anti-Raid', ['jail', 'unjail', 'setupjail', 'antiraid', 'raidwhitelist']),
+    ('🤖', 'Verification', ['verify', 'unverify', 'denyverify', 'sendverify', 'setverifybackup']),
+    ('🏷️', 'Roles', ['role', 'roleall', 'massrole', 'massunrole', 'restoreallroles', 'autorole', 'setgifrole', 'protectedrole', 'br']),
+    ('🎤', 'Voice Channels', ['vclock', 'vcunlock', 'vchide', 'vcshow', 'vcname', 'vclimit', 'vcbitrate', 'vcregion', 'vckick', 'vcban', 'vcunban', 'vcpermit', 'vcmute', 'vcunmute', 'vcdeafen', 'vcundeafen', 'vctransfer', 'vcclaim', 'vcmod', 'vcremovemod', 'vcstats', 'setupvc', 'setunmutevc']),
+    ('🎫', 'Tickets', ['sendtickets', 'addticketcategory', 'removeticketcategory', 'ticketcategories', 'setticketformat', 'claimticket', 'closeticket']),
+    ('📊', 'Stats & Info', ['whois', 'chatstats', 'serverstats', 'invites', 'invitelogs', 'inviteleaderboard', 'setinvite', 'milestones', 'setmilestone', 'testmilestone', 'ping', 'exitsurveys']),
+    ('✅', 'Vouch', ['vouch', 'unvouch', 'cancelvouch', 'pendingvouches', 'vouches', 'vouchleaderboard', 'vouchstats', 'vouchconfig']),
+    ('🎉', 'Giveaways & Polls', ['giveaway', 'giveawayend', 'giveaways', 'poll', 'pollend']),
+    ('💰', 'Economy & Games', ['balance', 'daily', 'weekly', 'work', 'rob', 'give', 'deposit', 'withdraw', 'leaderboard', 'gamblers', 'slots', 'blackjack', 'coinflip', 'dice', '8ball', 'trivia', 'hangman', 'tictactoe', 'numguess', 'rockpaperscissors', 'highlow', 'crash', 'games']),
+    ('🎂', 'Birthdays', ['birthday', 'removebirthday', 'setbirthday', 'setbirthdaychannel', 'birthdaylist', 'settimezone']),
+    ('🚀', 'Boosts & Vanity', ['setboostchannel', 'setvanitycode', 'setvanityrole', 'vanityconfig']),
+    ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist']),
+    ('⚙️', 'Admin & Setup', ['setup', 'backup', 'restore', 'listbackups', 'deletebackup', 'exportconfig', 'setlogchannel', 'setwelcome', 'disablewelcome', 'sendwelcome', 'welcome', 'sendinvite', 'announce']),
+    ('🎲', 'Fun & Utility', ['snipe', 'clearsnipe', 'editsnipe', 'quote', 'rules', 'cmds', 'help']),
+]
 
-class CmdsView(discord.ui.View):
-    def __init__(self, author_id: int):
-        super().__init__(timeout=180)
-        self.author_id = author_id
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message(
-                "❌ You can't use someone else's command menu.",
-                ephemeral=True
-            )
-            return False
-        return True
-
-    # ─────────────────────────────────────────────────────────
-    # HOME
-    # ─────────────────────────────────────────────────────────
-    def home_embed(self, guild: discord.Guild):
-        embed = discord.Embed(
-            color=discord.Color.from_rgb(88, 101, 242),
-            timestamp=discord.utils.utcnow()
-        )
-        embed.set_author(
-            name="TrapAI Command Center",
-            icon_url=guild.icon.url if guild.icon else None
-        )
-        embed.description = (
-            f"**{guild.name}** — full bot command reference.\n"
-            "Use the buttons below to browse every category.\n\n"
-            f"{_CMDS_DIVIDER}"
-        )
-        cats = [
-            ("🛡", "Moderation",  "kick, ban, mute, timeout, warn, clear, purge…"),
-            ("🔒", "Jail",        "jail, unjail with auto-timer"),
-            ("🤖", "Security",    "verify, unverify, trapwarn, trapscan…"),
-            ("📊", "Stats",       "whois, chatstats, serverstats, invites…"),
-            ("🏷️", "Roles",       "role add/remove/create/delete/info/color…"),
-            ("🎤", "VC",          "vclock, vcname, vckick, vcban, vctransfer…"),
-            ("🎉", "Giveaways",   "giveaway, giveawayend, giveaways"),
-            ("✅", "Vouch",       "vouch, protectedrole, unvouch, vouches, vouchleaderboard…"),
-            ("📋", "Staff",       "staffpsa, task, tasklist"),
-            ("⚙️", "Admin",       "setup, setupjail, setlogchannel, backup, hardban…"),
-            ("🎮", "Games",        "slots, coinflip, blackjack, rps, trivia, bal, work…"),
-        ]
-        lines = "\n".join(f"> {e} **{n}** — *{d}*" for e, n, d in cats)
-        embed.add_field(name="📂 Categories", value=lines, inline=False)
-        embed.add_field(
-            name="⌨️ Prefix",
-            value="All commands use `,` prefix  •  e.g. `,ban @user`",
-            inline=False
-        )
-        if guild.icon:
-            embed.set_thumbnail(url=guild.icon.url)
-        embed.set_footer(text=f"TrapAI • {guild.name}  •  {guild.member_count:,} members")
-        return embed
-
-    # ─────────────────────────────────────────────────────────
-    # MODERATION
-    # ─────────────────────────────────────────────────────────
-    def moderation_embed(self, guild: discord.Guild):
-        embed = discord.Embed(
-            title="🛡 Moderation Commands",
-            color=discord.Color.from_rgb(237, 66, 69),
-            timestamp=discord.utils.utcnow()
-        )
-        embed.add_field(
-            name="⚔️ Punishment",
-            value=(
-                "`,kick @user [reason]` — kick a member\n"
-                "`,ban @user [reason]` — ban a member\n"
-                "`,timeout @user <mins> [reason]` — Discord timeout\n"
-                "`,mute @user [reason]` — apply mute role\n"
-                "`,unmute @user [reason]` — remove mute role\n"
-                "`,warn @user [reason]` — log a warning\n"
-                "`,warnings [@user]` — view warnings\n"
-                "`,clearwarnings @user` — clear all warnings\n"
-                "`,modhistory [@user] [action]` — full mod history: warn/jail/ban/kick/timeout/mute/hardban/strip"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="🔨 Hard-Ban",
-            value=(
-                "`,hardban @user <reason>` — permanent ban + rejoin block\n"
-                "`,unhardban <user_id> [reason]` — lift hard-ban\n"
-                "`,hardbans` — list all hard-banned users"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="📺 Channel Management",
-            value=(
-                "`,clear <amount>` — delete N messages (incl. command)\n"
-                "`,purge <amount> [@user]` — targeted message purge\n"
-                "`,lock` — prevent @everyone from sending\n"
-                "`,unlock` — restore send permissions\n"
-                "`,hide` — hide channel from @everyone\n"
-                "`,unhide` — make channel visible again\n"
-                "`,slowmode <secs>` — set channel slowmode (0 = off)\n"
-                "`,nuke` — clone + delete channel\n"
-                "`,lockdown` — lock ALL text channels\n"
-                "`,unlockdown` — unlock ALL text channels"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="👤 Member Management",
-            value=(
-                "`,nickname @user [nick]` — set/clear nickname\n"
-                "`,restart` — restart the bot (admin only)"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="📨 DM Notifications",
-            value=(
-                "Auto-DMs the user when: `ban` `kick` `jail` `timeout` `hardban`\n"
-                "DM contains: action, reason, moderator, server invite link."
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="🔗 Invite Link",
-            value=(
-                "`,setinvite <link>` — set server invite used in DMs\n"
-                "`,setinvite` — view current invite\n"
-                "`,sendinvite @user [msg]` — manually DM invite to anyone"
-            ),
-            inline=False
-        )
-        if guild.icon:
-            embed.set_thumbnail(url=guild.icon.url)
-        embed.set_footer(text=f"TrapAI • {guild.name}  •  Moderation")
-        return embed
-
-    # ─────────────────────────────────────────────────────────
-    # JAIL
-    # ─────────────────────────────────────────────────────────
-    def jail_embed(self, guild: discord.Guild):
-        embed = discord.Embed(
-            title="🔒 Jail System",
-            color=discord.Color.from_rgb(180, 0, 0),
-            timestamp=discord.utils.utcnow()
-        )
-        embed.add_field(
-            name="Commands",
-            value=(
-                "`,jail @user <time> [reason]` — jail with auto-release timer\n"
-                "`,unjail @user [reason]` — release early"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="⏱️ Time Formats",
-            value=(
-                "`30s` `10m` `2h` `3d` `1w` `1mo` `1y`\n"
-                "*Examples: `,jail @user 1h spamming` • `,jail @user 3d ban appeal`*"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="ℹ️ How it works",
-            value=(
-                "• Removes Verified + Unverified roles\n"
-                "• Applies `🔒 Jailed` role\n"
-                "• Hides all channels except `#jail`\n"
-                "• Auto-unjails when timer expires\n"
-                "• DMs the user with reason + duration"
-            ),
-            inline=False
-        )
-        if guild.icon:
-            embed.set_thumbnail(url=guild.icon.url)
-        embed.set_footer(text=f"TrapAI • {guild.name}  •  Jail System")
-        return embed
-
-    # ─────────────────────────────────────────────────────────
-    # SECURITY
-    # ─────────────────────────────────────────────────────────
-    def security_embed(self, guild: discord.Guild):
-        embed = discord.Embed(
-            title="🤖 TrapAI Security",
-            color=discord.Color.from_rgb(87, 242, 135),
-            timestamp=discord.utils.utcnow()
-        )
-        embed.add_field(
-            name="✅ Verification",
-            value=(
-                "`,sendverify` — post the verify button panel\n"
-                "`,verify @user` — manually verify a member\n"
-                "`,unverify @user` — remove verified role\n"
-                "`,denyverify @user [reason]` — block verification"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="🔍 Threat Detection",
-            value=(
-                "`,trapwarn @user [reason]` — TrapAI flag a user\n"
-                "`,trapscan @user` — full threat analysis report"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="🚨 Anti-Nuke (Automatic)",
-            value=(
-                f"Auto-strips roles if any non-admin deletes:\n"
-                f"• **{NUKE_ROLE_LIMIT}+ roles** within **{NUKE_WINDOW}s**\n"
-                f"• **{NUKE_CHAN_LIMIT}+ channels** within **{NUKE_WINDOW}s**\n"
-                "Logs to mod channel with full details."
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="🛡 Anti-Raid (Automatic)",
-            value=(
-                f"Auto-bans if **{RAID_LIMIT}+ joins** happen within **{RAID_TIME}s**.\n"
-                "New arrivals are checked against the whitelist."
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="🔇 Anti-Spam (Automatic)",
-            value=(
-                f"Warns after **{SPAM_MESSAGE_LIMIT} messages** in **{SPAM_TIME_WINDOW}s**.\n"
-                f"Auto-timeout after **{SPAM_WARNING_LIMIT} warnings**."
-            ),
-            inline=False
-        )
-        if guild.icon:
-            embed.set_thumbnail(url=guild.icon.url)
-        embed.set_footer(text=f"TrapAI • {guild.name}  •  Security")
-        return embed
-
-    # ─────────────────────────────────────────────────────────
-    # STATS
-    # ─────────────────────────────────────────────────────────
-    def stats_embed(self, guild: discord.Guild):
-        embed = discord.Embed(
-            title="📊 Stats & Info Commands",
-            color=discord.Color.gold(),
-            timestamp=discord.utils.utcnow()
-        )
-        embed.add_field(
-            name="👤 User Stats",
-            value=(
-                "`,whois [@user]` — full profile: roles, join date, chat/vc stats\n"
-                "`,chatstats [@user]` — personal rank card (or `,chatstats leaderboard`)\n"
-                "`,vcstats [@user]` — personal VC time rank card (or `,vcstats leaderboard`)\n"
-                "`,ping` — bot latency"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="🏠 Server Stats",
-            value=(
-                "`,serverstats` (alias `,ss`) — 5-page interactive report\n"
-                "🏠 Overview · 👥 Members · 💬 Channels · 🚀 Boosts · 🏆 Leaderboards"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="📨 Invite Tracking",
-            value=(
-                "`,invites [@user]` — how many people a user has invited\n"
-                "`,inviteleaderboard` — top inviters server-wide\n"
-                "`,invitelogs [@user]` — full join history per invite code"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="💬 Quote",
-            value=(
-                "`,quote` — reply to a message to quote it as a card\n"
-                "`,quote <message link>` — quote from a link\n"
-                "`,quote <message id>` — quote by ID in current channel\n"
-                '`,quote "text" @user` — custom attributed quote card'
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="🎂 Birthdays",
-            value=(
-                "`,setbirthday <month-day>` — set your birthday (e.g. `03-15` or `March 15`)\n"
-                "`,settimezone <state or offset>` — e.g. `California`, `TX`, or `-5`, `+8`, `UTC+5:30`\n"
-                "`,removebirthday` — remove your saved birthday\n"
-                "`,birthday [@user]` — view a birthday + timezone\n"
-                "`,birthdaylist` — upcoming birthdays in the server\n"
-                "`,setbirthdaychannel [#channel]` — admin: set announcement channel\n"
-                "*Announced automatically at YOUR local midnight (defaults to UTC if `,settimezone` isn't set).*"
-            ),
-            inline=False
-        )
-        if guild.icon:
-            embed.set_thumbnail(url=guild.icon.url)
-        embed.set_footer(text=f"TrapAI • {guild.name}  •  Stats")
-        return embed
-
-    # ─────────────────────────────────────────────────────────
-    # ROLES
-    # ─────────────────────────────────────────────────────────
-    def roles_embed(self, guild: discord.Guild):
-        embed = discord.Embed(
-            title="🏷️ Role Commands",
-            color=discord.Color.from_rgb(114, 137, 218),
-            timestamp=discord.utils.utcnow()
-        )
-        embed.add_field(
-            name="👤 Per-Member",
-            value=(
-                "`,role add @user @role` — give a role\n"
-                "`,role remove @user @role` — take a role\n"
-                "`,role user [@user]` — list all of a user's roles"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="🔧 Role Administration",
-            value=(
-                "`,role create <name> [#hex] [hoist]` — create a role\n"
-                "`,role delete @role` — delete a role\n"
-                "`,role color @role #hex` — change role colour\n"
-                "`,role hoist @role` — toggle hoisting on/off\n"
-                "`,role info @role` — detailed role info\n"
-                "`,role list` — list all server roles\n"
-                "`,role members @role` — who has this role"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="📦 Bulk Role Tools",
-            value=(
-                "`,roleall @role` — give role to every member\n"
-                "`,massrole @role [@filter]` — give role to filtered members\n"
-                "`,massunrole @role [@filter]` — remove role from filtered members\n"
-                "`,strip @user` — remove all staff roles + save snapshot\n"
-                "`,restoreallroles @user` — restore snapshot from `,strip`"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="🌟 Booster Role (self-service)",
-            value=(
-                "`,br` — show your custom booster role\n"
-                "`,br create <name>` — create it (boosters only)\n"
-                "`,br name <new name>` — rename it\n"
-                "`,br color <hex>` — recolor it\n"
-                "`,br delete` — remove it"
-            ),
-            inline=False
-        )
-        if guild.icon:
-            embed.set_thumbnail(url=guild.icon.url)
-        embed.set_footer(text=f"TrapAI • {guild.name}  •  Roles")
-        return embed
-
-    # ─────────────────────────────────────────────────────────
-    # VC
-    # ─────────────────────────────────────────────────────────
-    def vc_embed(self, guild: discord.Guild):
-        embed = discord.Embed(
-            title="🎤 Private VC Commands",
-            description="Use commands **or** the button panel in your VC text channel.  👑 = owner only.",
-            color=discord.Color.dark_grey(),
-            timestamp=discord.utils.utcnow()
-        )
-        embed.add_field(
-            name="🔒 Privacy",
-            value=(
-                "`,vclock` — lock VC (no new joins)\n"
-                "`,vcunlock` — unlock VC\n"
-                "`,vchide` — hide VC from everyone\n"
-                "`,vcshow` — make VC visible"
-            ),
-            inline=True
-        )
-        embed.add_field(
-            name="⚙️ Channel Settings",
-            value=(
-                "`,vcname <name>` — rename the VC\n"
-                "`,vclimit <0-99>` — set user limit\n"
-                "`,vcbitrate <kbps>` — set bitrate\n"
-                "`,vcregion <region>` — set voice region"
-            ),
-            inline=True
-        )
-        embed.add_field(
-            name="👥 Member Access",
-            value=(
-                "`,vcpermit @user` — whitelist a user\n"
-                "`,vckick @user` — kick from VC\n"
-                "`,vcban @user` — ban from VC\n"
-                "`,vcunban @user` — unban from VC\n"
-                "`,vcmute @user` — server-mute\n"
-                "`,vcunmute @user` — server-unmute\n"
-                "`,vcdeafen @user` — server-deafen\n"
-                "`,vcundeafen @user` — undeafen"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="👑 Ownership",
-            value=(
-                "`,vctransfer @user` 👑 — transfer ownership\n"
-                "`,vcclaim` 👑 — claim ownership if the owner left\n"
-                "`,vcmod @user` 👑 — add a VC moderator\n"
-                "`,vcremovemod @user` 👑 — remove VC mod"
-            ),
-            inline=False
-        )
-        if guild.icon:
-            embed.set_thumbnail(url=guild.icon.url)
-        embed.set_footer(text=f"TrapAI • {guild.name}  •  Private VCs")
-        return embed
-
-    # ─────────────────────────────────────────────────────────
-    # GIVEAWAYS
-    # ─────────────────────────────────────────────────────────
-    def giveaway_embed(self, guild: discord.Guild):
-        embed = discord.Embed(
-            title="🎉 Giveaway Commands",
-            color=discord.Color.gold(),
-            timestamp=discord.utils.utcnow()
-        )
-        embed.add_field(
-            name="Commands",
-            value=(
-                "`,giveaway <duration> <winners> <prize>`\n"
-                "> Start a giveaway with a real countdown timer\n"
-                "> *e.g.* `,giveaway 24h 1 Discord Nitro`\n\n"
-                "`,giveawayend [message_id]` — force-end early\n"
-                "`,giveaways` — list all active giveaways"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="⏱️ Duration Formats",
-            value="`30s` `10m` `2h` `3d`  *(minimum 10s)*",
-            inline=False
-        )
-        embed.add_field(
-            name="🎟️ How it works",
-            value=(
-                "• Click **🎉 Enter Giveaway** to join, click again to leave\n"
-                "• Click **👥 Entries** to see current count\n"
-                "• Winners are drawn randomly when the timer ends\n"
-                "• Winners are announced + mentioned in channel"
-            ),
-            inline=False
-        )
-        if guild.icon:
-            embed.set_thumbnail(url=guild.icon.url)
-        embed.set_footer(text=f"TrapAI • {guild.name}  •  Giveaways")
-        return embed
-
-    # ─────────────────────────────────────────────────────────
-    # VOUCH
-    # ─────────────────────────────────────────────────────────
-    def vouch_embed(self, guild: discord.Guild):
-        embed = discord.Embed(
-            title="✅ Vouch System",
-            color=discord.Color.from_rgb(87, 242, 135),
-            timestamp=discord.utils.utcnow()
-        )
-        embed.add_field(
-            name="✅ Standard Vouch",
-            value=(
-                "`,vouch @user [reason]` — vouch for a member\n"
-                "`,unvouch @user [reason]` — remove a vouch\n"
-                "`,vouches [@user]` — profile with progress bar, trust badge & history\n"
-                "`,vouchleaderboard` — top vouched members server-wide\n"
-                "`,vouchconfig threshold <N>` — set required vouches (admin)"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="🔒 Protected Role Vouch",
-            value=(
-                "`,vouch @user @role [reason]` — request a protected role for a member\n"
-                "  → Owner gets a DM with full member info + ✅ Approve / ❌ Reject buttons\n"
-                "  → Member is DM'd the outcome with the owner's decision note\n"
-                "  → Requester is notified when their request is actioned\n\n"
-                "`,protectedrole list` — see all protected roles & holder counts\n"
-                "`,protectedrole add @role` — lock a role (admin only)\n"
-                "`,protectedrole remove @role` — unlock a role (admin only)"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="📋 Pending & Tracking",
-            value=(
-                "`,pendingvouches` — view all open vouch-role requests (admin)\n"
-                "`,cancelvouch @user @role` — withdraw a pending request (admin)\n"
-                "`,vouchstats` — server-wide analytics: approval rate, top vouchers, strip count"
-            ),
-            inline=False
-        )
-        threshold     = VOUCH_CONFIG.get(guild.id, {}).get("threshold", 3)
-        protected_count = len(PROTECTED_ROLES.get(guild.id, set()))
-        embed.add_field(
-            name="⚙️ Current Config",
-            value=(
-                f"Threshold: **{threshold}** vouches required\n"
-                f"Protected roles: **{protected_count}** configured\n"
-                f"Pending requests: **{len(ROLE_VOUCH_PENDING.get(guild.id, {}))}** awaiting owner"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="ℹ️ How protected roles work",
-            value=(
-                "• Manual grants of protected roles are **instantly auto-stripped**\n"
-                "• The member & the granter both get a DM explaining it was blocked\n"
-                "• Staff use `,vouch @user @role reason` to submit a proper request\n"
-                "• Server **owner** gets a full context DM — ✅ Approve / ❌ Reject\n"
-                "• Owner can add a **note** when actioning — sent in the member's DM\n"
-                "• Requester is also notified of the final decision"
-            ),
-            inline=False
-        )
-        if guild.icon:
-            embed.set_thumbnail(url=guild.icon.url)
-        embed.set_footer(text=f"TrapAI • {guild.name}  •  Vouch System")
-        return embed
-
-    # ─────────────────────────────────────────────────────────
-    # STAFF TOOLS
-    # ─────────────────────────────────────────────────────────
-    def staff_embed(self, guild: discord.Guild):
-        embed = discord.Embed(
-            title="📋 Staff Tools",
-            color=discord.Color.from_rgb(254, 231, 92),
-            timestamp=discord.utils.utcnow()
-        )
-        embed.add_field(
-            name="📢 Announce",
-            value=(
-                "`,announce [#channel] <message>` — send a rich announcement embed\n"
-                "`,ann` is a shortcut alias\n\n"
-                "**Optional flags** (separate with `|`):\n"
-                "`--title <text>` — set a title\n"
-                "`--color <name/hex>` — red green blue gold purple teal orange pink\n"
-                "`--image <url>` — attach a large image\n"
-                "`--ping everyone/here` — ping @everyone or @here\n\n"
-                "*e.g.* `,announce #announcements --title 🔥 Update | --ping here | New features are live!`"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="📢 Staff PSA",
-            value=(
-                "`,staffpsa <type> <message>` — broadcast a styled staff announcement\n\n"
-                "**Types:** `info` `warning` `urgent` `critical` `update` `rules` `shutdown` `reminder`\n"
-                "• `urgent` pings `@here`  •  `critical` pings `@everyone`\n"
-                "• Each PSA has a **✅ Got it** acknowledge button\n"
-                "*e.g.* `,staffpsa urgent Raid incoming — lock all channels`"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="📋 Task Board",
-            value=(
-                "`,task <priority> [@user] <title> [— description]`\n"
-                "> Create a task card with interactive status buttons\n"
-                "> *e.g.* `,task high @mod Fix verify — test on mobile`\n\n"
-                "**Priorities:** `low` `medium` `high` `critical`\n\n"
-                "**Task Buttons:**\n"
-                "⚙️ In Progress  •  🔍 Review  •  ✅ Done\n"
-                "🚫 Blocked  •  📋 Reopen  •  💬 Add Note  •  👤 Reassign  •  🗑️ Delete\n\n"
-                "`,tasklist [status|@user]` — view/filter the task board\n"
-                "> *e.g.* `,tasklist blocked` • `,tasklist done` • `,tasklist @mod`"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="🏘️ Welcome",
-            value=(
-                "`,welcome [@user]` — re-send welcome card for a member\n"
-                "`,sendwelcome @user` — send welcome to a specific user\n"
-                "`,disablewelcome` — disable auto-welcome for new members"
-            ),
-            inline=False
-        )
-        if guild.icon:
-            embed.set_thumbnail(url=guild.icon.url)
-        embed.set_footer(text=f"TrapAI • {guild.name}  •  Staff Tools")
-        return embed
-
-    # ─────────────────────────────────────────────────────────
-    # ADMIN
-    # ─────────────────────────────────────────────────────────
-    def admin_embed(self, guild: discord.Guild):
-        embed = discord.Embed(
-            title="⚙️ Admin Commands",
-            color=discord.Color.from_rgb(88, 101, 242),
-            timestamp=discord.utils.utcnow()
-        )
-        embed.add_field(
-            name="🔧 Server Setup",
-            value=(
-                "`,setup` — create all server channels & roles\n"
-                "`,setupvc [category]` — set up the private VC system\n"
-                "`,setupjail [#channel]` — set up the jail system & restricted category\n"
-                "`,autorole` — view auto-roles given to every new member\n"
-                "`,autorole add @role` — add a join role\n"
-                "`,autorole remove @role` — remove a join role\n"
-                "`,autorole clear` — clear all join roles\n"
-                "`,rules` — post the server rules embed\n"
-                "`,sendverify` — post the verify button panel\n"
-                "`,sendtickets` — post the ticket panel with dropdown\n"
-                "`,restart` — restart TrapAI"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="🎫 Tickets",
-            value=(
-                "`,sendtickets` — post ticket panel\n"
-                "`,claimticket` — claim the current ticket\n"
-                "`,closeticket` — close & delete the current ticket\n"
-                "**Inside ticket channels:**\n"
-                "Row 1: 🙋 Claim  ↩️ Unclaim  ➕ Add User  ➖ Remove\n"
-                "Row 2: 🔒 Close  ✏️ Rename  🔴 Priority  📄 Transcript\n"
-                "Row 3: 🔐 Lock  🔓 Unlock\n"
-                "**Default categories:** General • Report • Appeal • Form a Alliance • Bug • Unban • Staff App\n"
-                "`,addticketcategory` / `,removeticketcategory` / `,ticketcategories` — manage categories for THIS server only (they don't appear in other servers)"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="📋 Log Channels",
-            value=(
-                "`,setlogchannel` — view all log keys & their current channels\n"
-                "`,setlogchannel <key> #channel` — pin a key to a specific channel\n"
-                "`,setlogchannel <key> reset` — clear pin, fall back to name lookup\n"
-                "*The bot auto-finds channels by name (e.g. `mod-logs`, `ban-logs`).\n"
-                "No hardcoded IDs needed — just name your channels correctly.*"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="💾 Backup & Restore",
-            value=(
-                "`,backup [label]` — snapshot server structure\n"
-                "`,listbackups` — view all saved backups\n"
-                "`,restore <label>` — rebuild from backup\n"
-                "`,deletebackup <label>` — delete a backup"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="🎯 Milestones",
-            value=(
-                "`,milestones` — view milestone config\n"
-                "`,setmilestone [#channel]` — set announcement channel\n"
-                "`,testmilestone` — preview a milestone announcement"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="🔗 Invite / Welcome",
-            value=(
-                "`,setinvite <link>` — set server invite used in DMs\n"
-                "`,welcome [@user]` — send welcome card\n"
-                "`,sendwelcome @user` — send welcome to specific user\n"
-                "`,disablewelcome` — disable auto-welcome"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="🖼️ GIF AutoMod Exemption",
-            value=(
-                "`,setgifrole @role` — allow this role to post GIFs without automod deleting them (this server only)\n"
-                "`,setgifrole` — reset to the default fallback role"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="🚨 Anti-Nuke Config",
-            value=(
-                f"Role delete threshold: **{NUKE_ROLE_LIMIT}** in **{NUKE_WINDOW}s**\n"
-                f"Channel delete threshold: **{NUKE_CHAN_LIMIT}** in **{NUKE_WINDOW}s**\n"
-                "Trigger: auto-strip all roles from suspect (admins exempt)"
-            ),
-            inline=False
-        )
-        if guild.icon:
-            embed.set_thumbnail(url=guild.icon.url)
-        embed.set_footer(text=f"TrapAI • {guild.name}  •  Admin")
-        return embed
-
-    # ─────────────────────────────────────────────────────────
-    # GAMES
-    # ─────────────────────────────────────────────────────────
-    def games_embed(self, guild: discord.Guild):
-        embed = discord.Embed(
-            title="🎮 Games & Economy",
-            color=discord.Color.from_rgb(87, 242, 135),
-            timestamp=discord.utils.utcnow()
-        )
-        embed.add_field(
-            name="💰 Economy",
-            value=(
-                "`,balance [@user]` — check your wallet & bank\n"
-                "`,work` — earn coins (1h cooldown)\n"
-                "`,daily` — claim daily reward (24h cooldown)\n"
-                "`,weekly` — claim weekly reward (7d cooldown)\n"
-                "`,deposit <amount|all>` — move coins to bank\n"
-                "`,withdraw <amount|all>` — take coins from bank\n"
-                "`,give @user <amount>` — send coins to someone\n"
-                "`,leaderboard` — top 10 richest members\n"
-                "`,rob @user` — attempt to rob someone (risky!)"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="🎰 Casino Games",
-            value=(
-                "`,slots <bet>` — spin the slot machine\n"
-                "`,coinflip <bet> <heads|tails>` — flip a coin\n"
-                "`,blackjack <bet>` — play blackjack vs the dealer\n"
-                "`,dice <bet> <1-6>` — guess the dice roll\n"
-                "`,crash <bet>` — cash out before the rocket crashes\n"
-                "`,highlow <bet>` — higher or lower card game"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="🎯 Fun Games",
-            value=(
-                "`,rps <rock|paper|scissors>` — rock paper scissors vs bot\n"
-                "`,trivia` — random trivia question\n"
-                "`,hangman` — guess the word letter by letter\n"
-                "`,numguess` — guess a number 1–100\n"
-                "`,8ball <question>` — ask the magic 8-ball\n"
-                "`,wordchain` — start a word chain game\n"
-                "`,tictactoe @user` — challenge someone to tic-tac-toe"
-            ),
-            inline=False
-        )
-        embed.add_field(
-            name="🏆 Leaderboards",
-            value=(
-                "`,leaderboard` — richest members\n"
-                "`,gamblers` — top casino winners"
-            ),
-            inline=False
-        )
-        if guild.icon:
-            embed.set_thumbnail(url=guild.icon.url)
-        embed.set_footer(text=f"TrapAI • {guild.name}  •  Games & Economy")
-        return embed
-
-    # ─────────────────────────────────────────────────────────
-    # BUTTONS  —  Row 0 (5) + Row 1 (5) + Row 2 (1)
-    # ─────────────────────────────────────────────────────────
-    @discord.ui.button(label="Home",       style=discord.ButtonStyle.secondary, emoji="🏠",  row=0)
-    async def home_btn(self, i: discord.Interaction, b: discord.ui.Button):
-        await i.response.edit_message(embed=self.home_embed(i.guild), view=self)
-
-    @discord.ui.button(label="Moderation", style=discord.ButtonStyle.danger,    emoji="🛡",  row=0)
-    async def mod_btn(self, i: discord.Interaction, b: discord.ui.Button):
-        await i.response.edit_message(embed=self.moderation_embed(i.guild), view=self)
-
-    @discord.ui.button(label="Jail",       style=discord.ButtonStyle.danger,    emoji="🔒",  row=0)
-    async def jail_btn(self, i: discord.Interaction, b: discord.ui.Button):
-        await i.response.edit_message(embed=self.jail_embed(i.guild), view=self)
-
-    @discord.ui.button(label="Security",   style=discord.ButtonStyle.success,   emoji="🤖",  row=0)
-    async def sec_btn(self, i: discord.Interaction, b: discord.ui.Button):
-        await i.response.edit_message(embed=self.security_embed(i.guild), view=self)
-
-    @discord.ui.button(label="Stats",      style=discord.ButtonStyle.primary,   emoji="📊",  row=0)
-    async def stats_btn(self, i: discord.Interaction, b: discord.ui.Button):
-        await i.response.edit_message(embed=self.stats_embed(i.guild), view=self)
-
-    @discord.ui.button(label="Roles",      style=discord.ButtonStyle.primary,   emoji="🏷️",  row=1)
-    async def roles_btn(self, i: discord.Interaction, b: discord.ui.Button):
-        await i.response.edit_message(embed=self.roles_embed(i.guild), view=self)
-
-    @discord.ui.button(label="VC",         style=discord.ButtonStyle.primary,   emoji="🎤",  row=1)
-    async def vc_btn(self, i: discord.Interaction, b: discord.ui.Button):
-        await i.response.edit_message(embed=self.vc_embed(i.guild), view=self)
-
-    @discord.ui.button(label="Giveaways",  style=discord.ButtonStyle.success,   emoji="🎉",  row=1)
-    async def gw_btn(self, i: discord.Interaction, b: discord.ui.Button):
-        await i.response.edit_message(embed=self.giveaway_embed(i.guild), view=self)
-
-    @discord.ui.button(label="Staff",      style=discord.ButtonStyle.secondary, emoji="📋",  row=1)
-    async def staff_btn(self, i: discord.Interaction, b: discord.ui.Button):
-        await i.response.edit_message(embed=self.staff_embed(i.guild), view=self)
-
-    @discord.ui.button(label="Admin",      style=discord.ButtonStyle.primary,   emoji="⚙️",  row=1)
-    async def admin_btn(self, i: discord.Interaction, b: discord.ui.Button):
-        await i.response.edit_message(embed=self.admin_embed(i.guild), view=self)
-
-    @discord.ui.button(label="Games",      style=discord.ButtonStyle.success,   emoji="🎮",  row=2)
-    async def games_btn(self, i: discord.Interaction, b: discord.ui.Button):
-        await i.response.edit_message(embed=self.games_embed(i.guild), view=self)
-
-    async def on_timeout(self):
-        for child in self.children:
-            child.disabled = True
+def _build_help_embed(guild: discord.Guild) -> discord.Embed:
+    """One consolidated embed covering every command — no drill-down,
+    no page-by-page buttons, just scroll one message."""
+    total = sum(len(names) for _, _, names in HELP_CATEGORIES)
+    embed = discord.Embed(
+        color=discord.Color.from_rgb(88, 101, 242),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_author(
+        name="TrapAI Command Reference",
+        icon_url=guild.icon.url if guild.icon else None
+    )
+    intro = (
+        f"**{total} commands** across **{len(HELP_CATEGORIES)} categories** — all use the `,` prefix.\n"
+        "Example: `,ban @user spamming`"
+    )
+    if COMMANDS_SITE_URL:
+        intro += f"\n\n🌐 **[Browse the full interactive command site]({COMMANDS_SITE_URL})**"
+    embed.description = intro
+    for icon, cat_name, names in HELP_CATEGORIES:
+        chips = " ".join(f"`,{n}`" for n in names)
+        embed.add_field(name=f"{icon} {cat_name} ({len(names)})", value=chips, inline=False)
+    if guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
+    embed.set_footer(text=f"TrapAI • {guild.name} • {guild.member_count:,} members")
+    return embed
 
 
 # ============================================================
@@ -5657,11 +4907,67 @@ async def ping(ctx):
     await ctx.send(embed=embed)
 
 
+@bot.command(name="help")
+async def help_cmd(ctx):
+    """Shows this message. Usage: ,help"""
+    await ctx.send(embed=_build_help_embed(ctx.guild))
+
+
 @bot.command(name="cmds")
 async def cmds(ctx):
-    view = CmdsView(ctx.author.id)
-    embed = view.home_embed(ctx.guild)
-    await ctx.send(embed=embed, view=view)
+    """Same as ,help — full command reference in one message. Usage: ,cmds"""
+    await ctx.send(embed=_build_help_embed(ctx.guild))
+
+
+@bot.command(name="setbotbio")
+@commands.is_owner()
+async def setbotbio(ctx, *, text: str = None):
+    """
+    Update the bot's public "About Me" description on Discord — this is a
+    GLOBAL change visible on the bot's profile in every server it's in,
+    not scoped to this one. Bot-owner only.
+    Usage:
+      ,setbotbio                — auto-generate using COMMANDS_SITE_URL
+      ,setbotbio <custom text>  — set your own description (max 400 chars)
+    """
+    if text is None:
+        if not COMMANDS_SITE_URL:
+            await ctx.send(
+                "❌ No text given and `COMMANDS_SITE_URL` isn't configured on this bot. "
+                "Either pass text yourself, or set that env var first.",
+                delete_after=10
+            )
+            return
+        text = f"Server protection, done right. 🛡️\n\nBrowse every command: {COMMANDS_SITE_URL}"
+
+    if len(text) > 400:
+        await ctx.send(f"❌ Description too long ({len(text)}/400 chars).", delete_after=8)
+        return
+
+    headers = {"Authorization": f"Bot {DISCORD_TOKEN}", "Content-Type": "application/json"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.patch(
+                "https://discord.com/api/v10/applications/@me",
+                headers=headers,
+                json={"description": text}
+            ) as resp:
+                if resp.status not in (200, 201):
+                    body = await resp.text()
+                    await ctx.send(f"❌ Discord rejected the update ({resp.status}): {body[:300]}", delete_after=12)
+                    return
+    except aiohttp.ClientError as e:
+        await ctx.send(f"❌ Couldn't reach Discord's API: {e}", delete_after=10)
+        return
+
+    embed = discord.Embed(
+        title="✅ Bot Bio Updated",
+        description=f"```{text}```",
+        color=discord.Color.green(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_footer(text="Visible on the bot's profile in every server it's in")
+    await ctx.send(embed=embed)
 
 
 # ============================================================

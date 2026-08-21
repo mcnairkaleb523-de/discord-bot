@@ -46,6 +46,7 @@ Optional:
 """
 
 import os
+import html
 import logging
 from datetime import datetime, timezone
 from urllib.parse import quote
@@ -206,6 +207,9 @@ _STYLE_AND_SCRIPT = """
   .cmd-tags { display: flex; flex-wrap: wrap; gap: .4rem; }
   .cmd-tag { font-family: 'SFMono-Regular', Consolas, monospace; font-size: .72rem; background: rgba(255, 198, 41, .08);
              color: var(--gold); border: 1px solid rgba(255, 198, 41, .18); border-radius: 6px; padding: .28rem .55rem; }
+  .see-all-link { display: inline-block; margin-top: 1.8rem; color: var(--gold); font-weight: 700;
+                   font-size: .9rem; text-decoration: none; transition: opacity .2s ease; }
+  .see-all-link:hover { opacity: .8; }
 
   /* ── Trust section ───────────────────────────────────── */
   .trust { padding: clamp(3rem, 7vw, 4.5rem) 1.5rem; text-align: center; }
@@ -286,6 +290,127 @@ document.addEventListener('DOMContentLoaded', function () {
 </script>
 """
 
+# Extra CSS/JS only the /commands page needs (search box, category tabs,
+# filterable card grid, copy-to-clipboard). Kept separate from
+# _STYLE_AND_SCRIPT so the verify page doesn't ship unused styles.
+_COMMANDS_PAGE_STYLE_AND_SCRIPT = """
+<style>
+  .cmd-page-header { padding: clamp(2.5rem, 6vw, 4rem) 1.5rem 1.5rem; text-align: center; }
+  .cmd-page-header h1 { font-size: clamp(1.8rem, 5vw, 2.6rem); font-weight: 800; margin: 0 0 .5rem; color: #f2f3f5; }
+  .cmd-page-header p { color: #8a8d94; margin: 0 0 2rem; }
+
+  .search-wrap { max-width: 520px; margin: 0 auto 1.5rem; position: relative; }
+  .search-input {
+    width: 100%; padding: .9rem 1.2rem .9rem 2.8rem; border-radius: 12px; box-sizing: border-box;
+    border: 1px solid rgba(255, 255, 255, .1); background: rgba(255, 255, 255, .04);
+    color: #fff; font-size: .95rem; font-family: inherit;
+  }
+  .search-input:focus { outline: none; border-color: var(--gold); box-shadow: 0 0 0 3px rgba(255, 198, 41, .15); }
+  .search-icon { position: absolute; left: 1rem; top: 50%; transform: translateY(-50%); opacity: .5; pointer-events: none; }
+  .search-hint { font-size: .72rem; color: #5c5f66; margin-top: .6rem; }
+  .search-hint kbd { font-family: monospace; background: rgba(255, 255, 255, .08); border-radius: 4px; padding: .05rem .35rem; }
+
+  .cat-tabs { display: flex; flex-wrap: wrap; gap: .5rem; justify-content: center; max-width: 950px;
+              margin: 0 auto 1rem; padding: 0 1.5rem; }
+  .cat-tab {
+    font-family: inherit; font-size: .8rem; font-weight: 600; color: #c7cad0;
+    background: rgba(255, 255, 255, .04); border: 1px solid rgba(255, 255, 255, .08);
+    border-radius: 20px; padding: .5rem 1rem; cursor: pointer; transition: all .15s ease; white-space: nowrap;
+  }
+  .cat-tab:hover { border-color: rgba(255, 198, 41, .4); color: #fff; }
+  .cat-tab.active { background: var(--gold); color: #0b0b0d; border-color: var(--gold); }
+  @media (max-width: 600px) {
+    .cat-tabs { flex-wrap: nowrap; overflow-x: auto; justify-content: flex-start; -webkit-overflow-scrolling: touch;
+                padding-bottom: .5rem; }
+  }
+
+  .result-count { text-align: center; color: #5c5f66; font-size: .82rem; margin: 1.5rem 0 1rem; }
+
+  .cmd-page-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 1rem;
+                    max-width: 1100px; margin: 0 auto; padding: 0 1.5rem 4rem; }
+  .cmd-page-card {
+    background: rgba(255, 255, 255, .03); border: 1px solid rgba(255, 255, 255, .07); border-radius: 14px;
+    padding: 1.2rem; transition: border-color .15s ease, transform .15s ease;
+  }
+  .cmd-page-card:hover { border-color: rgba(255, 198, 41, .3); transform: translateY(-2px); }
+  .cmd-page-card.hidden { display: none; }
+  .cmd-page-card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: .5rem; margin-bottom: .5rem; }
+  .cmd-page-name { font-family: 'SFMono-Regular', Consolas, monospace; font-size: 1rem; font-weight: 700; color: var(--gold); }
+  .copy-btn {
+    background: none; border: 1px solid rgba(255, 255, 255, .1); border-radius: 6px; color: #8a8d94;
+    font-size: .7rem; padding: .25rem .5rem; cursor: pointer; font-family: inherit;
+    transition: all .15s ease; flex-shrink: 0;
+  }
+  .copy-btn:hover { border-color: var(--gold); color: var(--gold); }
+  .cmd-page-desc { font-size: .85rem; color: #a7abb3; line-height: 1.5; margin: 0 0 .6rem; }
+  .cmd-page-meta { display: flex; flex-wrap: wrap; gap: .35rem; align-items: center; }
+  .cmd-page-cat-tag { font-size: .68rem; background: rgba(255, 255, 255, .05); color: #8a8d94; border-radius: 5px; padding: .15rem .45rem; }
+  .cmd-page-alias { font-size: .68rem; color: #5c5f66; font-family: monospace; }
+  .cmd-page-sig { font-size: .72rem; color: #6b6e75; font-family: monospace; margin-top: .5rem; }
+
+  .empty-state { text-align: center; color: #5c5f66; padding: 3rem 1.5rem; grid-column: 1 / -1; display: none; }
+</style>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  var search = document.getElementById('cmd-search');
+  var tabs = document.querySelectorAll('.cat-tab');
+  var cards = document.querySelectorAll('.cmd-page-card');
+  var countEl = document.getElementById('result-count');
+  var emptyEl = document.getElementById('empty-state');
+  var activeCat = 'all';
+
+  function applyFilter() {
+    var q = (search.value || '').trim().toLowerCase();
+    var shown = 0;
+    cards.forEach(function (card) {
+      var matchesCat = activeCat === 'all' || card.dataset.cat === activeCat;
+      var matchesSearch = !q || card.dataset.search.indexOf(q) !== -1;
+      var visible = matchesCat && matchesSearch;
+      card.classList.toggle('hidden', !visible);
+      if (visible) shown++;
+    });
+    countEl.textContent = 'Showing ' + shown + ' of ' + cards.length + ' commands';
+    emptyEl.style.display = shown === 0 ? 'block' : 'none';
+  }
+
+  if (search) search.addEventListener('input', applyFilter);
+  tabs.forEach(function (tab) {
+    tab.addEventListener('click', function () {
+      tabs.forEach(function (t) { t.classList.remove('active'); });
+      tab.classList.add('active');
+      activeCat = tab.dataset.cat;
+      applyFilter();
+    });
+  });
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === '/' && document.activeElement !== search) {
+      e.preventDefault();
+      search.focus();
+    }
+  });
+
+  document.querySelectorAll('.copy-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var cmd = btn.dataset.cmd;
+      var original = btn.textContent;
+      function done(ok) {
+        btn.textContent = ok ? 'Copied!' : 'Failed';
+        setTimeout(function () { btn.textContent = original; }, 1200);
+      }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(cmd).then(function () { done(true); }, function () { done(false); });
+      } else {
+        done(false);
+      }
+    });
+  });
+
+  applyFilter();
+});
+</script>
+"""
+
 
 BRAND_GOLD = "#FFC629"
 
@@ -307,11 +432,13 @@ _BG_DECO = """<div class="bg-deco">
   <span class="bg-dot" style="top:20%;left:28%;width:3px;height:3px;"></span>
 </div>"""
 
-# Static command showcase — a representative slice of what TrapAI can do,
-# grouped by category. This service is a separate deployment from bot.py
-# with no shared state/API, so it can't introspect the bot's live command
-# list — this is a hand-picked, honest sample, not the full list (that's
-# what ,help inside Discord is for).
+# Static command showcase — a small teaser used on the verify page, linking
+# through to the full /commands site for the real thing (COMMAND_CATALOG
+# below). This service is a separate deployment from bot.py with no shared
+# state/API, so it can't introspect the bot's live command list — both of
+# these are hand-authored and kept in sync manually with HELP_CATEGORIES /
+# the real registered commands in bot.py (see that file's comment on
+# HELP_CATEGORIES for the other half of this pairing).
 COMMAND_CATEGORIES = [
     ("🛡️", "Moderation", ["kick", "ban", "mute", "timeout", "warn", "jail"]),
     ("🎤", "Voice Channels", ["vclock", "vckick", "vctransfer", "vcclaim"]),
@@ -319,6 +446,168 @@ COMMAND_CATEGORIES = [
     ("📊", "Stats & Economy", ["chatstats", "vcstats", "daily", "blackjack"]),
     ("🏷️", "Roles", ["role", "roleall", "massrole", "br"]),
     ("🎉", "Community", ["poll", "giveaway", "birthday", "snipe"]),
+]
+
+# COMMAND_CATALOG entries: (category, icon, name, aliases, usage_signature,
+# description) — every real command in bot.py, for the full /commands page.
+COMMAND_CATALOG = [
+    ('Moderation', '🛡️', 'kick', [], '<member> [reason=No reason provided]', 'Kick a member from the server.'),
+    ('Moderation', '🛡️', 'ban', [], '<member> [reason=No reason provided]', 'Ban a member from the server.'),
+    ('Moderation', '🛡️', 'mute', [], '<member> [reason=No reason provided]', 'Apply the mute role to a member.'),
+    ('Moderation', '🛡️', 'unmute', [], '<member> [reason=No reason provided]', 'Remove the mute role from a member.'),
+    ('Moderation', '🛡️', 'timeout', [], '<member> <minutes> [reason=No reason provided]', 'Apply a native Discord timeout to a member.'),
+    ('Moderation', '🛡️', 'warn', [], '<member> [reason=No reason provided]', 'Log a formal warning against a member.'),
+    ('Moderation', '🛡️', 'warnings', [], '[member]', "View a member's warning history."),
+    ('Moderation', '🛡️', 'clearwarnings', [], '<member>', "Clear all of a member's logged warnings."),
+    ('Moderation', '🛡️', 'modhistory', ['history', 'modlogs'], '[member] [filter_action]', "View a member's full moderation history — warn, jail, ban, kick, timeout, mute, and more."),
+    ('Moderation', '🛡️', 'hardban', [], '<user> [reason=No reason provided]', 'Permanently hard-ban a user — they will be instantly re-banned if they rejoin.'),
+    ('Moderation', '🛡️', 'unhardban', [], '<user_id> [reason=No reason provided]', 'Remove a hard-ban and unban the user.'),
+    ('Moderation', '🛡️', 'hardbans', [], '', 'List all hard-banned users in this server.'),
+    ('Moderation', '🛡️', 'clear', [], '<amount>', 'Bulk-delete recent messages in this channel.'),
+    ('Moderation', '🛡️', 'purge', [], '<amount> [member]', 'Bulk-delete messages, optionally from a specific user.'),
+    ('Moderation', '🛡️', 'lock', [], '', "Lock this channel so @everyone can't send messages."),
+    ('Moderation', '🛡️', 'unlock', [], '', 'Unlock this channel so @everyone can send again.'),
+    ('Moderation', '🛡️', 'hide', [], '', 'Hide this channel from @everyone.'),
+    ('Moderation', '🛡️', 'unhide', [], '', 'Make a hidden channel visible again.'),
+    ('Moderation', '🛡️', 'slowmode', [], '<seconds> [channel]', "Set this channel's slowmode delay."),
+    ('Moderation', '🛡️', 'nuke', [], '', 'Clone and delete a channel to wipe its history.'),
+    ('Moderation', '🛡️', 'lockdown', [], '', 'Lock every text channel on the server at once.'),
+    ('Moderation', '🛡️', 'unlockdown', [], '', 'Unlock every text channel on the server at once.'),
+    ('Moderation', '🛡️', 'nickname', [], '<member> [new_nick]', "Set or clear a member's nickname."),
+    ('Moderation', '🛡️', 'strip', [], '<member>', "Strip every role from a member (except any above the bot's own)."),
+    ('Moderation', '🛡️', 'trapwarn', [], '<member> [reason=Suspicious activity detected]', 'Send a formatted security warning to a member.'),
+    ('Moderation', '🛡️', 'trapscan', [], '<member>', "Scan a member's account for red flags."),
+    ('Moderation', '🛡️', 'restart', [], '', 'Restart the bot process — no need to Ctrl+C and re-run python bot.py.'),
+    ('Jail & Anti-Raid', '🔒', 'jail', [], '<member> <duration> [reason=No reason provided]', "Strip a member's roles and confine them until unjailed."),
+    ('Jail & Anti-Raid', '🔒', 'unjail', [], '<member> [reason=No reason provided]', 'Release a member from jail early.'),
+    ('Jail & Anti-Raid', '🔒', 'setupjail', [], '[channel]', 'Set up the jail system.'),
+    ('Jail & Anti-Raid', '🔒', 'antiraid', [], '[state]', "Turn this server's anti-raid auto-ban on or off."),
+    ('Jail & Anti-Raid', '🔒', 'raidwhitelist', [], '[action] [member]', 'Manage members exempt from the anti-raid auto-ban.'),
+    ('Verification', '🤖', 'verify', [], '<member>', 'Manually verify a member (non-OAuth fallback).'),
+    ('Verification', '🤖', 'unverify', [], '<member>', "Revoke a member's verified status."),
+    ('Verification', '🤖', 'denyverify', [], '<member> [reason=Verification denied by staff]', 'Deny a pending manual verification request.'),
+    ('Verification', '🤖', 'sendverify', [], '', 'Post the verification panel (real Discord OAuth, or a simple fallback button).'),
+    ('Verification', '🤖', 'setverifybackup', [], '[guild_id]', 'Set the backup server verified members get auto-joined to.'),
+    ('Roles', '🏷️', 'role', [], '', 'Role management commands. Use ,role <subcommand>.'),
+    ('Roles', '🏷️', 'roleall', [], '<role>', 'Give a role to every member in the server.'),
+    ('Roles', '🏷️', 'massrole', [], '<role> [filter_role]', 'Give a role to every member matching a filter.'),
+    ('Roles', '🏷️', 'massunrole', [], '<role> [filter_role]', 'Remove a role from every member matching a filter.'),
+    ('Roles', '🏷️', 'restoreallroles', [], '<member>', 'Restore all roles that were snapshotted by ,strip.'),
+    ('Roles', '🏷️', 'autorole', [], '[action] [role]', 'Manage roles automatically given to every new member on join.'),
+    ('Roles', '🏷️', 'setgifrole', ['setmemberrole'], '[role]', "Set which role is exempt from automod's GIF/link filter."),
+    ('Roles', '🏷️', 'protectedrole', [], '[action] [role]', 'Manage the list of roles that can ONLY be granted via ,vouch — never manually.'),
+    ('Roles', '🏷️', 'br', ['boosterrole', 'boostrole'], '[action] [arg]', 'Manage your custom booster role — a perk for active server boosters.'),
+    ('Voice Channels', '🎤', 'vclock', [], '', 'Lock your temp VC so nobody new can join.'),
+    ('Voice Channels', '🎤', 'vcunlock', [], '', 'Unlock your temp VC.'),
+    ('Voice Channels', '🎤', 'vchide', [], '', 'Hide your temp VC from the channel list.'),
+    ('Voice Channels', '🎤', 'vcshow', [], '', 'Make your hidden temp VC visible again.'),
+    ('Voice Channels', '🎤', 'vcname', [], '<new_name>', 'Rename your temp VC.'),
+    ('Voice Channels', '🎤', 'vclimit', [], '<limit>', "Set your VC's user limit."),
+    ('Voice Channels', '🎤', 'vcbitrate', [], '<kbps>', "Set your temp VC's bitrate."),
+    ('Voice Channels', '🎤', 'vcregion', [], '[region=auto]', "Set your VC's voice region."),
+    ('Voice Channels', '🎤', 'vckick', [], '<member>', 'Kick a member from your VC.'),
+    ('Voice Channels', '🎤', 'vcban', [], '<member>', 'Ban a member from your temp VC.'),
+    ('Voice Channels', '🎤', 'vcunban', [], '<member>', 'Unban a member from your VC.'),
+    ('Voice Channels', '🎤', 'vcpermit', [], '<member>', 'Allow a specific user into your locked VC.'),
+    ('Voice Channels', '🎤', 'vcmute', [], '<member>', 'Server-mute a member in your VC.'),
+    ('Voice Channels', '🎤', 'vcunmute', [], '<member>', "Remove a member's server-mute in your VC."),
+    ('Voice Channels', '🎤', 'vcdeafen', [], '<member>', 'Server-deafen a member in your VC.'),
+    ('Voice Channels', '🎤', 'vcundeafen', [], '<member>', "Remove a member's server-deafen in your VC."),
+    ('Voice Channels', '🎤', 'vctransfer', [], '<member>', 'Transfer ownership of your temp VC to someone else.'),
+    ('Voice Channels', '🎤', 'vcclaim', [], '', 'Claim ownership of your current temp VC if the owner has left it.'),
+    ('Voice Channels', '🎤', 'vcmod', [], '<member>', 'Add a moderator to your temp VC.'),
+    ('Voice Channels', '🎤', 'vcremovemod', [], '<member>', 'Remove a moderator from your temp VC.'),
+    ('Voice Channels', '🎤', 'vcstats', [], '[target]', 'View voice chat time — a personal rank card by default.'),
+    ('Voice Channels', '🎤', 'setupvc', [], '[category_name]', 'Create the ➕ Create VC trigger channel in this server.'),
+    ('Voice Channels', '🎤', 'setunmutevc', [], '[action] [channel]', "Manage self-service VCs that instantly clear a member's mute/deafen."),
+    ('Tickets', '🎫', 'sendtickets', [], '', 'Send the ticket panel to the current channel.'),
+    ('Tickets', '🎫', 'addticketcategory', [], '<key> [rest]', 'Add or update a custom ticket category for this server.'),
+    ('Tickets', '🎫', 'removeticketcategory', [], '<key>', 'Remove a custom ticket category from THIS server.'),
+    ('Tickets', '🎫', 'ticketcategories', [], '', 'List all ticket categories active in this server.'),
+    ('Tickets', '🎫', 'setticketformat', [], '<key> [template]', 'Set the application-form text posted when a ticket of this category opens.'),
+    ('Tickets', '🎫', 'claimticket', [], '', 'Claim the current ticket channel.'),
+    ('Tickets', '🎫', 'closeticket', [], '', 'Close and delete the current ticket channel.'),
+    ('Stats & Info', '📊', 'whois', [], '[member]', 'Show detailed profile info for a member.'),
+    ('Stats & Info', '📊', 'chatstats', [], '[target]', 'View chat stats — a personal rank card by default.'),
+    ('Stats & Info', '📊', 'serverstats', ['ss', 'sinfo'], '', 'Show a full interactive multi-page server stats report.'),
+    ('Stats & Info', '📊', 'invites', [], '[member]', 'Show how many people a user has invited.'),
+    ('Stats & Info', '📊', 'invitelogs', [], '[member]', 'Show invite join logs for a user.'),
+    ('Stats & Info', '📊', 'inviteleaderboard', [], '', 'Show the top inviters in the server.'),
+    ('Stats & Info', '📊', 'setinvite', [], '[invite_link]', "Set the server's permanent invite link used in DM notifications."),
+    ('Stats & Info', '📊', 'milestones', [], '', 'Show all configured milestones and the current announcement channel.'),
+    ('Stats & Info', '📊', 'setmilestone', [], '[channel]', 'Set the channel where milestone announcements are posted.'),
+    ('Stats & Info', '📊', 'testmilestone', [], '', 'Send a preview milestone announcement in the configured channel.'),
+    ('Stats & Info', '📊', 'ping', [], '', "Check the bot's latency."),
+    ('Stats & Info', '📊', 'exitsurveys', ['exitreasons'], '[limit=10]', 'View recent exit survey responses — why members said they left.'),
+    ('Vouch', '✅', 'vouch', [], '[member] [role] [reason=No reason provided]', 'Vouch for a member, optionally requesting a protected role for them.'),
+    ('Vouch', '✅', 'unvouch', [], '<member> [reason=No reason provided]', 'Remove a vouch from a member, stripping any protected roles it earned.'),
+    ('Vouch', '✅', 'cancelvouch', [], '[member] [role]', 'Cancel a pending vouch-role request.'),
+    ('Vouch', '✅', 'pendingvouches', [], '', 'List all open vouch-role requests awaiting owner approval.'),
+    ('Vouch', '✅', 'vouches', [], '[member]', 'Show vouch count and history for a member.'),
+    ('Vouch', '✅', 'vouchleaderboard', [], '', 'Show the top vouched members in the server.'),
+    ('Vouch', '✅', 'vouchstats', [], '', 'Server-wide vouch analytics.'),
+    ('Vouch', '✅', 'vouchconfig', [], '[setting] [value]', 'Configure the vouch system.'),
+    ('Giveaways & Polls', '🎉', 'giveaway', [], '<duration> <winners> <prize>', 'Start a giveaway.'),
+    ('Giveaways & Polls', '🎉', 'giveawayend', [], '[message_id]', 'Force-end a giveaway early.'),
+    ('Giveaways & Polls', '🎉', 'giveaways', [], '', 'List all active giveaways.'),
+    ('Giveaways & Polls', '🎉', 'poll', [], '<rest>', 'Create a button-based poll with a live-updating results bar chart.'),
+    ('Giveaways & Polls', '🎉', 'pollend', [], '[message_id]', 'Force-close a poll early.'),
+    ('Economy & Games', '💰', 'balance', ['bal', 'wallet', 'money'], '[member]', "Check your (or someone's) wallet balance."),
+    ('Economy & Games', '💰', 'daily', [], '', 'Claim your daily coin reward.'),
+    ('Economy & Games', '💰', 'weekly', [], '', 'Claim your weekly coin reward.'),
+    ('Economy & Games', '💰', 'work', [], '', 'Work a job for a small coin reward.'),
+    ('Economy & Games', '💰', 'rob', [], '[member]', 'Attempt to steal coins from another member.'),
+    ('Economy & Games', '💰', 'give', ['pay', 'transfer'], '[member] [amount]', 'Give coins to another member.'),
+    ('Economy & Games', '💰', 'deposit', ['dep'], '[amount]', 'Move coins from your wallet into your bank.'),
+    ('Economy & Games', '💰', 'withdraw', ['with'], '[amount]', 'Move coins from your bank back into your wallet.'),
+    ('Economy & Games', '💰', 'leaderboard', ['lb', 'rich'], '', 'Show the richest members on the server.'),
+    ('Economy & Games', '💰', 'gamblers', [], '', 'Show the biggest gamblers on the server.'),
+    ('Economy & Games', '💰', 'slots', [], '[bet]', 'Spin the slot machine and bet your coins.'),
+    ('Economy & Games', '💰', 'blackjack', ['bj'], '[bet]', 'Play a hand of blackjack against the house.'),
+    ('Economy & Games', '💰', 'coinflip', ['cf', 'flip'], '[bet] [choice]', 'Flip a coin and bet on the result.'),
+    ('Economy & Games', '💰', 'dice', [], '[bet] [guess]', 'Roll the dice and bet on the outcome.'),
+    ('Economy & Games', '💰', '8ball', ['eightball'], '[question]', 'Ask the magic 8-ball a yes/no question.'),
+    ('Economy & Games', '💰', 'trivia', [], '', 'Answer a trivia question for a coin reward.'),
+    ('Economy & Games', '💰', 'hangman', [], '', 'Play a game of hangman.'),
+    ('Economy & Games', '💰', 'tictactoe', ['ttt'], '[opponent]', 'Play tic-tac-toe against the bot or another member.'),
+    ('Economy & Games', '💰', 'numguess', ['ng', 'guess'], '', 'Guess the secret number in as few tries as possible.'),
+    ('Economy & Games', '💰', 'rockpaperscissors', ['rps'], '[choice]', 'Play rock-paper-scissors against the bot.'),
+    ('Economy & Games', '💰', 'highlow', ['hl'], '[bet]', 'Guess whether the next number is higher or lower.'),
+    ('Economy & Games', '💰', 'crash', [], '[bet]', 'Play the crash multiplier gambling game.'),
+    ('Economy & Games', '💰', 'games', ['gamelist', 'gamemenu'], '', 'Show the interactive game center with all commands.'),
+    ('Birthdays', '🎂', 'birthday', [], '[member]', "Show a member's saved birthday."),
+    ('Birthdays', '🎂', 'removebirthday', [], '', 'Remove your saved birthday.'),
+    ('Birthdays', '🎂', 'setbirthday', [], '[date]', 'Set your birthday.'),
+    ('Birthdays', '🎂', 'setbirthdaychannel', [], '[channel]', 'Set the channel birthday announcements are posted to.'),
+    ('Birthdays', '🎂', 'birthdaylist', ['birthdays'], '', 'List all upcoming birthdays in the server.'),
+    ('Birthdays', '🎂', 'settimezone', ['mytimezone'], '[offset]', 'Set your timezone so birthday announcements fire at YOUR local midnight.'),
+    ('Boosts & Vanity', '🚀', 'setboostchannel', [], '[channel]', 'Configure where the public boost thank-you message posts.'),
+    ('Boosts & Vanity', '🚀', 'setvanitycode', [], '[code]', 'Manually override the vanity invite code to watch for in statuses.'),
+    ('Boosts & Vanity', '🚀', 'setvanityrole', [], '[role]', "Set the role auto-granted for repping this server's vanity link."),
+    ('Boosts & Vanity', '🚀', 'vanityconfig', [], '', "Show this server's current vanity role tracking configuration."),
+    ('Staff Tools', '📋', 'staffpsa', [], '[psa_type=info] <message>', 'Post a richly styled staff PSA with an acknowledge button.'),
+    ('Staff Tools', '📋', 'task', [], '[priority=medium] [assigned] <title_and_desc>', 'Create a staff task card with full interactive buttons.'),
+    ('Staff Tools', '📋', 'tasklist', [], '[filter_status]', 'View the staff task board.'),
+    ('Admin & Setup', '⚙️', 'setup', [], '', 'Run full first-time server setup — categories, channels, roles.'),
+    ('Admin & Setup', '⚙️', 'backup', [], '[label]', 'Take a snapshot of the server structure.'),
+    ('Admin & Setup', '⚙️', 'restore', [], '<label>', 'Restore the server from a backup. Adds missing channels/roles — does NOT delete existing ones.'),
+    ('Admin & Setup', '⚙️', 'listbackups', [], '', 'List all available backups for this server.'),
+    ('Admin & Setup', '⚙️', 'deletebackup', [], '<label>', 'Delete a saved backup.'),
+    ('Admin & Setup', '⚙️', 'exportconfig', [], '', 'Dump a readable summary of everything configured for THIS server.'),
+    ('Admin & Setup', '⚙️', 'setlogchannel', [], '[key] [channel]', 'Pin a specific channel for a log key.'),
+    ('Admin & Setup', '⚙️', 'setwelcome', [], '[channel] [option]', 'Configure the auto-welcome system.'),
+    ('Admin & Setup', '⚙️', 'disablewelcome', [], '', 'Disable the auto-welcome message for new members.'),
+    ('Admin & Setup', '⚙️', 'sendwelcome', [], '<member>', 'Send the full welcome card for a specific member in the current channel.'),
+    ('Admin & Setup', '⚙️', 'welcome', [], '[member]', 'Re-send or preview the welcome card.'),
+    ('Admin & Setup', '⚙️', 'sendinvite', [], '[user_target] [message]', "Send the server invite + optional personal message to any user's DMs."),
+    ('Admin & Setup', '⚙️', 'announce', ['ann'], '[channel] [text]', 'Send a polished announcement embed to any channel.'),
+    ('Fun & Utility', '🎲', 'snipe', ['s'], '[index=1]', 'Show a recently deleted message, including any attached image.'),
+    ('Fun & Utility', '🎲', 'clearsnipe', [], '', 'Clear the snipe/editsnipe cache for this channel.'),
+    ('Fun & Utility', '🎲', 'editsnipe', ['es'], '[index=1]', "Show a recently edited message's before/after history."),
+    ('Fun & Utility', '🎲', 'quote', [], '[target]', 'Quote a message as a beautiful embed card.'),
+    ('Fun & Utility', '🎲', 'rules', [], '', 'Post the server rules.'),
+    ('Fun & Utility', '🎲', 'cmds', [], '', 'Full command reference in one message (same as ,help).'),
+    ('Fun & Utility', '🎲', 'help', [], '', 'Full command reference in one message — every command, grouped by category.'),
 ]
 
 # Static trust-grid content — verification value props, not guild-specific.
@@ -432,8 +721,9 @@ def _page(title: str, message: str, ok: bool = True, *, guild_name: str = None,
 <section class="stats-bar">{stats_html}</section>
 <section class="commands" id="commands">
   <h2>Commands</h2>
-  <p class="trust-sub">A taste of what TrapAI can do — the full list is inside Discord via <code>,help</code>.</p>
+  <p class="trust-sub">A taste of what TrapAI can do.</p>
   <div class="cmd-grid">{commands_html}</div>
+  <a class="see-all-link" href="/commands">See the full interactive command list →</a>
 </section>
 <section class="trust">
   <h2>Why we ask you to verify</h2>
@@ -655,6 +945,91 @@ async def handle_callback(request: web.Request) -> web.Response:
     )
 
 
+def _command_card_html(cat: str, icon: str, name: str, aliases: list, sig: str, desc: str) -> str:
+    alias_text = " ".join(f",{a}" for a in aliases)
+    haystack = html.escape(" ".join([name, alias_text, desc, cat]).lower())
+    alias_html = f'<span class="cmd-page-alias">aka {html.escape(alias_text)}</span>' if aliases else ""
+    usage = f",{name} {sig}".strip() if sig else f",{name}"
+    return (
+        f'<div class="cmd-page-card" data-cat="{html.escape(cat)}" data-search="{haystack}">'
+        f'<div class="cmd-page-card-top">'
+        f'<span class="cmd-page-name">,{html.escape(name)}</span>'
+        f'<button class="copy-btn" data-cmd="{html.escape(f",{name}")}">Copy</button>'
+        f'</div>'
+        f'<p class="cmd-page-desc">{html.escape(desc)}</p>'
+        f'<div class="cmd-page-meta"><span class="cmd-page-cat-tag">{icon} {html.escape(cat)}</span>{alias_html}</div>'
+        f'<div class="cmd-page-sig">{html.escape(usage)}</div>'
+        f'</div>'
+    )
+
+
+def _commands_page() -> str:
+    total = len(COMMAND_CATALOG)
+    cats_ordered = []
+    seen = set()
+    counts = {}
+    for cat, icon, *_ in COMMAND_CATALOG:
+        counts[cat] = counts.get(cat, 0) + 1
+        if cat not in seen:
+            seen.add(cat)
+            cats_ordered.append((cat, icon))
+
+    tabs_html = f'<button class="cat-tab active" data-cat="all">All ({total})</button>' + "".join(
+        f'<button class="cat-tab" data-cat="{html.escape(cat)}">{icon} {html.escape(cat)} ({counts[cat]})</button>'
+        for cat, icon in cats_ordered
+    )
+
+    cards_html = "".join(
+        _command_card_html(cat, icon, name, aliases, sig, desc)
+        for cat, icon, name, aliases, sig, desc in COMMAND_CATALOG
+    )
+
+    accent_style = f"<style>:root {{ --accent: {BRAND_GOLD}; --accent-soft: {BRAND_GOLD}22; --gold: {BRAND_GOLD}; }}</style>"
+
+    nav_html = (
+        '<nav class="nav">'
+        '<div class="nav-brand"><span class="nav-logo">🛡️</span> TrapAI</div>'
+        '<div class="nav-right"><span class="nav-badge">🌐 Command Reference</span></div>'
+        '</nav>'
+    )
+
+    return f"""<!doctype html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TrapAI Commands</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+{accent_style}
+{_STYLE_AND_SCRIPT}
+{_COMMANDS_PAGE_STYLE_AND_SCRIPT}
+</head>
+<body class="ok">
+{nav_html}
+<div class="cmd-page-header">
+  <h1>Every TrapAI Command</h1>
+  <p>{total} commands across {len(cats_ordered)} categories — search, filter, or browse by category.</p>
+  <div class="search-wrap">
+    <span class="search-icon">🔍</span>
+    <input id="cmd-search" class="search-input" type="text" placeholder="Search commands..." autocomplete="off">
+    <div class="search-hint">Press <kbd>/</kbd> to search</div>
+  </div>
+</div>
+<div class="cat-tabs">{tabs_html}</div>
+<div class="result-count" id="result-count">Showing {total} of {total} commands</div>
+<div class="cmd-page-grid">
+  {cards_html}
+  <div class="empty-state" id="empty-state">No commands match your search.</div>
+</div>
+<footer class="site-footer">Secured by Discord OAuth2 • TrapAI</footer>
+</body></html>"""
+
+
+async def handle_commands_page(request: web.Request) -> web.Response:
+    return web.Response(text=_commands_page(), content_type="text/html", status=200)
+
+
 async def handle_health(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
@@ -676,6 +1051,7 @@ def build_authorize_url(guild_id: int, backup_guild_id: int | None = None) -> st
 def create_app() -> web.Application:
     app = web.Application()
     app.router.add_get("/callback", handle_callback)
+    app.router.add_get("/commands", handle_commands_page)
     app.router.add_get("/", handle_health)
     app.router.add_get("/health", handle_health)
     return app
