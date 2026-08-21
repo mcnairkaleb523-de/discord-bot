@@ -8448,22 +8448,87 @@ async def role_info(ctx, role: discord.Role):
     await ctx.send(embed=embed)
 
 
+_ROLE_LIST_PAGE_SIZE = 40  # generous — most servers' full role list fits on one page
+
+
+def _build_role_list_pages(guild: discord.Guild, requester) -> list:
+    """Every role in the guild, split into embeds of _ROLE_LIST_PAGE_SIZE —
+    never silently truncated like the old "…and N more roles" cutoff."""
+    roles = sorted(guild.roles[1:], key=lambda r: r.position, reverse=True)
+    lines = [f"{r.mention} — `{r.id}` — {len(r.members)} member(s)" for r in roles]
+    chunks = [lines[i:i + _ROLE_LIST_PAGE_SIZE] for i in range(0, len(lines), _ROLE_LIST_PAGE_SIZE)] or [[]]
+    total_pages = len(chunks)
+
+    pages = []
+    for idx, chunk in enumerate(chunks, start=1):
+        embed = discord.Embed(
+            title=f"🏷️ Roles in {guild.name}",
+            description="\n".join(chunk) if chunk else "No roles.",
+            color=discord.Color.blurple(),
+            timestamp=discord.utils.utcnow()
+        )
+        footer = f"{len(roles)} total roles"
+        if total_pages > 1:
+            footer += f" • Page {idx}/{total_pages}"
+        footer += f" • Requested by {requester}"
+        embed.set_footer(text=footer, icon_url=requester.display_avatar.url)
+        pages.append(embed)
+    return pages
+
+
+class RoleListView(discord.ui.View):
+    def __init__(self, pages: list, author_id: int):
+        super().__init__(timeout=180)
+        self.pages = pages
+        self.index = 0
+        self.author_id = author_id
+        self._sync_buttons()
+
+    def _sync_buttons(self):
+        self.prev_btn.disabled = self.index == 0
+        self.next_btn.disabled = self.index >= len(self.pages) - 1
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ You can't page through someone else's role list.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary)
+    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.index = max(0, self.index - 1)
+        self._sync_buttons()
+        await interaction.response.edit_message(embed=self.pages[self.index], view=self)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.index = min(len(self.pages) - 1, self.index + 1)
+        self._sync_buttons()
+        await interaction.response.edit_message(embed=self.pages[self.index], view=self)
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+
+async def _send_role_list(ctx):
+    pages = _build_role_list_pages(ctx.guild, ctx.author)
+    if len(pages) > 1:
+        await ctx.send(embed=pages[0], view=RoleListView(pages, ctx.author.id))
+    else:
+        await ctx.send(embed=pages[0])
+
+
 @role_group.command(name="list")
 async def role_list(ctx):
-    """List all roles in the server. Usage: ,role list"""
-    roles = sorted(ctx.guild.roles[1:], key=lambda r: r.position, reverse=True)
-    lines = [f"{r.mention} — `{r.id}` — {len(r.members)} member(s)" for r in roles]
-    page = "\n".join(lines[:20])
-    if len(lines) > 20:
-        page += f"\n… and {len(lines) - 20} more roles"
-    embed = discord.Embed(
-        title=f"🏷️ Roles in {ctx.guild.name}",
-        description=page,
-        color=discord.Color.blurple(),
-        timestamp=discord.utils.utcnow()
-    )
-    embed.set_footer(text=f"{len(roles)} total roles • Requested by {ctx.author}", icon_url=ctx.author.display_avatar.url)
-    await ctx.send(embed=embed)
+    """List every role in the server, paginated with buttons if it doesn't fit on one page. Usage: ,role list"""
+    await _send_role_list(ctx)
+
+
+@bot.command(name="roles")
+async def roles_cmd(ctx):
+    """Same as ,role list — view every role in the server. Usage: ,roles"""
+    await _send_role_list(ctx)
 
 
 @role_group.command(name="color")
