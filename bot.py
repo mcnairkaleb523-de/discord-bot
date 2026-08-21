@@ -390,6 +390,7 @@ def _save_all_state() -> None:
     _save_vouch_config()
     _save_role_vouch_pending()
     _save_protected_roles()
+    _save_permitted_roles()
     _save_autorole()
     _save_hard_banned()
     _save_role_snapshots()
@@ -799,6 +800,49 @@ VOUCH_CONFIG: dict[int, dict] = _load_depth(_load_data("vouch_config", {}), 1)
 PROTECTED_ROLES: dict[int, set] = {
     int(gid): set(role_ids) for gid, role_ids in _load_data("protected_roles", {}).items()
 }
+
+# ── Permitted-role system ────────────────────────────────────
+# PERMITTED_ROLES[guild_id][command_qualified_name] = {role_id, ...}
+# A role in this set can use that specific command even without holding
+# the underlying Discord permission it normally requires — set/cleared via
+# ,setpermittedrole. Every command still gated with _permitted_check()
+# (not plain commands.has_permissions) honors this; native permission
+# holders and Administrators are always allowed regardless, unaffected.
+PERMITTED_ROLES: dict[int, dict[str, set]] = {
+    int(gid): {cmd: set(role_ids) for cmd, role_ids in cmds.items()}
+    for gid, cmds in _load_data("permitted_roles", {}).items()
+}
+
+
+def _save_permitted_roles():
+    _save_data("permitted_roles", {
+        str(gid): {cmd: list(role_ids) for cmd, role_ids in cmds.items()}
+        for gid, cmds in PERMITTED_ROLES.items()
+    })
+
+
+def _permitted_check(**perms):
+    """Drop-in replacement for commands.has_permissions(**perms) — same
+    baseline behavior (native permission holders, including Administrators,
+    are always allowed), plus an additive override: a role explicitly
+    granted via ,setpermittedrole permit @role <command> can use that
+    command too, even without the underlying permission."""
+    invalid = set(perms) - set(discord.Permissions.VALID_FLAGS)
+    if invalid:
+        raise TypeError(f"Invalid permission(s): {', '.join(invalid)}")
+
+    async def predicate(ctx):
+        missing = [perm for perm, value in perms.items() if getattr(ctx.permissions, perm) != value]
+        if not missing:
+            return True
+        if ctx.guild is not None:
+            cmd_name = ctx.command.qualified_name
+            permitted_role_ids = PERMITTED_ROLES.get(ctx.guild.id, {}).get(cmd_name, set())
+            if permitted_role_ids and any(r.id in permitted_role_ids for r in ctx.author.roles):
+                return True
+        raise commands.MissingPermissions(missing)
+
+    return commands.check(predicate)
 
 # Pending vouch-role requests awaiting owner approval
 # ROLE_VOUCH_PENDING[guild_id][token] = {
@@ -4356,7 +4400,7 @@ async def editsnipe(ctx, index: int = 1):
 
 
 @bot.command()
-@commands.has_permissions(manage_messages=True)
+@_permitted_check(manage_messages=True)
 async def clearsnipe(ctx):
     """Clear the snipe/editsnipe cache for this channel. Usage: ,clearsnipe"""
     had_snipe = SNIPE_CACHE.pop(ctx.channel.id, None) is not None
@@ -5058,7 +5102,7 @@ async def _send_welcome_embeds(channel, member: discord.Member):
 
 
 @bot.command()
-@commands.has_permissions(manage_messages=True)
+@_permitted_check(manage_messages=True)
 async def welcome(ctx, member: discord.Member = None):
     """
     Re-send or preview the welcome card.
@@ -5088,7 +5132,7 @@ async def welcome(ctx, member: discord.Member = None):
 
 
 @bot.command()
-@commands.has_permissions(manage_messages=True)
+@_permitted_check(manage_messages=True)
 async def sendwelcome(ctx, member: discord.Member):
     """
     Send the full welcome card for a specific member in the current channel.
@@ -5102,7 +5146,7 @@ async def sendwelcome(ctx, member: discord.Member):
 
 
 @bot.command()
-@commands.has_permissions(manage_guild=True)
+@_permitted_check(manage_guild=True)
 async def setwelcome(ctx, channel: discord.TextChannel = None, *, option: str = None):
     """
     Configure the auto-welcome system.
@@ -5205,7 +5249,7 @@ async def setwelcome(ctx, channel: discord.TextChannel = None, *, option: str = 
 
 
 @bot.command()
-@commands.has_permissions(manage_guild=True)
+@_permitted_check(manage_guild=True)
 async def setboostchannel(ctx, channel: discord.TextChannel = None):
     """
     Configure where the public boost thank-you message posts.
@@ -5420,7 +5464,7 @@ async def br(ctx, action: str = None, *, arg: str = None):
 
 
 @bot.command(name="exitsurveys", aliases=["exitreasons"])
-@commands.has_permissions(manage_guild=True)
+@_permitted_check(manage_guild=True)
 async def exitsurveys(ctx, limit: int = 10):
     """
     View recent exit survey responses — why members said they left.
@@ -5449,7 +5493,7 @@ async def exitsurveys(ctx, limit: int = 10):
 
 
 @bot.command()
-@commands.has_permissions(manage_guild=True)
+@_permitted_check(manage_guild=True)
 async def disablewelcome(ctx):
     """
     Disable the auto-welcome message for new members.
@@ -5806,7 +5850,7 @@ async def vcremovemod(ctx, member: discord.Member):
 # ADMIN COMMANDS
 # ============================================================
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def setup(ctx):
     guild = ctx.guild
     await ctx.send(f"⚙️ Setting up **{guild.name}**...")
@@ -5943,7 +5987,7 @@ async def setup(ctx):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def setupvc(ctx, category_name: str = None):
     """Create the ➕ Create VC trigger channel in this server.
     Optionally pass a category name to place it in: ,setupvc "Ballin VCs"
@@ -6001,7 +6045,7 @@ async def setupvc(ctx, category_name: str = None):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def setupjail(ctx, channel: discord.TextChannel = None):
     """Set up the jail system.
     Optionally pass a channel to use as the jail channel: ,setupjail #jail
@@ -6107,7 +6151,7 @@ async def setupjail(ctx, channel: discord.TextChannel = None):
 
 
 @bot.command(name="setlogchannel")
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def setlogchannel(ctx, key: str = None, channel: discord.TextChannel = None):
     """Pin a specific channel for a log key.
     Usage:
@@ -6175,7 +6219,7 @@ async def setlogchannel(ctx, key: str = None, channel: discord.TextChannel = Non
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def sendverify(ctx):
     """
     Post the verification panel. Uses a genuine Discord OAuth "Authenticate
@@ -6209,7 +6253,7 @@ async def sendverify(ctx):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def setverifybackup(ctx, guild_id: int = None):
     """
     Set which server verified members get auto-joined to via the real
@@ -6233,7 +6277,7 @@ async def setverifybackup(ctx, guild_id: int = None):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def sendtickets(ctx):
     """Send the ticket panel to the current channel."""
     categories = _ticket_types_for_guild(ctx.guild.id)
@@ -6302,7 +6346,7 @@ def _parse_ticket_color(raw: str):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def addticketcategory(ctx, key: str, *, rest: str = None):
     """
     Add or update a ticket category scoped to THIS server only — it will
@@ -6358,7 +6402,7 @@ async def addticketcategory(ctx, key: str, *, rest: str = None):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def setticketformat(ctx, key: str, *, template: str = None):
     """
     Set the application-form text posted automatically when a ticket of
@@ -6402,7 +6446,7 @@ async def setticketformat(ctx, key: str, *, template: str = None):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def removeticketcategory(ctx, key: str):
     """Remove a custom ticket category from THIS server. Usage: ,removeticketcategory <key>"""
     key = key.strip().lower()
@@ -6461,7 +6505,7 @@ async def ticketcategories(ctx):
 # ── Ticket management commands ──────────────────────────────
 
 @bot.command(name="claimticket")
-@commands.has_permissions(manage_messages=True)
+@_permitted_check(manage_messages=True)
 async def claimticket(ctx):
     """Claim the current ticket channel. Usage: ,claimticket"""
     channel = ctx.channel
@@ -6506,7 +6550,7 @@ async def claimticket(ctx):
 
 
 @bot.command(name="closeticket")
-@commands.has_permissions(manage_messages=True)
+@_permitted_check(manage_messages=True)
 async def closeticket(ctx):
     """Close and delete the current ticket channel. Usage: ,closeticket"""
     channel = ctx.channel
@@ -6573,7 +6617,7 @@ async def closeticket(ctx):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def rules(ctx):
     embed = discord.Embed(
         title="🤖 TrapAI Server Rules",
@@ -6624,7 +6668,7 @@ async def rules(ctx):
 # VERIFICATION COMMANDS
 # ============================================================
 @bot.command()
-@commands.has_permissions(manage_roles=True)
+@_permitted_check(manage_roles=True)
 async def verify(ctx, member: discord.Member):
     unverified_role = discord.utils.get(ctx.guild.roles, name=UNVERIFIED_ROLE)
     verified_role = discord.utils.get(ctx.guild.roles, name=VERIFIED_ROLE)
@@ -6662,7 +6706,7 @@ async def verify(ctx, member: discord.Member):
 
 
 @bot.command()
-@commands.has_permissions(manage_roles=True)
+@_permitted_check(manage_roles=True)
 async def unverify(ctx, member: discord.Member):
     unverified_role = discord.utils.get(ctx.guild.roles, name=UNVERIFIED_ROLE)
     verified_role = discord.utils.get(ctx.guild.roles, name=VERIFIED_ROLE)
@@ -6696,7 +6740,7 @@ async def unverify(ctx, member: discord.Member):
 
 
 @bot.command()
-@commands.has_permissions(manage_roles=True)
+@_permitted_check(manage_roles=True)
 async def denyverify(ctx, member: discord.Member, *, reason="Verification denied by staff"):
     unverified_role = discord.utils.get(ctx.guild.roles, name=UNVERIFIED_ROLE)
     verified_role = discord.utils.get(ctx.guild.roles, name=VERIFIED_ROLE)
@@ -6729,7 +6773,7 @@ async def denyverify(ctx, member: discord.Member, *, reason="Verification denied
 # SECURITY COMMANDS
 # ============================================================
 @bot.command()
-@commands.has_permissions(manage_messages=True)
+@_permitted_check(manage_messages=True)
 async def trapwarn(ctx, member: discord.Member, *, reason="Suspicious activity detected"):
     embed = discord.Embed(
         title="⚠ TrapAI Security Warning",
@@ -6749,7 +6793,7 @@ async def trapwarn(ctx, member: discord.Member, *, reason="Suspicious activity d
 
 
 @bot.command()
-@commands.has_permissions(manage_messages=True)
+@_permitted_check(manage_messages=True)
 async def trapscan(ctx, member: discord.Member):
     # ── Scanning animation ───────────────────────────────────
     scanning_embed = discord.Embed(
@@ -6953,7 +6997,7 @@ async def trapscan(ctx, member: discord.Member):
 # JAIL COMMANDS
 # ============================================================
 @bot.command()
-@commands.has_permissions(manage_roles=True)
+@_permitted_check(manage_roles=True)
 async def jail(ctx, member: discord.Member, duration: str, *, reason="No reason provided"):
     if member == ctx.author:
         await ctx.send("❌ You can't jail yourself.")
@@ -7054,7 +7098,7 @@ async def jail(ctx, member: discord.Member, duration: str, *, reason="No reason 
 
 
 @bot.command()
-@commands.has_permissions(manage_roles=True)
+@_permitted_check(manage_roles=True)
 async def unjail(ctx, member: discord.Member, *, reason="No reason provided"):
     jail_role = discord.utils.get(ctx.guild.roles, name=JAIL_ROLE)
     unverified_role = discord.utils.get(ctx.guild.roles, name=UNVERIFIED_ROLE)
@@ -7112,7 +7156,7 @@ async def unjail(ctx, member: discord.Member, *, reason="No reason provided"):
 # MODERATION COMMANDS
 # ============================================================
 @bot.command()
-@commands.has_permissions(manage_messages=True)
+@_permitted_check(manage_messages=True)
 async def clear(ctx, amount: int):
     """Bulk-delete recent messages in this channel. Usage: ,clear <amount>"""
     _CLEAR_SUPPRESS[ctx.channel.id] = discord.utils.utcnow().timestamp()
@@ -7127,7 +7171,7 @@ async def clear(ctx, amount: int):
 
 
 @bot.command()
-@commands.has_permissions(manage_channels=True)
+@_permitted_check(manage_channels=True)
 async def lock(ctx):
     await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=False)
     await ctx.send("🔒 Channel locked")
@@ -7137,7 +7181,7 @@ async def lock(ctx):
 
 
 @bot.command()
-@commands.has_permissions(manage_channels=True)
+@_permitted_check(manage_channels=True)
 async def unlock(ctx):
     await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=True)
     await ctx.send("🔓 Channel unlocked")
@@ -7171,7 +7215,7 @@ async def restart(ctx):
 
 
 @bot.command()
-@commands.has_permissions(kick_members=True)
+@_permitted_check(kick_members=True)
 async def kick(ctx, member: discord.Member, *, reason="No reason provided"):
     # DM before kick so they receive it while still in the server
     await _dm_action(member, ctx.guild, "kick", ctx.author, reason)
@@ -7200,7 +7244,7 @@ async def kick(ctx, member: discord.Member, *, reason="No reason provided"):
 
 
 @bot.command()
-@commands.has_permissions(ban_members=True)
+@_permitted_check(ban_members=True)
 async def ban(ctx, member: discord.Member, *, reason="No reason provided"):
     # DM before ban so the message actually reaches them
     await _dm_action(member, ctx.guild, "ban", ctx.author, reason)
@@ -7229,7 +7273,7 @@ async def ban(ctx, member: discord.Member, *, reason="No reason provided"):
 
 
 @bot.command()
-@commands.has_permissions(moderate_members=True)
+@_permitted_check(moderate_members=True)
 async def timeout(ctx, member: discord.Member, minutes: int, *, reason="No reason provided"):
     until      = discord.utils.utcnow() + timedelta(minutes=minutes)
     expire_str = discord.utils.format_dt(until, "F")
@@ -7264,7 +7308,7 @@ async def timeout(ctx, member: discord.Member, minutes: int, *, reason="No reaso
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def strip(ctx, member: discord.Member):
     """
     Strip EVERY role from a member (except @everyone and anything above my
@@ -7303,7 +7347,7 @@ async def strip(ctx, member: discord.Member):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def restoreallroles(ctx, member: discord.Member):
     """Restore all roles that were snapshotted by ,strip. Usage: ,restoreallroles @user"""
     snap = ROLE_SNAPSHOTS.get(ctx.guild.id, {}).get(member.id)
@@ -7358,7 +7402,7 @@ async def restoreallroles(ctx, member: discord.Member):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def nuke(ctx):
     old_channel = ctx.channel
     guild       = ctx.guild
@@ -7418,7 +7462,7 @@ async def nuke(ctx):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def lockdown(ctx):
     for channel in ctx.guild.text_channels:
         await channel.set_permissions(ctx.guild.default_role, send_messages=False)
@@ -7429,7 +7473,7 @@ async def lockdown(ctx):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def unlockdown(ctx):
     for channel in ctx.guild.text_channels:
         await channel.set_permissions(ctx.guild.default_role, send_messages=True)
@@ -7440,7 +7484,7 @@ async def unlockdown(ctx):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def roleall(ctx, role: discord.Role):
     count = 0
     for member in ctx.guild.members:
@@ -8165,7 +8209,7 @@ async def inviteleaderboard(ctx):
 
 
 @bot.command()
-@commands.has_permissions(manage_guild=True)
+@_permitted_check(manage_guild=True)
 async def invitelogs(ctx, member: discord.Member = None):
     """Show invite join logs for a user. Usage: ,invitelogs [@user]"""
     member = member or ctx.author
@@ -8200,7 +8244,7 @@ async def invitelogs(ctx, member: discord.Member = None):
 # ============================================================
 
 @bot.group(name="role", invoke_without_command=True)
-@commands.has_permissions(manage_roles=True)
+@_permitted_check(manage_roles=True)
 async def role_group(ctx):
     """Role management commands. Use ,role <subcommand>."""
     embed = discord.Embed(
@@ -8225,7 +8269,7 @@ async def role_group(ctx):
 
 
 @role_group.command(name="add")
-@commands.has_permissions(manage_roles=True)
+@_permitted_check(manage_roles=True)
 async def role_add(ctx, member: discord.Member, role: discord.Role):
     """Give a role to a member. Usage: ,role add @user @role"""
     if role >= ctx.guild.me.top_role:
@@ -8249,7 +8293,7 @@ async def role_add(ctx, member: discord.Member, role: discord.Role):
 
 
 @role_group.command(name="remove")
-@commands.has_permissions(manage_roles=True)
+@_permitted_check(manage_roles=True)
 async def role_remove(ctx, member: discord.Member, role: discord.Role):
     """Remove a role from a member. Usage: ,role remove @user @role"""
     if role >= ctx.guild.me.top_role:
@@ -8273,7 +8317,7 @@ async def role_remove(ctx, member: discord.Member, role: discord.Role):
 
 
 @role_group.command(name="create")
-@commands.has_permissions(manage_roles=True)
+@_permitted_check(manage_roles=True)
 async def role_create(ctx, name: str, color: str = None, hoist: bool = False):
     """
     Create a new role. Color is optional — a name (red, blue, gold, ...) or
@@ -8311,7 +8355,7 @@ async def role_create(ctx, name: str, color: str = None, hoist: bool = False):
 
 
 @role_group.command(name="delete")
-@commands.has_permissions(manage_roles=True)
+@_permitted_check(manage_roles=True)
 async def role_delete(ctx, role: discord.Role):
     """Delete a role. Usage: ,role delete @role"""
     if role >= ctx.guild.me.top_role:
@@ -8379,7 +8423,7 @@ async def role_list(ctx):
 
 
 @role_group.command(name="color")
-@commands.has_permissions(manage_roles=True)
+@_permitted_check(manage_roles=True)
 async def role_color(ctx, role: discord.Role, hex_color: str):
     """Change a role's colour. Usage: ,role color @role #ff0000"""
     if role >= ctx.guild.me.top_role:
@@ -8407,7 +8451,7 @@ async def role_color(ctx, role: discord.Role, hex_color: str):
 
 
 @role_group.command(name="hoist")
-@commands.has_permissions(manage_roles=True)
+@_permitted_check(manage_roles=True)
 async def role_hoist(ctx, role: discord.Role):
     """Toggle role hoisting. Usage: ,role hoist @role"""
     if role >= ctx.guild.me.top_role:
@@ -8473,7 +8517,7 @@ async def role_user(ctx, member: discord.Member = None):
 # WARN SYSTEM
 # ============================================================
 @bot.command()
-@commands.has_permissions(moderate_members=True)
+@_permitted_check(moderate_members=True)
 async def warn(ctx, member: discord.Member, *, reason="No reason provided"):
     if member == ctx.author:
         await ctx.send("❌ You can't warn yourself.")
@@ -8605,7 +8649,7 @@ async def modhistory(ctx, member: discord.Member = None, *, filter_action: str =
 
 
 @bot.command()
-@commands.has_permissions(moderate_members=True)
+@_permitted_check(moderate_members=True)
 async def clearwarnings(ctx, member: discord.Member):
     guild_warns = WARNINGS.setdefault(ctx.guild.id, {})
     count = len(guild_warns.get(member.id, []))
@@ -8629,7 +8673,7 @@ async def clearwarnings(ctx, member: discord.Member):
 # MUTE SYSTEM
 # ============================================================
 @bot.command()
-@commands.has_permissions(moderate_members=True)
+@_permitted_check(moderate_members=True)
 async def mute(ctx, member: discord.Member, *, reason="No reason provided"):
     if member == ctx.author:
         await ctx.send("❌ You can't mute yourself.")
@@ -8664,7 +8708,7 @@ async def mute(ctx, member: discord.Member, *, reason="No reason provided"):
 
 
 @bot.command()
-@commands.has_permissions(moderate_members=True)
+@_permitted_check(moderate_members=True)
 async def unmute(ctx, member: discord.Member, *, reason="No reason provided"):
     role = discord.utils.get(ctx.guild.roles, name=MUTED_ROLE)
     if not role or role not in member.roles:
@@ -8691,7 +8735,7 @@ async def unmute(ctx, member: discord.Member, *, reason="No reason provided"):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def setunmutevc(ctx, action: str = None, channel: discord.VoiceChannel = None):
     """
     Manage self-service unmute voice channels — a member who's currently
@@ -8751,7 +8795,7 @@ async def setunmutevc(ctx, action: str = None, channel: discord.VoiceChannel = N
 # NICKNAME / CHANNEL VISIBILITY / SLOWMODE / PURGE / MASSROLE
 # ============================================================
 @bot.command()
-@commands.has_permissions(manage_nicknames=True)
+@_permitted_check(manage_nicknames=True)
 async def nickname(ctx, member: discord.Member, *, new_nick: str = None):
     if member.top_role >= ctx.guild.me.top_role:
         await ctx.send("❌ I can't change that user's nickname because their role is higher than mine.")
@@ -8771,7 +8815,7 @@ async def nickname(ctx, member: discord.Member, *, new_nick: str = None):
 
 
 @bot.command()
-@commands.has_permissions(manage_channels=True)
+@_permitted_check(manage_channels=True)
 async def hide(ctx):
     await ctx.channel.set_permissions(ctx.guild.default_role, view_channel=False)
     await ctx.send(f"👻 {ctx.channel.mention} is now hidden from everyone.")
@@ -8781,7 +8825,7 @@ async def hide(ctx):
 
 
 @bot.command()
-@commands.has_permissions(manage_channels=True)
+@_permitted_check(manage_channels=True)
 async def unhide(ctx):
     await ctx.channel.set_permissions(ctx.guild.default_role, view_channel=True)
     await ctx.send(f"👀 {ctx.channel.mention} is now visible to everyone.")
@@ -8791,7 +8835,7 @@ async def unhide(ctx):
 
 
 @bot.command()
-@commands.has_permissions(manage_channels=True)
+@_permitted_check(manage_channels=True)
 async def slowmode(ctx, seconds: int, channel: discord.TextChannel = None):
     channel = channel or ctx.channel
     if seconds < 0 or seconds > 21600:
@@ -8805,7 +8849,7 @@ async def slowmode(ctx, seconds: int, channel: discord.TextChannel = None):
 
 
 @bot.command()
-@commands.has_permissions(manage_messages=True)
+@_permitted_check(manage_messages=True)
 async def purge(ctx, amount: int, member: discord.Member = None):
     if amount < 1 or amount > 500:
         await ctx.send("❌ Amount must be between 1 and 500.")
@@ -8840,7 +8884,7 @@ async def purge(ctx, amount: int, member: discord.Member = None):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def massrole(ctx, role: discord.Role, filter_role: discord.Role = None):
     if role >= ctx.guild.me.top_role:
         await ctx.send("❌ I can't assign a role higher than or equal to my own top role.")
@@ -8866,7 +8910,7 @@ async def massrole(ctx, role: discord.Role, filter_role: discord.Role = None):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def massunrole(ctx, role: discord.Role, filter_role: discord.Role = None):
     count = 0
     for member in ctx.guild.members:
@@ -9197,7 +9241,7 @@ async def _apply_restore(guild: discord.Guild, data: dict, status_channel: disco
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def backup(ctx, *, label: str = None):
     """Take a snapshot of the server structure.
     Optional label: ,backup pre-raid"""
@@ -9240,7 +9284,7 @@ async def backup(ctx, *, label: str = None):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def listbackups(ctx):
     """List all available backups for this server."""
     files = [
@@ -9283,7 +9327,7 @@ async def listbackups(ctx):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def restore(ctx, *, label: str):
     """Restore the server from a backup. Adds missing channels/roles — does NOT delete existing ones.
     Usage: ,restore pre-raid"""
@@ -9346,7 +9390,7 @@ async def restore(ctx, *, label: str):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def deletebackup(ctx, *, label: str):
     """Delete a saved backup. Usage: ,deletebackup pre-raid"""
     path = _backup_path(ctx.guild.id, label.replace(" ", "_"))
@@ -9380,7 +9424,7 @@ async def deletebackup(ctx, *, label: str):
 # ============================================================
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def setmilestone(ctx, channel: discord.TextChannel = None):
     """Set the channel where milestone announcements are posted.
     Usage: ,setmilestone #announcements
@@ -9419,7 +9463,7 @@ async def setmilestone(ctx, channel: discord.TextChannel = None):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def testmilestone(ctx):
     """Send a preview milestone announcement in the configured channel."""
     guild = ctx.guild
@@ -9448,7 +9492,7 @@ async def testmilestone(ctx):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def milestones(ctx):
     """Show all configured milestones and the current announcement channel."""
     guild = ctx.guild
@@ -9669,7 +9713,7 @@ async def birthdaylist(ctx):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def setbirthdaychannel(ctx, channel: discord.TextChannel = None):
     """
     Set the channel birthday announcements are posted to.
@@ -9700,7 +9744,7 @@ async def setbirthdaychannel(ctx, channel: discord.TextChannel = None):
 
 
 @bot.command(aliases=["setmemberrole"])
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def setgifrole(ctx, role: discord.Role = None):
     """
     Set which role is exempt from automod's link filter for GIFs — scoped
@@ -9741,7 +9785,7 @@ async def setgifrole(ctx, role: discord.Role = None):
 # ============================================================
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def setvanityrole(ctx, role: discord.Role = None):
     """
     Set the role auto-granted to members who put this server's vanity
@@ -9778,7 +9822,7 @@ async def setvanityrole(ctx, role: discord.Role = None):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def setvanitycode(ctx, code: str = None):
     """
     Manually set/override the vanity invite code to look for in members'
@@ -9817,7 +9861,7 @@ async def setvanitycode(ctx, code: str = None):
 
 
 @bot.command()
-@commands.has_permissions(manage_guild=True)
+@_permitted_check(manage_guild=True)
 async def vanityconfig(ctx):
     """Show this server's current vanity role tracking configuration. Usage: ,vanityconfig"""
     guild = ctx.guild
@@ -9844,7 +9888,7 @@ async def vanityconfig(ctx):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def exportconfig(ctx):
     """Dump a readable summary of everything configured for THIS server. Usage: ,exportconfig"""
     guild = ctx.guild
@@ -10026,7 +10070,7 @@ async def _end_giveaway(guild: discord.Guild, channel_id: int, msg_id: int):
 
 
 @bot.command()
-@commands.has_permissions(manage_guild=True)
+@_permitted_check(manage_guild=True)
 async def giveaway(ctx, duration: str, winners: int, *, prize: str):
     """Start a giveaway. Usage: ,giveaway 30m 1 Nitro Classic"""
     secs = _parse_gw_duration(duration)
@@ -10073,7 +10117,7 @@ async def giveaway(ctx, duration: str, winners: int, *, prize: str):
 
 
 @bot.command()
-@commands.has_permissions(manage_guild=True)
+@_permitted_check(manage_guild=True)
 async def giveawayend(ctx, message_id: int = None):
     """Force-end a giveaway early. Usage: ,giveawayend [message_id]"""
     if message_id is None:
@@ -10089,7 +10133,7 @@ async def giveawayend(ctx, message_id: int = None):
 
 
 @bot.command()
-@commands.has_permissions(manage_guild=True)
+@_permitted_check(manage_guild=True)
 async def giveaways(ctx):
     """List all active giveaways. Usage: ,giveaways"""
     active = [(mid, d) for mid, d in GIVEAWAYS.items() if d["guild_id"] == ctx.guild.id]
@@ -10223,7 +10267,7 @@ async def _schedule_poll_close(guild_id: int, channel_id: int, msg_id: int, dela
 
 
 @bot.command()
-@commands.has_permissions(manage_messages=True)
+@_permitted_check(manage_messages=True)
 async def poll(ctx, *, rest: str):
     """
     Create a button-based poll with a live-updating results embed —
@@ -10278,7 +10322,7 @@ async def poll(ctx, *, rest: str):
 
 
 @bot.command()
-@commands.has_permissions(manage_messages=True)
+@_permitted_check(manage_messages=True)
 async def pollend(ctx, message_id: int = None):
     """Force-close a poll early. Usage: ,pollend [message_id] (omit to close the latest one in this channel)"""
     if message_id is None:
@@ -10338,7 +10382,7 @@ class PSADismissView(discord.ui.View):
 
 
 @bot.command()
-@commands.has_permissions(manage_messages=True)
+@_permitted_check(manage_messages=True)
 async def staffpsa(ctx, psa_type: str = "info", *, message: str):
     """
     Post a richly styled staff PSA with an acknowledge button.
@@ -10714,7 +10758,7 @@ class TaskView(discord.ui.View):
 
 
 @bot.command()
-@commands.has_permissions(manage_messages=True)
+@_permitted_check(manage_messages=True)
 async def task(ctx, priority: str = "medium", assigned: discord.Member = None, *, title_and_desc: str):
     """
     Create a staff task card with full interactive buttons.
@@ -10793,7 +10837,7 @@ async def task(ctx, priority: str = "medium", assigned: discord.Member = None, *
 
 
 @bot.command()
-@commands.has_permissions(manage_messages=True)
+@_permitted_check(manage_messages=True)
 async def tasklist(ctx, filter_status: str = None):
     """
     View the staff task board.
@@ -11052,7 +11096,7 @@ class VouchRoleApprovalView(discord.ui.View):
 
 
 @bot.command()
-@commands.has_permissions(manage_messages=True)
+@_permitted_check(manage_messages=True)
 async def vouch(ctx, member: discord.Member = None, role: discord.Role = None, *, reason: str = "No reason provided"):
     """
     Vouch for a member, optionally requesting a protected role for them.
@@ -11194,7 +11238,7 @@ async def vouch(ctx, member: discord.Member = None, role: discord.Role = None, *
 
 
 @bot.command()
-@commands.has_permissions(manage_messages=True)
+@_permitted_check(manage_messages=True)
 async def unvouch(ctx, member: discord.Member, *, reason: str = "No reason provided"):
     """
     Remove a vouch from a member — also strips every protected role
@@ -11319,7 +11363,7 @@ async def vouchleaderboard(ctx):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def vouchconfig(ctx, setting: str = None, value: str = None):
     """Configure the vouch system. Usage: ,vouchconfig threshold 3"""
     cfg = VOUCH_CONFIG.setdefault(ctx.guild.id, {"threshold": 3})
@@ -11371,7 +11415,7 @@ async def vouchconfig(ctx, setting: str = None, value: str = None):
 # ============================================================
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def protectedrole(ctx, action: str = None, role: discord.Role = None):
     """
     Manage the list of roles that can ONLY be granted via ,vouch — never manually.
@@ -11464,8 +11508,128 @@ async def protectedrole(ctx, action: str = None, role: discord.Role = None):
         await ctx.send("❌ Unknown action. Use `add`, `remove`, or `list`.", delete_after=8)
 
 
-@bot.command()
+# ============================================================
+# PERMITTED ROLES SYSTEM
+# ============================================================
+
+@bot.command(name="setpermittedrole")
 @commands.has_permissions(administrator=True)
+async def setpermittedrole(ctx, action: str = None, role: discord.Role = None, *, command_name: str = None):
+    """
+    Grant or revoke a role's permission to use a specific command, even
+    without the underlying Discord permission that command normally
+    requires. Administrator-only — this is a real privilege grant, so
+    it's deliberately not itself permittable via this same system.
+
+    Usage:
+      ,setpermittedrole permit @role <command>    — grant
+      ,setpermittedrole unpermit @role <command>  — revoke
+      ,setpermittedrole list [@role]              — view current grants
+
+    Example:
+      ,setpermittedrole permit @Franchise ban
+      ,setpermittedrole unpermit @Franchise ban
+    """
+    if action is None:
+        await ctx.send(
+            "❌ Usage: `,setpermittedrole permit @role <command>` / "
+            "`,setpermittedrole unpermit @role <command>` / `,setpermittedrole list [@role]`",
+            delete_after=10
+        )
+        return
+
+    action = action.lower()
+    guild = ctx.guild
+    guild_cfg = PERMITTED_ROLES.setdefault(guild.id, {})
+
+    if action == "list":
+        lines = []
+        for cmd_name, role_ids in sorted(guild_cfg.items()):
+            if role is not None and role.id not in role_ids:
+                continue
+            mentions = ", ".join(f"<@&{rid}>" for rid in role_ids if guild.get_role(rid))
+            if mentions:
+                lines.append(f"`,{cmd_name}` — {mentions}")
+        embed = discord.Embed(
+            title="🔑 Permitted Role Grants",
+            description="\n".join(lines)[:4000] if lines else "No grants configured" + (f" for {role.mention}." if role else "."),
+            color=discord.Color.blurple(),
+            timestamp=discord.utils.utcnow()
+        )
+        embed.set_footer(text=f"TrapAI • {guild.name}")
+        await ctx.send(embed=embed)
+        return
+
+    if action not in ("permit", "unpermit"):
+        await ctx.send("❌ Unknown action. Use `permit`, `unpermit`, or `list`.", delete_after=8)
+        return
+
+    if role is None or not command_name:
+        await ctx.send(f"❌ Usage: `,setpermittedrole {action} @role <command>`", delete_after=8)
+        return
+
+    cmd = bot.get_command(command_name.strip().lstrip(","))
+    if cmd is None:
+        await ctx.send(f"❌ No command named `{command_name}` found.", delete_after=8)
+        return
+    cmd_name = cmd.qualified_name
+
+    if cmd_name == "setpermittedrole":
+        await ctx.send("❌ `,setpermittedrole` itself can't be permitted this way — administrator-only, always.", delete_after=8)
+        return
+
+    if action == "permit":
+        role_ids = guild_cfg.setdefault(cmd_name, set())
+        if role.id in role_ids:
+            await ctx.send(f"❌ {role.mention} is already permitted to use `,{cmd_name}`.", delete_after=8)
+            return
+        role_ids.add(role.id)
+        _save_permitted_roles()
+        embed = discord.Embed(
+            title="✅ Role Permitted",
+            description=f"{role.mention} can now use `,{cmd_name}` — even without the Discord permission it normally requires.",
+            color=discord.Color.green(),
+            timestamp=discord.utils.utcnow()
+        )
+        embed.set_footer(text=f"Set by {ctx.author}")
+        await ctx.send(embed=embed)
+        await log(
+            guild, "mod", "Permitted Role Granted",
+            f"{ctx.author.mention} permitted {role.mention} to use `,{cmd_name}`.",
+            discord.Color.green(),
+            fields=[("🎭 Role", role.mention, True), ("⌨️ Command", f"`,{cmd_name}`", True)],
+            actor=ctx.author
+        )
+        return
+
+    # unpermit
+    role_ids = guild_cfg.get(cmd_name, set())
+    if role.id not in role_ids:
+        await ctx.send(f"❌ {role.mention} isn't currently permitted to use `,{cmd_name}`.", delete_after=8)
+        return
+    role_ids.discard(role.id)
+    if not role_ids:
+        guild_cfg.pop(cmd_name, None)
+    _save_permitted_roles()
+    embed = discord.Embed(
+        title="🚫 Role Unpermitted",
+        description=f"{role.mention} can no longer use `,{cmd_name}` unless they hold the Discord permission it normally requires.",
+        color=discord.Color.red(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_footer(text=f"Set by {ctx.author}")
+    await ctx.send(embed=embed)
+    await log(
+        guild, "mod", "Permitted Role Revoked",
+        f"{ctx.author.mention} revoked {role.mention}'s permission to use `,{cmd_name}`.",
+        discord.Color.red(),
+        fields=[("🎭 Role", role.mention, True), ("⌨️ Command", f"`,{cmd_name}`", True)],
+        actor=ctx.author
+    )
+
+
+@bot.command()
+@_permitted_check(administrator=True)
 async def antiraid(ctx, state: str = None):
     """
     Turn this server's anti-raid auto-ban on or off. Usage: ,antiraid <on|off>
@@ -11490,7 +11654,7 @@ async def antiraid(ctx, state: str = None):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def raidwhitelist(ctx, action: str = None, member: discord.Member = None):
     """
     Manage members exempt from anti-raid auto-ban (e.g. known alts, bots
@@ -11547,7 +11711,7 @@ async def raidwhitelist(ctx, action: str = None, member: discord.Member = None):
 # ============================================================
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def pendingvouches(ctx):
     """List all open vouch-role requests awaiting owner approval."""
     guild   = ctx.guild
@@ -11604,7 +11768,7 @@ async def pendingvouches(ctx):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def cancelvouch(ctx, member: discord.Member = None, role: discord.Role = None):
     """Cancel a pending vouch-role request. Usage: ,cancelvouch @user @role"""
     if member is None or role is None:
@@ -11762,7 +11926,7 @@ async def vouchstats(ctx):
 # ============================================================
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@_permitted_check(administrator=True)
 async def autorole(ctx, action: str = None, role: discord.Role = None):
     """
     Manage roles automatically given to every new member on join.
@@ -11882,7 +12046,7 @@ async def autorole(ctx, action: str = None, role: discord.Role = None):
 # ============================================================
 
 @bot.command()
-@commands.has_permissions(ban_members=True)
+@_permitted_check(ban_members=True)
 async def hardban(ctx, user: discord.User, *, reason: str = "No reason provided"):
     """
     Permanently hard-ban a user — they will be instantly re-banned if they rejoin.
@@ -11930,7 +12094,7 @@ async def hardban(ctx, user: discord.User, *, reason: str = "No reason provided"
 
 
 @bot.command()
-@commands.has_permissions(ban_members=True)
+@_permitted_check(ban_members=True)
 async def unhardban(ctx, user_id: int, *, reason: str = "No reason provided"):
     """
     Remove a hard-ban and unban the user.
@@ -11980,7 +12144,7 @@ async def unhardban(ctx, user_id: int, *, reason: str = "No reason provided"):
 
 
 @bot.command()
-@commands.has_permissions(ban_members=True)
+@_permitted_check(ban_members=True)
 async def hardbans(ctx):
     """List all hard-banned users in this server. Usage: ,hardbans"""
     hb = HARD_BANNED.get(ctx.guild.id, {})
@@ -12008,7 +12172,7 @@ async def hardbans(ctx):
 # ============================================================
 
 @bot.command()
-@commands.has_permissions(manage_guild=True)
+@_permitted_check(manage_guild=True)
 async def setinvite(ctx, invite_link: str = None):
     """
     Set the server's permanent invite link used in DM notifications.
@@ -12061,7 +12225,7 @@ async def setinvite(ctx, invite_link: str = None):
 
 
 @bot.command()
-@commands.has_permissions(manage_messages=True)
+@_permitted_check(manage_messages=True)
 async def sendinvite(ctx, user_target: str = None, *, message: str = None):
     """
     Send the server invite + optional personal message to any user's DMs.
@@ -12173,7 +12337,7 @@ async def sendinvite(ctx, user_target: str = None, *, message: str = None):
 # ============================================================
 
 @bot.command(aliases=["ann"])
-@commands.has_permissions(manage_messages=True)
+@_permitted_check(manage_messages=True)
 async def announce(ctx, channel: discord.TextChannel = None, *, text: str = None):
     """
     Send a polished announcement embed to any channel.
