@@ -406,6 +406,7 @@ def _save_all_state() -> None:
     _save_welcome_config()
     _save_boost_channel()
     _save_booster_roles()
+    _save_exit_survey()
     _save_economy()
     _save_cooldowns()
     _save_gamble_wins()
@@ -523,6 +524,40 @@ async def _delete_booster_role(guild: discord.Guild, user_id: int, reason: str):
             await role.delete(reason=reason)
         except (discord.Forbidden, discord.HTTPException):
             pass
+
+
+# EXIT_SURVEY_RESPONSES[guild_id] = [{user_id, username, reason, timestamp}, ...]
+# Newest first, capped per guild. Populated by ExitSurveyView/ExitSurveyModal
+# from the DM sent when a member leaves — see on_member_remove.
+EXIT_SURVEY_RESPONSES: dict[int, list] = _load_depth(_load_data("exit_survey", {}), 1)
+_EXIT_SURVEY_MAX_PER_GUILD = 200
+
+
+def _save_exit_survey():
+    _save_data("exit_survey", _dump_depth(EXIT_SURVEY_RESPONSES, 1))
+
+
+async def _record_exit_survey(guild_id: int, user_id: int, username: str, reason: str):
+    entries = EXIT_SURVEY_RESPONSES.setdefault(guild_id, [])
+    entries.insert(0, {
+        "user_id": user_id,
+        "username": username,
+        "reason": reason,
+        "timestamp": time.time(),
+    })
+    del entries[_EXIT_SURVEY_MAX_PER_GUILD:]
+    _save_exit_survey()
+
+    guild = bot.get_guild(guild_id)
+    if guild:
+        await log(
+            guild,
+            "leaves",
+            "📝 Exit Survey Response",
+            f"**{username}** (`{user_id}`) told us why they left.",
+            discord.Color.orange(),
+            fields=[("💬 Reason", reason[:1024], False)]
+        )
 
 # ── Birthday tracker ──────────────────────────────────────────
 # BIRTHDAYS[guild_id][user_id] = "MM-DD"
@@ -1496,6 +1531,64 @@ class OAuthVerifyView(discord.ui.View):
             emoji="✅",
             url=_build_oauth_authorize_url(guild_id)
         ))
+
+
+# ============================================================
+# EXIT SURVEY (DM sent when a member leaves — best effort, not persistent
+# across restarts since it's a short-lived one-off prompt, not a long-running
+# panel like the giveaway/poll views)
+# ============================================================
+EXIT_REASONS = [
+    ("😴 Inactive / too busy", "Inactive / too busy to stay active"),
+    ("👥 Didn't feel welcome", "Didn't feel welcome in the community"),
+    ("⚔️ Drama / toxicity", "Left because of drama or toxicity"),
+    ("🔀 Switched to another server", "Switched to a different server"),
+    ("🚫 Lost interest", "No longer interested in this community"),
+]
+
+
+class ExitSurveyModal(discord.ui.Modal, title="Why did you leave?"):
+    reason = discord.ui.TextInput(
+        label="Your reason (optional feedback)",
+        style=discord.TextStyle.paragraph,
+        placeholder="Tell us what we could've done better...",
+        min_length=1, max_length=500
+    )
+
+    def __init__(self, guild_id: int, user_id: int, username: str):
+        super().__init__()
+        self.guild_id = guild_id
+        self.user_id = user_id
+        self.username = username
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await _record_exit_survey(self.guild_id, self.user_id, self.username, self.reason.value.strip())
+        await interaction.response.send_message("✅ Thanks for the feedback — we appreciate it!", ephemeral=True)
+
+
+class ExitSurveyView(discord.ui.View):
+    def __init__(self, guild_id: int, user_id: int, username: str):
+        super().__init__(timeout=86400)  # 24h to respond
+        self.guild_id = guild_id
+        self.user_id = user_id
+        self.username = username
+
+        select = discord.ui.Select(
+            placeholder="Pick a reason...",
+            options=[discord.SelectOption(label=label, value=text) for label, text in EXIT_REASONS]
+        )
+        select.callback = self._on_select
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        reason = interaction.data["values"][0]
+        await _record_exit_survey(self.guild_id, self.user_id, self.username, reason)
+        await interaction.response.send_message("✅ Thanks for the feedback — we appreciate it!", ephemeral=True)
+        self.stop()
+
+    @discord.ui.button(label="Write in my own reason", style=discord.ButtonStyle.secondary, emoji="✍️", row=1)
+    async def other_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(ExitSurveyModal(self.guild_id, self.user_id, self.username))
 
 
 # ============================================================
@@ -4398,6 +4491,26 @@ async def on_member_remove(member):
     )
     await _check_milestone(member.guild)
 
+    # Exit survey — best-effort DM asking why they left. Silently no-ops if
+    # their DMs are closed, they've blocked the bot, or Discord otherwise
+    # won't let a DM channel open at this point.
+    if not member.bot:
+        try:
+            embed = discord.Embed(
+                title=f"👋 Sorry to see you go — {member.guild.name}",
+                description=(
+                    "Mind telling us why you left? It really helps the staff team improve.\n\n"
+                    "This is completely optional."
+                ),
+                color=discord.Color.orange(),
+                timestamp=discord.utils.utcnow()
+            )
+            if member.guild.icon:
+                embed.set_thumbnail(url=member.guild.icon.url)
+            await member.send(embed=embed, view=ExitSurveyView(member.guild.id, member.id, str(member)))
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
 
 @bot.event
 async def on_member_update(before, after):
@@ -5992,6 +6105,35 @@ async def br(ctx, action: str = None, *, arg: str = None):
         return
 
     await ctx.send("❌ Unknown action. Use `,br create`, `,br name`, `,br color`, or `,br delete`.", delete_after=8)
+
+
+@bot.command(name="exitsurveys", aliases=["exitreasons"])
+@commands.has_permissions(manage_guild=True)
+async def exitsurveys(ctx, limit: int = 10):
+    """
+    View recent exit survey responses — why members said they left.
+    Usage: ,exitsurveys [limit]
+    """
+    entries = EXIT_SURVEY_RESPONSES.get(ctx.guild.id, [])
+    if not entries:
+        await ctx.send("📭 No exit survey responses yet.", delete_after=8)
+        return
+
+    limit = max(1, min(limit, 25))
+    embed = discord.Embed(
+        title="📝 Recent Exit Survey Responses",
+        color=discord.Color.orange(),
+        timestamp=discord.utils.utcnow()
+    )
+    for entry in entries[:limit]:
+        ts = discord.utils.format_dt(datetime.fromtimestamp(entry["timestamp"]), "R")
+        embed.add_field(
+            name=f"{entry['username']} • {ts}",
+            value=entry["reason"][:200],
+            inline=False
+        )
+    embed.set_footer(text=f"{len(entries)} total response(s) tracked • Requested by {ctx.author}")
+    await ctx.send(embed=embed)
 
 
 @bot.command()
