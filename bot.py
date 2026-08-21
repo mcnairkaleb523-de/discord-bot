@@ -10895,17 +10895,23 @@ async def task(ctx, priority: str = "medium", assigned: Union[discord.Member, di
       ,task high @Inner Circle Get the server active — VCs, chat, all of it
 
     Priority: low | medium | high | critical
-    Separate title and description with  ` — `
+    Separate title and description with a dash: ` — `, ` – `, or ` -- ` all work
     """
     priority = priority.lower()
     if priority not in TASK_PRIORITIES:
         await ctx.send("❌ Priority must be: `low`, `medium`, `high`, `critical`", delete_after=8)
         return
 
-    if " — " in title_and_desc:
-        title, description = title_and_desc.split(" — ", 1)
+    # Accept em-dash (—), en-dash (–), or a plain "--" as the title/description
+    # separator — autocorrect (especially on mobile) very commonly turns a
+    # typed "--" or "-" into an en-dash instead of the em-dash the docs show,
+    # and a mismatch here used to mean the whole message became the title
+    # with the rest silently missing.
+    sep_match = re.search(r"\s+(?:—|–|--)\s+", title_and_desc)
+    if sep_match:
+        title, description = title_and_desc[:sep_match.start()], title_and_desc[sep_match.end():]
     elif len(title_and_desc) > 100:
-        # No " — " separator and too long to fit as a title — instead of
+        # No separator found and too long to fit as a title — instead of
         # silently truncating the rest away, keep the whole thing as the
         # description and use a shortened preview as the title.
         title, description = title_and_desc[:97].rstrip() + "...", title_and_desc
