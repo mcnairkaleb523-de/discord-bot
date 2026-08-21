@@ -2878,7 +2878,8 @@ async def get_or_create_muted_role(guild: discord.Guild):
     role = discord.utils.get(guild.roles, name=MUTED_ROLE)
     if role is None:
         role = await guild.create_role(name=MUTED_ROLE, reason="Auto-created mute role")
-        for channel in guild.channels:
+
+        async def _lock_down(channel):
             try:
                 if isinstance(channel, discord.TextChannel):
                     await channel.set_permissions(role, send_messages=False, add_reactions=False)
@@ -2886,6 +2887,11 @@ async def get_or_create_muted_role(guild: discord.Guild):
                     await channel.set_permissions(role, speak=False)
             except discord.HTTPException:
                 pass
+
+        # Concurrent, not sequential — this is a one-time cost the first time
+        # ,mute is ever used in a server, but with 50 channels that was 50
+        # sequential API round-trips before the role was even usable.
+        await asyncio.gather(*(_lock_down(c) for c in guild.channels))
     return role
 
 
@@ -2990,41 +2996,53 @@ async def send_vc_control_panel(channel, owner, voice_channel):
 
 
 async def _apply_jail_overwrites(member: discord.Member):
-    """Hide every channel from this member, except channels named 'jail'."""
+    """Hide every channel from this member, except channels named 'jail'.
+    Fired concurrently across all channels — a server with 50 channels was
+    previously making 50 sequential API calls here (one full round-trip
+    each), which is most of why ,jail felt slow."""
     guild = member.guild
-    for channel in guild.channels:
-        # Skip the jail channel itself so they can still see/type there
-        if channel.name == "jail":
-            continue
-        # Skip channels the bot can't manage
-        if not channel.permissions_for(guild.me).manage_permissions:
-            continue
+
+    async def _hide(channel):
         try:
-            await channel.set_permissions(
-                member,
-                view_channel=False,
-                reason="Jailed — channel hidden"
-            )
+            await channel.set_permissions(member, view_channel=False, reason="Jailed — channel hidden")
         except (discord.Forbidden, discord.HTTPException):
             pass
 
+    targets = [
+        channel for channel in guild.channels
+        # Skip the jail channel itself so they can still see/type there
+        if channel.name != "jail"
+        # Skip channels the bot can't manage
+        and channel.permissions_for(guild.me).manage_permissions
+    ]
+    if targets:
+        await asyncio.gather(*(_hide(c) for c in targets))
+
 
 async def _remove_jail_overwrites(member: discord.Member):
-    """Remove the jail-applied view_channel overwrite from every channel."""
+    """Remove the jail-applied view_channel overwrite from every channel —
+    concurrently, same reasoning as _apply_jail_overwrites above."""
     guild = member.guild
+
+    async def _restore(channel, ow):
+        try:
+            # Clear just the view_channel bit; preserve any other bits
+            ow.view_channel = None
+            if ow.is_empty():
+                await channel.set_permissions(member, overwrite=None, reason="Unjailed — channel access restored")
+            else:
+                await channel.set_permissions(member, overwrite=ow, reason="Unjailed — channel access restored")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    tasks = []
     for channel in guild.channels:
         ow = channel.overwrites_for(member)
-        # Only remove if we set a deny on view_channel — leave anything else untouched
+        # Only touch it if we set a deny on view_channel — leave anything else untouched
         if ow.view_channel is False:
-            try:
-                # Clear just the view_channel bit; preserve any other bits
-                ow.view_channel = None
-                if ow.is_empty():
-                    await channel.set_permissions(member, overwrite=None, reason="Unjailed — channel access restored")
-                else:
-                    await channel.set_permissions(member, overwrite=ow, reason="Unjailed — channel access restored")
-            except (discord.Forbidden, discord.HTTPException):
-                pass
+            tasks.append(_restore(channel, ow))
+    if tasks:
+        await asyncio.gather(*tasks)
 
 
 async def _restore_jail_role_snapshot(guild: discord.Guild, member: discord.Member):
@@ -7075,9 +7093,10 @@ async def jail(ctx, member: discord.Member, duration: str, *, reason="No reason 
         _save_jail_expiry()
         _log_mod_action(ctx.guild.id, member.id, "jail", ctx.author, reason, extra=f"Duration: {duration}")
 
-        # DM the user so they know they've been jailed
-        await _dm_action(member, ctx.guild, "jail", ctx.author, reason,
-                         extra=f"Duration: **{duration}**")
+        # Fire the DM in the background — no need to block the confirmation
+        # embed below on it finishing.
+        asyncio.create_task(_dm_action(member, ctx.guild, "jail", ctx.author, reason,
+                                        extra=f"Duration: **{duration}**"))
 
         roles_note = "All other roles stripped — will restore automatically on release." if not already_jailed else "Timer updated — roles unchanged (already jailed)."
         embed = discord.Embed(
@@ -7264,9 +7283,13 @@ async def kick(ctx, member: discord.Member, *, reason="No reason provided"):
 @bot.command()
 @_permitted_check(ban_members=True)
 async def ban(ctx, member: discord.Member, *, reason="No reason provided"):
-    # DM before ban so the message actually reaches them
-    await _dm_action(member, ctx.guild, "ban", ctx.author, reason)
-    await member.ban(reason=reason)
+    # DM concurrently with the ban itself instead of waiting on the DM
+    # first — the DM's own send() has its own try/except and can't fail
+    # the ban, so there's no correctness reason to serialize these.
+    await asyncio.gather(
+        _dm_action(member, ctx.guild, "ban", ctx.author, reason),
+        member.ban(reason=reason),
+    )
     _log_mod_action(ctx.guild.id, member.id, "ban", ctx.author, reason)
     embed = discord.Embed(
         title="🔨 Member Banned",
@@ -7295,10 +7318,12 @@ async def ban(ctx, member: discord.Member, *, reason="No reason provided"):
 async def timeout(ctx, member: discord.Member, minutes: int, *, reason="No reason provided"):
     until      = discord.utils.utcnow() + timedelta(minutes=minutes)
     expire_str = discord.utils.format_dt(until, "F")
-    # DM before applying so they understand what happened
-    await _dm_action(member, ctx.guild, "timeout", ctx.author, reason,
-                     extra=f"Duration: **{minutes} minute(s)**\nExpires: {expire_str}")
-    await member.timeout(until, reason=reason)
+    # DM concurrently with applying the timeout — no need to serialize these
+    await asyncio.gather(
+        _dm_action(member, ctx.guild, "timeout", ctx.author, reason,
+                   extra=f"Duration: **{minutes} minute(s)**\nExpires: {expire_str}"),
+        member.timeout(until, reason=reason),
+    )
     _log_mod_action(ctx.guild.id, member.id, "timeout", ctx.author, reason, extra=f"Duration: {minutes} minute(s)")
     embed = discord.Embed(
         title="⏳ Member Timed Out",
@@ -12149,13 +12174,17 @@ async def hardban(ctx, user: discord.User, *, reason: str = "No reason provided"
     _save_hard_banned()
     _log_mod_action(guild.id, user.id, "hardban", ctx.author, reason)
 
-    # DM before banning so they receive the notification
-    await _dm_action(user, guild, "hardban", ctx.author, reason)
+    async def _do_ban():
+        try:
+            await guild.ban(user, reason=f"Hard-ban by {ctx.author}: {reason}", delete_message_days=1)
+        except discord.HTTPException:
+            pass  # Already banned or left — still record it
 
-    try:
-        await guild.ban(user, reason=f"Hard-ban by {ctx.author}: {reason}", delete_message_days=1)
-    except discord.HTTPException:
-        pass  # Already banned or left — still record it
+    # DM concurrently with the ban itself — no need to serialize these
+    await asyncio.gather(
+        _dm_action(user, guild, "hardban", ctx.author, reason),
+        _do_ban(),
+    )
 
     embed = discord.Embed(
         title="🔴 Hard-Ban Applied",
