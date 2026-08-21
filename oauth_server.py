@@ -97,6 +97,8 @@ _STYLE_AND_SCRIPT = """
     color: #fff; font-family: 'Inter', -apple-system, "Segoe UI", sans-serif;
   }
   a { color: inherit; }
+  code { font-family: 'SFMono-Regular', Consolas, monospace; background: rgba(255, 255, 255, .08);
+         border-radius: 4px; padding: .1rem .35rem; font-size: .9em; }
 
   /* ── Nav ─────────────────────────────────────────────── */
   .nav {
@@ -108,11 +110,15 @@ _STYLE_AND_SCRIPT = """
   }
   .nav-brand { display: flex; align-items: center; gap: .55rem; font-weight: 800; font-size: 1.05rem; color: var(--gold); }
   .nav-logo { font-size: 1.3rem; }
+  .nav-right { display: flex; align-items: center; gap: 1.5rem; }
+  .nav-link { font-size: .85rem; font-weight: 600; color: #c7cad0; text-decoration: none; transition: color .2s ease; }
+  .nav-link:hover { color: var(--gold); }
   .nav-badge {
     display: flex; align-items: center; gap: .4rem; font-size: .75rem; font-weight: 600;
     color: #9a9ea5; border: 1px solid rgba(255, 255, 255, .08); border-radius: 20px; padding: .35rem .8rem;
   }
   .nav-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+  @media (max-width: 480px) { .nav-link { display: none; } }
 
   /* ── Hero ────────────────────────────────────────────── */
   .hero {
@@ -186,6 +192,20 @@ _STYLE_AND_SCRIPT = """
   .stat-item { text-align: center; }
   .stat-value { font-size: clamp(1.4rem, 3.5vw, 1.9rem); font-weight: 800; color: var(--gold); }
   .stat-label { margin-top: .25rem; font-size: .72rem; letter-spacing: .1em; color: #8a8d94; text-transform: uppercase; }
+
+  /* ── Commands section ────────────────────────────────── */
+  .commands { padding: clamp(3rem, 7vw, 4.5rem) 1.5rem; text-align: center; border-top: 1px solid rgba(255, 255, 255, .06); }
+  .commands h2 { margin: 0 0 .5rem; font-size: clamp(1.4rem, 3.5vw, 1.9rem); font-weight: 800; color: #f2f3f5; }
+  .cmd-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 1.1rem;
+              max-width: 1000px; margin: 0 auto; }
+  .cmd-card { background: rgba(255, 255, 255, .03); border: 1px solid rgba(255, 255, 255, .06); border-radius: 14px;
+              padding: 1.4rem; text-align: left; }
+  .cmd-card-head { display: flex; align-items: center; gap: .6rem; margin-bottom: 1rem; }
+  .cmd-icon { font-size: 1.3rem; }
+  .cmd-card h3 { margin: 0; font-size: .95rem; font-weight: 700; color: #f2f3f5; }
+  .cmd-tags { display: flex; flex-wrap: wrap; gap: .4rem; }
+  .cmd-tag { font-family: 'SFMono-Regular', Consolas, monospace; font-size: .72rem; background: rgba(255, 198, 41, .08);
+             color: var(--gold); border: 1px solid rgba(255, 198, 41, .18); border-radius: 6px; padding: .28rem .55rem; }
 
   /* ── Trust section ───────────────────────────────────── */
   .trust { padding: clamp(3rem, 7vw, 4.5rem) 1.5rem; text-align: center; }
@@ -287,6 +307,20 @@ _BG_DECO = """<div class="bg-deco">
   <span class="bg-dot" style="top:20%;left:28%;width:3px;height:3px;"></span>
 </div>"""
 
+# Static command showcase — a representative slice of what TrapAI can do,
+# grouped by category. This service is a separate deployment from bot.py
+# with no shared state/API, so it can't introspect the bot's live command
+# list — this is a hand-picked, honest sample, not the full list (that's
+# what ,help inside Discord is for).
+COMMAND_CATEGORIES = [
+    ("🛡️", "Moderation", ["kick", "ban", "mute", "timeout", "warn", "jail"]),
+    ("🎤", "Voice Channels", ["vclock", "vckick", "vctransfer", "vcclaim"]),
+    ("🎫", "Tickets", ["ticket", "claimticket", "closeticket"]),
+    ("📊", "Stats & Economy", ["chatstats", "vcstats", "daily", "blackjack"]),
+    ("🏷️", "Roles", ["role", "roleall", "massrole", "br"]),
+    ("🎉", "Community", ["poll", "giveaway", "birthday", "snipe"]),
+]
+
 # Static trust-grid content — verification value props, not guild-specific.
 TRUST_ITEMS = [
     ("🛡️", "Raid Protection", "Verified members are shielded from mass-join raids and impersonation attempts."),
@@ -308,7 +342,10 @@ def _page(title: str, message: str, ok: bool = True, *, guild_name: str = None,
     nav_html = (
         '<nav class="nav">'
         '<div class="nav-brand"><span class="nav-logo">🛡️</span> TrapAI</div>'
+        '<div class="nav-right">'
+        '<a class="nav-link" href="#commands">Commands</a>'
         f'<div class="nav-badge"><span class="nav-dot"></span>{"Verified" if ok else "Action Needed"}</div>'
+        '</div>'
         '</nav>'
     )
 
@@ -360,6 +397,14 @@ def _page(title: str, message: str, ok: bool = True, *, guild_name: str = None,
         for icon, h, d in TRUST_ITEMS
     )
 
+    commands_html = "".join(
+        '<div class="cmd-card"><div class="cmd-card-head">'
+        f'<span class="cmd-icon">{icon}</span><h3>{cat}</h3></div>'
+        '<div class="cmd-tags">' + "".join(f'<span class="cmd-tag">,{cmd}</span>' for cmd in cmds) + '</div>'
+        '</div>'
+        for icon, cat, cmds in COMMAND_CATEGORIES
+    )
+
     return f"""<!doctype html>
 <html><head>
 <meta charset="utf-8">
@@ -385,6 +430,11 @@ def _page(title: str, message: str, ok: bool = True, *, guild_name: str = None,
   {confetti_html}
 </section>
 <section class="stats-bar">{stats_html}</section>
+<section class="commands" id="commands">
+  <h2>Commands</h2>
+  <p class="trust-sub">A taste of what TrapAI can do — the full list is inside Discord via <code>,help</code>.</p>
+  <div class="cmd-grid">{commands_html}</div>
+</section>
 <section class="trust">
   <h2>Why we ask you to verify</h2>
   <p class="trust-sub">Layered protection, explained.</p>
