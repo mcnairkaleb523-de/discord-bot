@@ -14,6 +14,7 @@ from discord.ext import commands
 from discord import app_commands
 from datetime import datetime, timedelta
 from collections import deque
+from typing import Union
 
 intents = discord.Intents.default()
 intents.members = True
@@ -10561,6 +10562,19 @@ TASK_STATUSES = {
 }
 
 
+def _resolve_task_assignee(guild: discord.Guild, task: dict):
+    """A task can be assigned to a Member or a Role (,task @Inner Circle ...) —
+    both have .mention, so callers can treat the result uniformly. Old tasks
+    saved before role-assignment existed have no "assigned_kind" key, which
+    defaults to "member" for backward compatibility."""
+    assigned_id = task.get("assigned_to")
+    if not assigned_id:
+        return None
+    if task.get("assigned_kind") == "role":
+        return guild.get_role(assigned_id)
+    return guild.get_member(assigned_id)
+
+
 def _task_embed(task: dict, guild: discord.Guild) -> discord.Embed:
     s_icon, s_label, _ = TASK_STATUSES.get(task["status"], ("📋", task["status"], discord.Color.blurple()))
     p_icon, p_label, p_color = TASK_PRIORITIES.get(task["priority"], ("🟡", task["priority"], discord.Color.gold()))
@@ -10568,7 +10582,7 @@ def _task_embed(task: dict, guild: discord.Guild) -> discord.Embed:
     # Color driven by priority
     color = p_color
 
-    assigned = guild.get_member(task["assigned_to"]) if task["assigned_to"] else None
+    assigned = _resolve_task_assignee(guild, task)
     creator  = guild.get_member(task["created_by"])
 
     due_str = ""
@@ -10705,8 +10719,9 @@ class TaskReassignModal(discord.ui.Modal, title="👤 Reassign Task"):
             await interaction.response.send_message("❌ Member not found in this server.", ephemeral=True)
             return
         old_id = task["assigned_to"]
-        task["assigned_to"] = uid
-        task["updated_at"]  = discord.utils.utcnow()
+        task["assigned_to"]   = uid
+        task["assigned_kind"] = "member"  # this modal only ever reassigns to a member
+        task["updated_at"]    = discord.utils.utcnow()
         view = TaskView(self.task_id, self.guild_id)
         await interaction.response.edit_message(embed=_task_embed(task, interaction.guild), view=view)
         # DM the newly assigned member
@@ -10802,14 +10817,17 @@ class TaskView(discord.ui.View):
 
 @bot.command()
 @_permitted_check(manage_messages=True)
-async def task(ctx, priority: str = "medium", assigned: discord.Member = None, *, title_and_desc: str):
+async def task(ctx, priority: str = "medium", assigned: Union[discord.Member, discord.Role] = None, *, title_and_desc: str):
     """
-    Create a staff task card with full interactive buttons.
+    Create a staff task card with full interactive buttons. Assign it to
+    a member, or to a whole role (,task @Inner Circle ...) to hand it to
+    everyone with that role at once.
 
     Usage:
       ,task high @user Fix the verification flow — test it on mobile too
       ,task critical    Server is under raid — respond now
       ,task medium @mod Write the updated server rules
+      ,task high @Inner Circle Get the server active — VCs, chat, all of it
 
     Priority: low | medium | high | critical
     Separate title and description with  ` — `
@@ -10824,29 +10842,34 @@ async def task(ctx, priority: str = "medium", assigned: discord.Member = None, *
     else:
         title, description = title_and_desc[:100], ""
 
+    assigned_is_role = isinstance(assigned, discord.Role)
+
     now = discord.utils.utcnow()
     task_data = {
-        "id":          _new_task_id(),
-        "title":       title.strip()[:100],
-        "description": description.strip()[:500],
-        "assigned_to": assigned.id if assigned else None,
-        "priority":    priority,
-        "status":      "open",
-        "created_by":  ctx.author.id,
-        "created_at":  now,
-        "updated_at":  now,
-        "due_at":      None,
-        "notes":       [],
+        "id":            _new_task_id(),
+        "title":         title.strip()[:100],
+        "description":   description.strip()[:500],
+        "assigned_to":   assigned.id if assigned else None,
+        "assigned_kind": "role" if assigned_is_role else "member",
+        "priority":      priority,
+        "status":        "open",
+        "created_by":    ctx.author.id,
+        "created_at":    now,
+        "updated_at":    now,
+        "due_at":        None,
+        "notes":         [],
     }
     TASKS.setdefault(ctx.guild.id, []).append(task_data)
 
     msg = await ctx.send(
+        content=assigned.mention if assigned_is_role else None,
         embed=_task_embed(task_data, ctx.guild),
         view=TaskView(task_data["id"], ctx.guild.id)
     )
 
-    # DM assigned member
-    if assigned:
+    # DM assigned member — a role can't be DM'd, so it's pinged in-channel
+    # above instead (content=assigned.mention on the message itself).
+    if assigned and not assigned_is_role:
         try:
             dm = discord.Embed(
                 title="📋 You've been assigned a task",
@@ -10888,6 +10911,7 @@ async def tasklist(ctx, filter_status: str = None):
            ,tasklist done     — show completed tasks
            ,tasklist blocked  — show only blocked tasks
            ,tasklist @user    — show tasks assigned to a specific member
+           ,tasklist @role    — show tasks assigned to a specific role
     """
     all_tasks = TASKS.get(ctx.guild.id, [])
 
@@ -10896,12 +10920,13 @@ async def tasklist(ctx, filter_status: str = None):
         guild_tasks = [t for t in all_tasks if t["status"] == filter_status.lower()]
         title_suffix = f" — {TASK_STATUSES[filter_status.lower()][1]}"
     elif filter_status:
-        # Try to parse as a member mention/ID
+        # Try to parse as a member or role mention/ID
         try:
-            uid = int(filter_status.strip("<@!>"))
+            uid = int(filter_status.strip("<@!&>"))
             guild_tasks = [t for t in all_tasks if t["assigned_to"] == uid]
-            m = ctx.guild.get_member(uid)
-            title_suffix = f" — {m.display_name if m else f'User {uid}'}"
+            target = ctx.guild.get_member(uid) or ctx.guild.get_role(uid)
+            name = target.display_name if isinstance(target, discord.Member) else target.name if target else None
+            title_suffix = f" — {name or f'ID {uid}'}"
         except ValueError:
             guild_tasks = [t for t in all_tasks if t["status"] != "done"]
             title_suffix = ""
@@ -10934,7 +10959,7 @@ async def tasklist(ctx, filter_status: str = None):
         embed.set_thumbnail(url=ctx.guild.icon.url)
 
     for t in guild_tasks[:12]:
-        asgn     = ctx.guild.get_member(t["assigned_to"]) if t["assigned_to"] else None
+        asgn     = _resolve_task_assignee(ctx.guild, t)
         p_icon, p_label, _ = TASK_PRIORITIES.get(t["priority"], ("🟡", t["priority"], None))
         s_icon, s_label, _ = TASK_STATUSES.get(t["status"],   ("📋", t["status"],   None))
         note_count = len(t.get("notes", []))
