@@ -403,6 +403,7 @@ def _save_all_state() -> None:
     _save_polls()
     _save_raid_whitelist()
     _save_anti_raid_enabled()
+    _save_raid_mode()
     _save_antinuke_whitelist()
     _save_invite_data()
     _save_verify_backup_guild()
@@ -668,6 +669,14 @@ ANTI_RAID_ENABLED: dict = _load_depth(_load_data("anti_raid_enabled", {}), 1)
 RAID_TIME = 15
 RAID_LIMIT = 5
 
+# RAID_MODE[guild_id] = {"active": bool, "prev_verification_level": int,
+# "prev_antiraid": bool} — persisted so a bot restart mid-raid-mode still
+# knows what to restore to on ,raidmode off. prev_* fields snapshot the
+# server's state from BEFORE raid mode was activated, taken once at
+# activation time, so deactivating always returns to the real prior
+# settings rather than a hardcoded default.
+RAID_MODE: dict = _load_depth(_load_data("raid_mode", {}), 1)
+
 
 def _save_raid_whitelist():
     _save_data("raid_whitelist", {str(gid): list(uids) for gid, uids in WHITELIST.items()})
@@ -675,6 +684,10 @@ def _save_raid_whitelist():
 
 def _save_anti_raid_enabled():
     _save_data("anti_raid_enabled", _dump_depth(ANTI_RAID_ENABLED, 1))
+
+
+def _save_raid_mode():
+    _save_data("raid_mode", _dump_depth(RAID_MODE, 1))
 
 # VC_STATS[guild_id][user_id] = total_seconds_in_vc (all-time, persisted)
 VC_STATS: dict[int, dict[int, int]] = _load_depth(_load_data("vc_stats", {}), 2)
@@ -7590,11 +7603,22 @@ async def nuke(ctx):
     )
 
 
+async def _set_all_channels_locked(guild: discord.Guild, locked: bool, reason: str):
+    # Concurrent, not sequential — a 50-channel server used to mean 50
+    # sequential API round-trips for a single lockdown/unlockdown.
+    async def _apply(channel):
+        try:
+            await channel.set_permissions(guild.default_role, send_messages=not locked, reason=reason)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    await asyncio.gather(*(_apply(c) for c in guild.text_channels))
+
+
 @bot.command()
 @_permitted_check(administrator=True)
 async def lockdown(ctx):
-    for channel in ctx.guild.text_channels:
-        await channel.set_permissions(ctx.guild.default_role, send_messages=False)
+    await _set_all_channels_locked(ctx.guild, True, f"Lockdown by {ctx.author}")
     await ctx.send("🔒 Server lockdown activated.")
     await log(ctx.guild, "lockdowns", "Server Lockdown Enabled", "All text channels locked.", discord.Color.red(),
               fields=[("👑 Admin", f"{ctx.author.mention} (`{ctx.author.id}`)", True), ("🔐 Channels Locked", str(len(ctx.guild.text_channels)), True)],
@@ -7604,8 +7628,7 @@ async def lockdown(ctx):
 @bot.command()
 @_permitted_check(administrator=True)
 async def unlockdown(ctx):
-    for channel in ctx.guild.text_channels:
-        await channel.set_permissions(ctx.guild.default_role, send_messages=True)
+    await _set_all_channels_locked(ctx.guild, False, f"Lockdown removed by {ctx.author}")
     await ctx.send("🔓 Server lockdown removed.")
     await log(ctx.guild, "unlockdowns", "Server Lockdown Removed", "All text channels unlocked.", discord.Color.green(),
               fields=[("👑 Admin", f"{ctx.author.mention} (`{ctx.author.id}`)", True), ("🔓 Channels Unlocked", str(len(ctx.guild.text_channels)), True)],
@@ -11880,6 +11903,91 @@ async def antiraid(ctx, state: str = None):
               discord.Color.green() if state == "on" else discord.Color.orange(),
               fields=[("🛡️ State", state.upper(), True), ("👑 By", ctx.author.mention, True)],
               actor=ctx.author)
+
+
+@bot.command()
+@_permitted_check(administrator=True)
+async def raidmode(ctx, state: str = None):
+    """
+    Full raid-lockdown toggle: locks every text channel, turns on
+    anti-raid auto-ban, and raises server verification to High.
+    Usage: ,raidmode <on|off>. Run with no argument to see the current state.
+    """
+    guild = ctx.guild
+    current = RAID_MODE.get(guild.id, {})
+
+    if state is None:
+        active = current.get("active", False)
+        await ctx.send(f"🚨 Raid mode is currently **{'ON' if active else 'OFF'}** for this server.")
+        return
+
+    state = state.lower()
+    if state not in ("on", "off"):
+        await ctx.send("❌ Usage: `,raidmode <on|off>`", delete_after=8)
+        return
+
+    if state == "on":
+        if current.get("active"):
+            await ctx.send("🚨 Raid mode is already **ON** for this server.")
+            return
+
+        # Snapshot BEFORE mutating anything, so ,raidmode off restores the
+        # server's real prior settings instead of hardcoded defaults.
+        RAID_MODE[guild.id] = {
+            "active": True,
+            "prev_verification_level": guild.verification_level.value,
+            "prev_antiraid": ANTI_RAID_ENABLED.get(guild.id, True),
+        }
+        _save_raid_mode()
+
+        await _set_all_channels_locked(guild, True, f"Raid mode activated by {ctx.author}")
+
+        ANTI_RAID_ENABLED[guild.id] = True
+        _save_anti_raid_enabled()
+
+        verification_note = ""
+        try:
+            await guild.edit(verification_level=discord.VerificationLevel.high,
+                              reason=f"Raid mode activated by {ctx.author}")
+        except (discord.Forbidden, discord.HTTPException):
+            verification_note = "\n⚠️ Couldn't raise verification level (missing permissions) — everything else is active."
+
+        await ctx.send(f"🚨 **Raid mode activated.** All text channels locked, anti-raid is ON, "
+                        f"and verification level is raised to High.{verification_note}")
+        await log(guild, "raids", "🚨 Raid Mode Activated", None, discord.Color.dark_red(),
+                  fields=[
+                      ("👑 Admin", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
+                      ("🔐 Channels Locked", str(len(guild.text_channels)), True),
+                      ("🛡️ Anti-Raid", "ON", True),
+                  ],
+                  actor=ctx.author)
+    else:
+        if not current.get("active"):
+            await ctx.send("🚨 Raid mode is already **OFF** for this server.")
+            return
+
+        await _set_all_channels_locked(guild, False, f"Raid mode deactivated by {ctx.author}")
+
+        ANTI_RAID_ENABLED[guild.id] = current.get("prev_antiraid", True)
+        _save_anti_raid_enabled()
+
+        verification_note = ""
+        try:
+            prev_level = discord.VerificationLevel(current.get("prev_verification_level", guild.verification_level.value))
+            await guild.edit(verification_level=prev_level, reason=f"Raid mode deactivated by {ctx.author}")
+        except (discord.Forbidden, discord.HTTPException, ValueError):
+            verification_note = "\n⚠️ Couldn't restore the prior verification level (missing permissions) — everything else was restored."
+
+        RAID_MODE[guild.id]["active"] = False
+        _save_raid_mode()
+
+        await ctx.send(f"✅ **Raid mode deactivated.** Channels unlocked and prior settings restored.{verification_note}")
+        await log(guild, "raids", "✅ Raid Mode Deactivated", None, discord.Color.green(),
+                  fields=[
+                      ("👑 Admin", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
+                      ("🔓 Channels Unlocked", str(len(guild.text_channels)), True),
+                  ],
+                  actor=ctx.author)
 
 
 @bot.command()
