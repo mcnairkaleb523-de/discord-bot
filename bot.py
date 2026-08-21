@@ -4831,7 +4831,7 @@ def _command_usage(command: commands.Command) -> str:
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
-        await ctx.send("❌ You don't have permission to use that command.")
+        await ctx.send(f"⚠️ {ctx.author.mention}: You don't have a **permitted role** to use `{ctx.command.qualified_name}`")
     elif isinstance(error, commands.BotMissingPermissions):
         await ctx.send("❌ I'm missing the required permissions to do that.")
     elif isinstance(error, commands.MissingRequiredArgument):
@@ -4851,8 +4851,14 @@ async def on_command_error(ctx, error):
         await ctx.send(f"❌ That's not quite right.\n✅ **Correct usage:** `{_command_usage(ctx.command)}`")
     elif isinstance(error, commands.CommandNotFound):
         pass  # silently ignore unknown commands
+    elif isinstance(error, commands.NotOwner):
+        await ctx.send(f"⚠️ {ctx.author.mention}: `{ctx.command.qualified_name}` is bot-owner only.")
     elif isinstance(error, commands.CheckFailure):
-        await ctx.send("❌ You don't have permission to use that command.")
+        # Catches MissingRole and any other custom permission check —
+        # same "permitted role" wording as MissingPermissions above, since
+        # from the user's side it's the same thing: their role doesn't
+        # carry whatever this command requires.
+        await ctx.send(f"⚠️ {ctx.author.mention}: You don't have a **permitted role** to use `{ctx.command.qualified_name}`")
     elif isinstance(error, commands.CommandInvokeError):
         # Anything the command body itself raised without catching — a lot of
         # commands call Discord API methods (add_roles, edit, delete, ...)
