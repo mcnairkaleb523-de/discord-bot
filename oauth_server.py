@@ -90,81 +90,143 @@ for _name, _val in (
 _STYLE_AND_SCRIPT = """
 <style>
   * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
   body {
-    margin: 0; min-height: 100vh; padding: 1rem; position: relative; overflow-x: hidden;
-    display: flex; align-items: center; justify-content: center;
-    background: radial-gradient(circle at top, #23252b, #131418 70%);
+    margin: 0; position: relative; overflow-x: hidden;
+    background: #0a0a0d;
     color: #fff; font-family: 'Inter', -apple-system, "Segoe UI", sans-serif;
   }
-  .orbs { position: fixed; inset: 0; overflow: hidden; z-index: 0; pointer-events: none; }
-  .orb { position: absolute; border-radius: 50%; filter: blur(70px); opacity: .35; }
-  .orb1 { width: 340px; height: 340px; top: -100px; left: -80px; animation: drift1 18s ease-in-out infinite alternate; }
-  .orb2 { width: 280px; height: 280px; bottom: -90px; right: -60px; animation: drift2 22s ease-in-out infinite alternate; }
-  .orb3 { width: 220px; height: 220px; bottom: 20%; left: 60%; animation: drift3 16s ease-in-out infinite alternate; }
-  body.ok .orb1 { background: #5865F2; } body.ok .orb2 { background: #57F287; } body.ok .orb3 { background: #FEE75C; }
-  body.err .orb1 { background: #ED4245; } body.err .orb2 { background: #EE7C43; } body.err .orb3 { background: #ED4245; }
-  @keyframes drift1 { to { transform: translate(60px, 40px) scale(1.15); } }
-  @keyframes drift2 { to { transform: translate(-50px, -30px) scale(1.1); } }
-  @keyframes drift3 { to { transform: translate(-40px, 50px) scale(.9); } }
+  a { color: inherit; }
+  code { font-family: 'SFMono-Regular', Consolas, monospace; background: rgba(255, 255, 255, .08);
+         border-radius: 4px; padding: .1rem .35rem; font-size: .9em; }
 
-  .card {
-    position: relative; z-index: 1; max-width: 460px; width: calc(100% - 2rem);
-    padding: 2.75rem 2.5rem; border-radius: 20px; text-align: center;
-    background: rgba(24, 25, 29, .92); backdrop-filter: blur(20px);
-    border: 1px solid rgba(255, 255, 255, .06);
-    box-shadow: 0 25px 70px rgba(0, 0, 0, .55), 0 0 0 1px rgba(255, 255, 255, .03) inset;
-    animation: cardIn .6s cubic-bezier(.16, 1, .3, 1) both;
+  /* ── Nav ─────────────────────────────────────────────── */
+  .nav {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 1.1rem clamp(1.25rem, 5vw, 3rem);
+    border-bottom: 1px solid rgba(255, 255, 255, .06);
+    position: sticky; top: 0; z-index: 10;
+    background: rgba(10, 10, 13, .85); backdrop-filter: blur(12px);
   }
-  #confetti { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5; }
+  .nav-brand { display: flex; align-items: center; gap: .55rem; font-weight: 800; font-size: 1.05rem; color: var(--gold); }
+  .nav-logo { font-size: 1.3rem; }
+  .nav-right { display: flex; align-items: center; gap: 1.5rem; }
+  .nav-link { font-size: .85rem; font-weight: 600; color: #c7cad0; text-decoration: none; transition: color .2s ease; }
+  .nav-link:hover { color: var(--gold); }
+  .nav-badge {
+    display: flex; align-items: center; gap: .4rem; font-size: .75rem; font-weight: 600;
+    color: #9a9ea5; border: 1px solid rgba(255, 255, 255, .08); border-radius: 20px; padding: .35rem .8rem;
+  }
+  .nav-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+  @media (max-width: 480px) { .nav-link { display: none; } }
 
-  .avatar-wrap { position: relative; width: 88px; height: 88px; margin: 0 auto 1.1rem;
-                 animation: popIn .5s .1s cubic-bezier(.34, 1.56, .64, 1) both; }
+  /* ── Hero ────────────────────────────────────────────── */
+  .hero {
+    position: relative; overflow: hidden;
+    padding: clamp(3rem, 8vw, 5.5rem) 1.5rem clamp(2.5rem, 6vw, 4rem);
+    display: flex; flex-direction: column; align-items: center; text-align: center;
+  }
+  .bg-deco { position: absolute; inset: 0; overflow: hidden; z-index: 0; pointer-events: none; }
+  .bg-tri { position: absolute; opacity: .1; }
+  .bg-tri.left { top: 10%; left: -6%; width: 260px; height: 260px; transform: rotate(-12deg); }
+  .bg-tri.right { top: 18%; right: -8%; width: 320px; height: 320px; transform: rotate(20deg); }
+  .bg-dot { position: absolute; border-radius: 50%; background: var(--accent); opacity: .5; }
+  #confetti { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 20; }
+
+  .hero > *:not(.bg-deco) { position: relative; z-index: 1; }
+
+  .pill {
+    display: inline-flex; align-items: center; gap: .5rem; font-size: .78rem; font-weight: 700;
+    letter-spacing: .02em; color: var(--accent); background: var(--accent-soft);
+    border: 1px solid var(--accent-soft2); border-radius: 20px; padding: .45rem 1rem; margin-bottom: 1.6rem;
+    opacity: 0; animation: dropIn .5s ease forwards;
+  }
+
+  .avatar-wrap { position: relative; width: 84px; height: 84px; margin: 0 auto 1rem;
+                 opacity: 0; animation: popIn .5s .12s cubic-bezier(.34, 1.56, .64, 1) forwards; }
   .icon { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; display: block;
-          border: 3px solid var(--accent); box-shadow: 0 0 0 6px var(--accent-soft), 0 0 30px var(--accent-soft); }
-  .icon-fallback { display: flex; align-items: center; justify-content: center; font-size: 2.2rem; background: #23272a; }
-  .badge { position: absolute; bottom: -2px; right: -2px; width: 30px; height: 30px; border-radius: 50%;
+          border: 3px solid var(--accent); box-shadow: 0 0 0 6px var(--accent-soft), 0 0 34px var(--accent-soft); }
+  .icon-fallback { display: flex; align-items: center; justify-content: center; font-size: 2.1rem; background: #16171b; }
+  .badge { position: absolute; bottom: -2px; right: -2px; width: 28px; height: 28px; border-radius: 50%;
            background: var(--accent); color: #0b0b0d; display: flex; align-items: center; justify-content: center;
-           font-weight: 800; font-size: 1rem; border: 3px solid #1e1f24; transform: scale(0);
-           animation: popIn .4s .4s cubic-bezier(.34, 1.56, .64, 1) both; }
+           font-weight: 800; font-size: .95rem; border: 3px solid #0a0a0d; transform: scale(0);
+           animation: popIn .4s .4s cubic-bezier(.34, 1.56, .64, 1) forwards; }
 
-  .server-name { color: #8e9297; font-size: .8rem; letter-spacing: .05em; text-transform: uppercase; margin-bottom: .4rem; }
-  h1 { margin: 0 0 .6rem; font-size: 1.6rem; font-weight: 800; letter-spacing: -.02em;
-       color: #fff; text-shadow: 0 1px 3px rgba(0, 0, 0, .4); }
-  p { color: #a7abb3; line-height: 1.6; font-size: .95rem; margin: 0 0 1rem; }
+  .server-name { color: #8e9297; font-size: .78rem; letter-spacing: .12em; text-transform: uppercase; margin-bottom: .9rem;
+                 opacity: 0; animation: dropIn .5s .2s ease forwards; }
 
-  .steps { list-style: none; padding: 0; margin: 1.1rem 0; text-align: left; display: flex; flex-direction: column; gap: .5rem; }
+  .hero-title { margin: 0 0 1rem; font-weight: 800; letter-spacing: -.02em; line-height: 1.12;
+                font-size: clamp(1.9rem, 6vw, 3.1rem);
+                opacity: 0; animation: dropIn .55s .28s ease forwards; }
+  .hero-title .accent { color: var(--accent); display: block; }
+  .hero-title .sub-line { color: #f2f3f5; display: block; }
+
+  .hero-sub { max-width: 480px; color: #a7abb3; line-height: 1.65; font-size: 1rem; margin: 0 0 1.8rem;
+              opacity: 0; animation: dropIn .5s .36s ease forwards; }
+
+  .steps { list-style: none; padding: 0; margin: 0 0 1.6rem; text-align: left; display: flex; flex-direction: column;
+           gap: .5rem; width: 100%; max-width: 360px; }
   .step { display: flex; align-items: center; gap: .6rem; background: rgba(255, 255, 255, .04);
-          border: 1px solid rgba(255, 255, 255, .06); border-radius: 10px; padding: .55rem .8rem;
-          font-size: .85rem; color: #d4d6da; opacity: 0; transform: translateY(8px); animation: stepIn .45s ease forwards; }
-  .step:nth-child(1) { animation-delay: .5s; } .step:nth-child(2) { animation-delay: .65s; } .step:nth-child(3) { animation-delay: .8s; }
+          border: 1px solid rgba(255, 255, 255, .07); border-radius: 10px; padding: .55rem .8rem;
+          font-size: .85rem; color: #d4d6da; opacity: 0; transform: translateY(8px); animation: dropIn .45s ease forwards; }
+  .step:nth-child(1) { animation-delay: .48s; } .step:nth-child(2) { animation-delay: .58s; } .step:nth-child(3) { animation-delay: .68s; }
   .step-icon { width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
                font-size: .7rem; font-weight: 800; flex-shrink: 0; }
-  .step.done .step-icon { background: #57F287; color: #0b0b0d; }
+  .step.done .step-icon { background: var(--gold); color: #0b0b0d; }
   .step.pending .step-icon { background: #4f4f57; color: #dcddde; }
 
-  .stats { display: flex; gap: .5rem; justify-content: center; flex-wrap: wrap; margin: 1rem 0;
-           opacity: 0; transform: translateY(8px); animation: stepIn .45s .9s ease forwards; }
-  .stat { background: rgba(255, 255, 255, .05); border: 1px solid rgba(255, 255, 255, .07);
-          border-radius: 20px; padding: .4rem 1rem; font-size: .78rem; color: #dcddde; }
-
-  .btn { display: inline-flex; align-items: center; gap: .4rem; margin-top: .6rem;
-         background: linear-gradient(135deg, var(--accent), var(--accent) 60%, #ffffff22);
-         color: #0b0b0d; text-decoration: none; font-weight: 700; padding: .75rem 1.6rem;
-         border-radius: 10px; font-size: .9rem; box-shadow: 0 8px 24px var(--accent-soft);
-         transition: transform .2s ease, box-shadow .2s ease; opacity: 0; animation: stepIn .45s 1.05s ease forwards; }
-  .btn:hover { transform: translateY(-3px); box-shadow: 0 12px 30px var(--accent-soft); }
+  .btn { display: inline-flex; align-items: center; gap: .45rem;
+         background: var(--accent); color: #0b0b0d; text-decoration: none; font-weight: 700;
+         padding: .85rem 1.8rem; border-radius: 10px; font-size: .95rem; box-shadow: 0 10px 28px var(--accent-soft);
+         transition: transform .2s ease, box-shadow .2s ease;
+         opacity: 0; animation: dropIn .5s .78s ease forwards; }
+  .btn:hover { transform: translateY(-3px); box-shadow: 0 14px 34px var(--accent-soft); }
   .btn .arrow { transition: transform .2s ease; }
   .btn:hover .arrow { transform: translateX(4px); }
 
-  .footer { margin-top: 1.4rem; font-size: .7rem; color: #5c5f66; letter-spacing: .02em; }
+  /* ── Stats bar ───────────────────────────────────────── */
+  .stats-bar {
+    display: flex; flex-wrap: wrap; justify-content: center; gap: clamp(2rem, 6vw, 4.5rem);
+    padding: 2.2rem 1.5rem; border-top: 1px solid rgba(255, 255, 255, .06); border-bottom: 1px solid rgba(255, 255, 255, .06);
+  }
+  .stat-item { text-align: center; }
+  .stat-value { font-size: clamp(1.4rem, 3.5vw, 1.9rem); font-weight: 800; color: var(--gold); }
+  .stat-label { margin-top: .25rem; font-size: .72rem; letter-spacing: .1em; color: #8a8d94; text-transform: uppercase; }
 
-  @keyframes cardIn { from { opacity: 0; transform: translateY(16px) scale(.97); } to { opacity: 1; transform: none; } }
-  @keyframes popIn { to { transform: scale(1); } }
-  @keyframes stepIn { to { opacity: 1; transform: translateY(0); } }
+  /* ── Commands section ────────────────────────────────── */
+  .commands { padding: clamp(3rem, 7vw, 4.5rem) 1.5rem; text-align: center; border-top: 1px solid rgba(255, 255, 255, .06); }
+  .commands h2 { margin: 0 0 .5rem; font-size: clamp(1.4rem, 3.5vw, 1.9rem); font-weight: 800; color: #f2f3f5; }
+  .cmd-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 1.1rem;
+              max-width: 1000px; margin: 0 auto; }
+  .cmd-card { background: rgba(255, 255, 255, .03); border: 1px solid rgba(255, 255, 255, .06); border-radius: 14px;
+              padding: 1.4rem; text-align: left; }
+  .cmd-card-head { display: flex; align-items: center; gap: .6rem; margin-bottom: 1rem; }
+  .cmd-icon { font-size: 1.3rem; }
+  .cmd-card h3 { margin: 0; font-size: .95rem; font-weight: 700; color: #f2f3f5; }
+  .cmd-tags { display: flex; flex-wrap: wrap; gap: .4rem; }
+  .cmd-tag { font-family: 'SFMono-Regular', Consolas, monospace; font-size: .72rem; background: rgba(255, 198, 41, .08);
+             color: var(--gold); border: 1px solid rgba(255, 198, 41, .18); border-radius: 6px; padding: .28rem .55rem; }
+
+  /* ── Trust section ───────────────────────────────────── */
+  .trust { padding: clamp(3rem, 7vw, 4.5rem) 1.5rem; text-align: center; }
+  .trust h2 { margin: 0 0 .5rem; font-size: clamp(1.4rem, 3.5vw, 1.9rem); font-weight: 800; color: #f2f3f5; }
+  .trust-sub { margin: 0 auto 2.5rem; color: #8a8d94; font-size: .95rem; max-width: 420px; }
+  .trust-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 1.1rem;
+                max-width: 1000px; margin: 0 auto; }
+  .trust-card { background: rgba(255, 255, 255, .03); border: 1px solid rgba(255, 255, 255, .06); border-radius: 14px;
+                padding: 1.6rem 1.4rem; text-align: left; transition: border-color .2s ease, transform .2s ease; }
+  .trust-card:hover { border-color: rgba(255, 198, 41, .35); transform: translateY(-2px); }
+  .trust-icon { font-size: 1.5rem; margin-bottom: .7rem; }
+  .trust-card h3 { margin: 0 0 .4rem; font-size: .98rem; font-weight: 700; color: #f2f3f5; }
+  .trust-card p { margin: 0; font-size: .85rem; line-height: 1.55; color: #8a8d94; }
+
+  .site-footer { text-align: center; padding: 2rem 1.5rem 2.5rem; font-size: .75rem; color: #5c5f66; letter-spacing: .02em; }
+
+  @keyframes dropIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes popIn { to { opacity: 1; transform: scale(1); } }
 
   @media (prefers-reduced-motion: reduce) {
     * { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition: none !important; }
-    .orb { animation: none !important; }
   }
 </style>
 <script>
@@ -177,7 +239,7 @@ document.addEventListener('DOMContentLoaded', function () {
   function resize() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
   resize();
   window.addEventListener('resize', resize);
-  var colors = ['#5865F2', '#57F287', '#FEE75C', '#EB459E', '#ffffff'];
+  var colors = ['#FFC629', '#F2B90D', '#ffffff', '#5865F2', '#57F287'];
   var particles = [];
   for (var i = 0; i < 130; i++) {
     particles.push({
@@ -225,11 +287,69 @@ document.addEventListener('DOMContentLoaded', function () {
 """
 
 
+BRAND_GOLD = "#FFC629"
+
+# Static decorative background markup (faint triangle outlines + scattered
+# dots, echoing the landing-page look this was modeled on). No dynamic
+# content, so — like _STYLE_AND_SCRIPT — this is a plain string, not an
+# f-string, and its braces (there are none here, but the SVG attributes
+# below use CSS var() safely via inline style=) need no escaping.
+_BG_DECO = """<div class="bg-deco">
+  <svg class="bg-tri left" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><polygon points="50,3 97,97 3,97" style="fill:none;stroke:var(--accent);stroke-width:1.4"/></svg>
+  <svg class="bg-tri right" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><polygon points="50,3 97,97 3,97" style="fill:none;stroke:var(--accent);stroke-width:1.4"/></svg>
+  <span class="bg-dot" style="top:14%;left:12%;width:5px;height:5px;"></span>
+  <span class="bg-dot" style="top:28%;left:84%;width:4px;height:4px;"></span>
+  <span class="bg-dot" style="top:62%;left:6%;width:6px;height:6px;"></span>
+  <span class="bg-dot" style="top:74%;left:90%;width:4px;height:4px;"></span>
+  <span class="bg-dot" style="top:8%;left:55%;width:3px;height:3px;"></span>
+  <span class="bg-dot" style="top:48%;left:46%;width:3px;height:3px;"></span>
+  <span class="bg-dot" style="top:85%;left:35%;width:4px;height:4px;"></span>
+  <span class="bg-dot" style="top:20%;left:28%;width:3px;height:3px;"></span>
+</div>"""
+
+# Static command showcase — a representative slice of what TrapAI can do,
+# grouped by category. This service is a separate deployment from bot.py
+# with no shared state/API, so it can't introspect the bot's live command
+# list — this is a hand-picked, honest sample, not the full list (that's
+# what ,help inside Discord is for).
+COMMAND_CATEGORIES = [
+    ("🛡️", "Moderation", ["kick", "ban", "mute", "timeout", "warn", "jail"]),
+    ("🎤", "Voice Channels", ["vclock", "vckick", "vctransfer", "vcclaim"]),
+    ("🎫", "Tickets", ["ticket", "claimticket", "closeticket"]),
+    ("📊", "Stats & Economy", ["chatstats", "vcstats", "daily", "blackjack"]),
+    ("🏷️", "Roles", ["role", "roleall", "massrole", "br"]),
+    ("🎉", "Community", ["poll", "giveaway", "birthday", "snipe"]),
+]
+
+# Static trust-grid content — verification value props, not guild-specific.
+TRUST_ITEMS = [
+    ("🛡️", "Raid Protection", "Verified members are shielded from mass-join raids and impersonation attempts."),
+    ("🔐", "No Password Needed", "OAuth2 confirms who you are without this bot ever seeing your Discord password."),
+    ("🔄", "Backup Server Safety", "If this server ever goes down, verified members keep their spot in our backup."),
+    ("⚡", "Instant Access", "Your role is granted the moment you authorize — no waiting on staff to approve you."),
+]
+
+
 def _page(title: str, message: str, ok: bool = True, *, guild_name: str = None,
           guild_icon_url: str = None, guild_id: str = None, role_name: str = None,
           member_count: int = None, steps: list = None) -> str:
-    color = "#57F287" if ok else "#ED4245"
-    accent_style = f"<style>:root {{ --accent: {color}; --accent-soft: {color}33; }}</style>"
+    color = BRAND_GOLD if ok else "#ED4245"
+    accent_style = (
+        f"<style>:root {{ --accent: {color}; --accent-soft: {color}22; "
+        f"--accent-soft2: {color}4d; --gold: {BRAND_GOLD}; }}</style>"
+    )
+
+    nav_html = (
+        '<nav class="nav">'
+        '<div class="nav-brand"><span class="nav-logo">🛡️</span> TrapAI</div>'
+        '<div class="nav-right">'
+        '<a class="nav-link" href="#commands">Commands</a>'
+        f'<div class="nav-badge"><span class="nav-dot"></span>{"Verified" if ok else "Action Needed"}</div>'
+        '</div>'
+        '</nav>'
+    )
+
+    pill_html = f'<div class="pill">{"🟢 Verification Successful" if ok else "🔴 Verification Failed"}</div>'
 
     icon_html = (
         f'<img class="icon" src="{guild_icon_url}" alt="">' if guild_icon_url
@@ -238,6 +358,9 @@ def _page(title: str, message: str, ok: bool = True, *, guild_name: str = None,
     icon_html = f'<div class="avatar-wrap">{icon_html}<div class="badge">{"✓" if ok else "✕"}</div></div>'
 
     server_line = f'<div class="server-name">{guild_name}</div>' if guild_name else ""
+
+    sub_line = "You're all set — welcome back." if ok else "Let's get this sorted."
+    hero_title_html = f'<h1 class="hero-title"><span class="accent">{title}</span><span class="sub-line">{sub_line}</span></h1>'
 
     steps_html = ""
     if steps:
@@ -248,13 +371,6 @@ def _page(title: str, message: str, ok: bool = True, *, guild_name: str = None,
         )
         steps_html = f'<ul class="steps">{items}</ul>'
 
-    stats = []
-    if member_count:
-        stats.append(f'<div class="stat">👥 {member_count:,} members</div>')
-    if role_name:
-        stats.append(f'<div class="stat">🏷️ {role_name}</div>')
-    stats_html = f'<div class="stats">{"".join(stats)}</div>' if stats else ""
-
     button_html = (
         f'<a class="btn" href="https://discord.com/channels/{guild_id}" target="_blank">'
         f'Return to Discord <span class="arrow">→</span></a>'
@@ -262,6 +378,32 @@ def _page(title: str, message: str, ok: bool = True, *, guild_name: str = None,
     )
 
     confetti_html = '<canvas id="confetti"></canvas>' if ok else ""
+
+    # Stats bar — real numbers only, never fabricated. Always shows at least
+    # the OAuth2 trust badge; adds member count / granted role when known.
+    stat_pairs = []
+    if member_count:
+        stat_pairs.append((f"{member_count:,}", "MEMBERS"))
+    if role_name:
+        stat_pairs.append(("✓", role_name.upper()))
+    stat_pairs.append(("OAuth2", "SECURED VIA"))
+    stats_html = "".join(
+        f'<div class="stat-item"><div class="stat-value">{v}</div><div class="stat-label">{l}</div></div>'
+        for v, l in stat_pairs
+    )
+
+    trust_html = "".join(
+        f'<div class="trust-card"><div class="trust-icon">{icon}</div><h3>{h}</h3><p>{d}</p></div>'
+        for icon, h, d in TRUST_ITEMS
+    )
+
+    commands_html = "".join(
+        '<div class="cmd-card"><div class="cmd-card-head">'
+        f'<span class="cmd-icon">{icon}</span><h3>{cat}</h3></div>'
+        '<div class="cmd-tags">' + "".join(f'<span class="cmd-tag">,{cmd}</span>' for cmd in cmds) + '</div>'
+        '</div>'
+        for icon, cat, cmds in COMMAND_CATEGORIES
+    )
 
     return f"""<!doctype html>
 <html><head>
@@ -275,18 +417,30 @@ def _page(title: str, message: str, ok: bool = True, *, guild_name: str = None,
 {_STYLE_AND_SCRIPT}
 </head>
 <body class="{'ok' if ok else 'err'}">
-  <div class="orbs"><span class="orb orb1"></span><span class="orb orb2"></span><span class="orb orb3"></span></div>
-  <div class="card">
-    {icon_html}
-    {server_line}
-    <h1>{title}</h1>
-    <p>{message}</p>
-    {steps_html}
-    {stats_html}
-    {button_html}
-    <div class="footer">Secured by Discord OAuth2 • TrapAI</div>
-  </div>
+{nav_html}
+<section class="hero">
+  {_BG_DECO}
+  {pill_html}
+  {icon_html}
+  {server_line}
+  {hero_title_html}
+  <p class="hero-sub">{message}</p>
+  {steps_html}
+  {button_html}
   {confetti_html}
+</section>
+<section class="stats-bar">{stats_html}</section>
+<section class="commands" id="commands">
+  <h2>Commands</h2>
+  <p class="trust-sub">A taste of what TrapAI can do — the full list is inside Discord via <code>,help</code>.</p>
+  <div class="cmd-grid">{commands_html}</div>
+</section>
+<section class="trust">
+  <h2>Why we ask you to verify</h2>
+  <p class="trust-sub">Layered protection, explained.</p>
+  <div class="trust-grid">{trust_html}</div>
+</section>
+<footer class="site-footer">Secured by Discord OAuth2 • TrapAI</footer>
 </body></html>"""
 
 
