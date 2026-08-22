@@ -262,10 +262,6 @@ def _save_jail_role_snapshots():
     _save_data("jail_role_snapshots", _dump_depth(JAIL_ROLE_SNAPSHOTS, 2))
 
 
-def _save_guild_invite():
-    _save_data("guild_invite", _dump_depth(GUILD_INVITE, 1))
-
-
 def _save_gif_exempt_role():
     _save_data("gif_exempt_role", _dump_depth(GIF_EXEMPT_ROLE, 1))
 
@@ -396,7 +392,6 @@ def _save_all_state() -> None:
     _save_hard_banned()
     _save_role_snapshots()
     _save_jail_role_snapshots()
-    _save_guild_invite()
     _save_gif_exempt_role()
     _save_vanity_role()
     _save_vanity_code_override()
@@ -911,10 +906,6 @@ def _save_antinuke_whitelist():
         {gid: list(uids) for gid, uids in ANTINUKE_WHITELIST.items()}, 1
     ))
 
-# ── Server invite config ─────────────────────────────────────
-# GUILD_INVITE[guild_id] = "https://discord.gg/..."
-GUILD_INVITE: dict[int, str] = _load_depth(_load_data("guild_invite", {}), 1)
-
 # ── GIF automod exemption ─────────────────────────────────────
 # GIF_EXEMPT_ROLE[guild_id] = role_id — which role is exempt from automod's
 # link filter for GIFs, set independently per server via ,setgifrole since
@@ -956,6 +947,14 @@ def _resolve_vanity_code(guild: discord.Guild):
     if guild.vanity_url_code:
         return guild.vanity_url_code.lower()
     return None
+
+
+def _resolve_invite_link(guild: discord.Guild) -> str:
+    """The server's public invite link — sourced from the vanity code
+    (native or ,setvanitycode override), since vanity links never expire.
+    Returns "" if no vanity code is set or detected."""
+    code = _resolve_vanity_code(guild)
+    return f"https://discord.gg/{code}" if code else ""
 
 
 def _status_has_vanity(member: discord.Member, code: str) -> bool:
@@ -1113,7 +1112,7 @@ async def _dm_action(
     if not cfg:
         return
     title, color, icon, label = cfg
-    invite = GUILD_INVITE.get(guild.id, "")
+    invite = _resolve_invite_link(guild)
 
     embed = discord.Embed(
         title=title,
@@ -3726,7 +3725,7 @@ async def on_member_join(member):
             pass
 
     # DM the new member
-    _guild_invite_dm = GUILD_INVITE.get(member.guild.id, "")
+    _guild_invite_dm = _resolve_invite_link(member.guild)
     dm_embed = discord.Embed(
         title=f"{member.guild.name} — ACCESS",
         description=(
@@ -5178,7 +5177,7 @@ async def _send_welcome_embeds(channel, member: discord.Member):
     """Send the full welcome card into `channel` for `member`."""
     guild       = member.guild
     count       = guild.member_count
-    invite      = GUILD_INVITE.get(guild.id, "")
+    invite      = _resolve_invite_link(guild)
     created_str = discord.utils.format_dt(member.created_at, "F")
     age_str     = discord.utils.format_dt(member.created_at, "R")
 
@@ -10146,7 +10145,7 @@ async def exportconfig(ctx):
     w_channel = guild.get_channel(wcfg.get("channel_id")) if wcfg.get("channel_id") else None
     welcome_txt = f"{w_channel.mention if w_channel else f'*#{WELCOME_CHANNEL} (default)*'} • {'Enabled' if wcfg.get('enabled', True) else 'Disabled'}"
 
-    invite_txt = GUILD_INVITE.get(guild.id) or "*Not set*"
+    invite_txt = _resolve_invite_link(guild) or "*Not set — no vanity code configured*"
 
     vrole_id = VANITY_ROLE.get(guild.id)
     vrole = guild.get_role(vrole_id) if vrole_id else None
@@ -12591,53 +12590,30 @@ async def hardbans(ctx):
 @_permitted_check(manage_guild=True)
 async def setinvite(ctx, invite_link: str = None):
     """
-    Set the server's permanent invite link used in DM notifications.
-    Usage: ,setinvite https://discord.gg/yourcode
-    Run with no argument to view the current invite.
+    Shows the server's invite link, used in DM notifications.
+    It's now derived from the vanity code (native or ,setvanitycode
+    override), so it can't be set here directly — see ,setvanitycode.
+    Usage: ,setinvite
     """
-    if invite_link is None:
-        current = GUILD_INVITE.get(ctx.guild.id, "")
-        embed = discord.Embed(
-            title="🔗 Server Invite Link",
-            color=discord.Color.blurple(),
-            timestamp=discord.utils.utcnow()
-        )
-        if current:
-            embed.add_field(name="Current Link", value=current, inline=False)
-            embed.description = "This link is included in all moderation DMs."
-        else:
-            embed.description = (
-                "No invite link set yet.\n"
-                "Use `,setinvite https://discord.gg/yourcode` to set one."
-            )
-        embed.set_footer(text=f"TrapAI • {ctx.guild.name}")
-        await ctx.send(embed=embed)
-        return
-
-    # Basic validation
-    if not (invite_link.startswith("https://discord.gg/") or invite_link.startswith("discord.gg/")):
-        await ctx.send("❌ That doesn't look like a Discord invite. Use `https://discord.gg/yourcode`.", delete_after=8)
-        return
-
-    GUILD_INVITE[ctx.guild.id] = invite_link
-    _save_guild_invite()
+    current = _resolve_invite_link(ctx.guild)
     embed = discord.Embed(
-        title="✅ Server Invite Set",
-        description=(
-            f"Invite link updated to:\n**{invite_link}**\n\n"
-            "This link will now appear in all moderation DMs (ban, kick, jail, timeout, hard-ban)."
-        ),
-        color=discord.Color.green(),
+        title="🔗 Server Invite Link",
+        color=discord.Color.blurple(),
         timestamp=discord.utils.utcnow()
     )
-    embed.set_footer(text=f"Set by {ctx.author} • TrapAI", icon_url=ctx.author.display_avatar.url)
+    if current:
+        embed.add_field(name="Current Link", value=current, inline=False)
+        embed.description = (
+            "This link is derived from the server's **vanity code** and is included in all moderation DMs.\n"
+            "Use `,setvanitycode` to change it."
+        )
+    else:
+        embed.description = (
+            "No vanity code set or detected, so there's no invite link yet.\n"
+            "Use `,setvanitycode yourcode` to set one."
+        )
+    embed.set_footer(text=f"TrapAI • {ctx.guild.name}")
     await ctx.send(embed=embed)
-    await log(ctx.guild, "mod", "Server Invite Link Set", None, discord.Color.green(),
-              fields=[
-                  ("🛡 Admin",  f"{ctx.author.mention} (`{ctx.author.id}`)", True),
-                  ("🔗 Link",   invite_link,                                   True),
-              ],
-              actor=ctx.author)
 
 
 @bot.command()
@@ -12682,7 +12658,7 @@ async def sendinvite(ctx, user_target: str = None, *, message: str = None):
             await ctx.send("❌ Failed to look up that user. Try again later.", delete_after=8)
             return
 
-    invite = GUILD_INVITE.get(ctx.guild.id, "")
+    invite = _resolve_invite_link(ctx.guild)
 
     embed = discord.Embed(
         title=f"📨 You've been invited to **{ctx.guild.name}**",
@@ -12701,7 +12677,7 @@ async def sendinvite(ctx, user_target: str = None, *, message: str = None):
     if invite:
         embed.add_field(name="🔗 Join Link", value=invite, inline=False)
     else:
-        embed.add_field(name="⚠️ No invite set", value="Ask a staff member to set one with `,setinvite`", inline=False)
+        embed.add_field(name="⚠️ No invite set", value="Ask a staff member to set the server's vanity code with `,setvanitycode`", inline=False)
 
     embed.set_footer(text=f"TrapAI • {ctx.guild.name}")
 
