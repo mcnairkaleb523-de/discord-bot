@@ -474,6 +474,7 @@ LOG_CHANNELS = {
     "invites":        "invite-logs",
     "vanity":         "vanity-logs",
     "polls":          "poll-logs",
+    "vouches":        "vouch-logs",
 }
 
 # Per-guild channel overrides: LOG_CHANNEL_OVERRIDES[guild_id][key] = channel_id
@@ -11252,7 +11253,7 @@ class VouchRoleApprovalView(discord.ui.View):
             except (discord.Forbidden, discord.HTTPException):
                 pass
 
-            await log(guild, "mod", "Vouch-Role Request Approved", None, discord.Color.green(),
+            await log(guild, "vouches", "Vouch-Role Request Approved", None, discord.Color.green(),
                       fields=[
                           ("👤 Member",     f"{member.mention} (`{member.id}`)",         True),
                           ("🏷️ Role",       f"{role.mention}",                           True),
@@ -11307,7 +11308,7 @@ class VouchRoleApprovalView(discord.ui.View):
                     pass
 
             if guild and role:
-                await log(guild, "mod", "Vouch-Role Request Rejected", None, discord.Color.red(),
+                await log(guild, "vouches", "Vouch-Role Request Rejected", None, discord.Color.red(),
                           fields=[
                               ("👤 Member",     f"{member.mention} (`{member.id}`)" if member else str(pending["member_id"]), True),
                               ("🏷️ Role",       f"{role.mention}",                  True),
@@ -11443,7 +11444,7 @@ async def vouch(ctx, member: discord.Member = None, role: discord.Role = None, *
         confirm.set_footer(text=f"Awaiting owner approval • TrapAI • {ctx.guild.name}")
         await ctx.send(embed=confirm)
 
-        await log(ctx.guild, "mod", "Vouch-Role Request Submitted", None, discord.Color.gold(),
+        await log(ctx.guild, "vouches", "Vouch-Role Request Submitted", None, discord.Color.gold(),
                   fields=[
                       ("📨 Requester", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
                       ("👤 Member",    f"{member.mention} (`{member.id}`)",          True),
@@ -11479,7 +11480,7 @@ async def vouch(ctx, member: discord.Member = None, role: discord.Role = None, *
     embed.set_footer(text=f"TrapAI Vouch System • {ctx.guild.name}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
 
-    await log(ctx.guild, "mod", "Member Vouched", None, discord.Color.green(),
+    await log(ctx.guild, "vouches", "Member Vouched", None, discord.Color.green(),
               fields=[
                   ("🛡 By",     f"{ctx.author.mention} (`{ctx.author.id}`)", True),
                   ("✅ For",    f"{member.mention} (`{member.id}`)",           True),
@@ -11542,7 +11543,7 @@ async def unvouch(ctx, member: discord.Member, *, reason: str = "No reason provi
     embed.set_footer(text=f"TrapAI Vouch System • {ctx.guild.name}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
 
-    await log(ctx.guild, "mod", "Vouch Removed", None, discord.Color.orange(),
+    await log(ctx.guild, "vouches", "Vouch Removed", None, discord.Color.orange(),
               fields=[
                   ("🛡 By",             f"{ctx.author.mention} (`{ctx.author.id}`)", True),
                   ("↩️ From",           f"{member.mention} (`{member.id}`)",          True),
@@ -12246,7 +12247,7 @@ async def cancelvouch(ctx, member: discord.Member = None, role: discord.Role = N
     embed.set_footer(text=f"Cancelled by {ctx.author} • TrapAI • {guild.name}")
     await ctx.send(embed=embed)
 
-    await log(guild, "mod", "Vouch Request Cancelled", None, discord.Color.orange(),
+    await log(guild, "vouches", "Vouch Request Cancelled", None, discord.Color.orange(),
               fields=[
                   ("👤 Member",       f"{member.mention} (`{member.id}`)", True),
                   ("🏷️ Role",         f"{role.mention}",                   True),
