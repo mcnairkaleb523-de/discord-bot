@@ -614,6 +614,34 @@ OAUTH_VERIFY_ENABLED = bool(DISCORD_CLIENT_ID and DISCORD_OAUTH_REDIRECT_URI)
 # Optional: if unset, ,help / ,cmds just omit the "browse online" link.
 COMMANDS_SITE_URL = os.getenv("COMMANDS_SITE_URL")
 
+# ── Ticket-only mode (optional) ───────────────────────────────
+# For running this same bot process as a lean sales/pitch bot in a server
+# you don't otherwise manage (e.g. a FiveM server's Discord) — every
+# command except the ticket system is disabled, so all that server sees is
+# a ticket panel to inquire about buying the full bot. Set
+# TICKET_ONLY_MODE=true in .env to turn it on; leave unset/false for the
+# regular full-featured bot.
+TICKET_ONLY_MODE = os.getenv("TICKET_ONLY_MODE", "false").strip().lower() in ("1", "true", "yes", "on")
+TICKET_ONLY_ALLOWED_COMMANDS = {
+    "sendtickets", "addticketcategory", "removeticketcategory",
+    "ticketcategories", "setticketformat", "claimticket", "closeticket",
+    "setlogchannel", "help", "cmds", "ping",
+}
+
+
+class TicketOnlyModeRestricted(commands.CheckFailure):
+    """Raised when a non-ticket command is used while TICKET_ONLY_MODE is on."""
+    pass
+
+
+@bot.check
+async def _ticket_only_mode_gate(ctx):
+    if not TICKET_ONLY_MODE:
+        return True
+    if ctx.command and ctx.command.qualified_name in TICKET_ONLY_ALLOWED_COMMANDS:
+        return True
+    raise TicketOnlyModeRestricted()
+
 # VERIFY_BACKUP_GUILD[origin_guild_id] = backup_guild_id — where verified
 # members get auto-joined via the guilds.join OAuth scope, set with
 # ,setverifybackup. Passed through the OAuth `state` param so oauth_server.py
@@ -2834,7 +2862,17 @@ HELP_CATEGORIES = [
 def _build_help_embed(guild: discord.Guild) -> discord.Embed:
     """One consolidated embed covering every command — no drill-down,
     no page-by-page buttons, just scroll one message."""
-    total = sum(len(names) for _, _, names in HELP_CATEGORIES)
+    categories = HELP_CATEGORIES
+    if TICKET_ONLY_MODE:
+        # Only show what's actually usable here — everything else is
+        # gated off by _ticket_only_mode_gate anyway.
+        categories = [
+            (icon, cat_name, [n for n in names if n in TICKET_ONLY_ALLOWED_COMMANDS])
+            for icon, cat_name, names in HELP_CATEGORIES
+        ]
+        categories = [(icon, cat_name, names) for icon, cat_name, names in categories if names]
+
+    total = sum(len(names) for _, _, names in categories)
     embed = discord.Embed(
         color=discord.Color.from_rgb(88, 101, 242),
         timestamp=discord.utils.utcnow()
@@ -2844,13 +2882,18 @@ def _build_help_embed(guild: discord.Guild) -> discord.Embed:
         icon_url=guild.icon.url if guild.icon else None
     )
     intro = (
-        f"**{total} commands** across **{len(HELP_CATEGORIES)} categories** — all use the `,` prefix.\n"
+        f"**{total} commands** across **{len(categories)} categories** — all use the `,` prefix.\n"
         "Example: `,ban @user spamming`"
     )
+    if TICKET_ONLY_MODE:
+        intro = (
+            f"**{total} commands** available — all use the `,` prefix.\n"
+            "This bot is running in **ticket-only mode**: open a ticket below to inquire about the full bot."
+        )
     if COMMANDS_SITE_URL:
         intro += f"\n\n🌐 **[Browse the full interactive command site]({COMMANDS_SITE_URL})**"
     embed.description = intro
-    for icon, cat_name, names in HELP_CATEGORIES:
+    for icon, cat_name, names in categories:
         chips = " ".join(f"`,{n}`" for n in names)
         embed.add_field(name=f"{icon} {cat_name} ({len(names)})", value=chips, inline=False)
     if guild.icon:
@@ -5032,6 +5075,8 @@ async def on_command_error(ctx, error):
         pass  # silently ignore unknown commands
     elif isinstance(error, commands.NotOwner):
         await ctx.send(f"⚠️ {ctx.author.mention}: `{ctx.command.qualified_name}` is bot-owner only.")
+    elif isinstance(error, TicketOnlyModeRestricted):
+        await ctx.send(f"🎫 {ctx.author.mention}: This bot is running in **ticket-only mode** — only the ticket system is available. Use `,help` to see what's active.")
     elif isinstance(error, commands.CheckFailure):
         # Catches MissingRole and any other custom permission check —
         # same "permitted role" wording as MissingPermissions above, since
