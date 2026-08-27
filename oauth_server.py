@@ -43,14 +43,52 @@ Optional:
                               after each verification attempt (found by name
                               per-guild, since there's no shared config with
                               bot.py's per-guild log channel overrides).
+
+── Stripe billing (optional — subscription/lifetime sales for the ticket
+   system, see the "BILLING" section below) ──────────────────────────────
+  STRIPE_SECRET_KEY        — from the Stripe Dashboard (Developers > API keys).
+                              Leave unset to run this service with billing
+                              disabled — every /checkout, /portal, and
+                              /stripe/webhook route then returns a friendly
+                              "billing not configured" response instead of
+                              erroring, so verification keeps working either way.
+  STRIPE_WEBHOOK_SECRET    — from the Stripe Dashboard webhook endpoint you
+                              create pointing at https://your-domain/stripe/webhook
+                              (Developers > Webhooks > Add endpoint > select
+                              checkout.session.completed, invoice.paid,
+                              invoice.payment_failed, customer.subscription.updated,
+                              customer.subscription.deleted > reveal signing secret).
+  INTERNAL_API_SECRET      — a random string YOU generate, shared between this
+                              service and bot.py's INTERNAL_API_SECRET env var.
+                              Authenticates the /internal/* endpoints bot.py
+                              calls to check subscription status and generate
+                              checkout/portal links — never expose these routes
+                              or this secret publicly.
+Optional (billing):
+  PRODUCT_BASE_URL         — this service's own public https:// URL, e.g.
+                              https://your-service.up.railway.app — used to
+                              build Stripe success/cancel/return URLs. Falls
+                              back to the incoming request's own origin if unset.
+  BOT_INVITE_PERMISSIONS   — permission integer used in the "Add TrapAI to your
+                              server" link shown after checkout. Defaults to 8
+                              (Administrator) — tighten this once you know the
+                              exact permission set the ticket system needs.
+  SUBSCRIPTION_GRACE_PERIOD_DAYS — days a server keeps ticket access after a
+                              failed payment before being suspended. Defaults to 5.
+  SUPPORT_CONTACT          — how customers should reach you for support, shown
+                              on the /terms page. Defaults to a generic placeholder.
 """
 
 import os
 import html
+import json
+import time
+import asyncio
 import logging
 from datetime import datetime, timezone
 from urllib.parse import quote
 
+import stripe
 from aiohttp import web, ClientSession, ClientTimeout
 from dotenv import load_dotenv
 
@@ -82,6 +120,82 @@ for _name, _val in (
             f"{_name} is not set. Add it to this service's environment "
             f"(its own .env file or your host's env var settings)."
         )
+
+# ============================================================
+# BILLING — Stripe-backed subscriptions for the ticket system
+# ============================================================
+# Entirely optional: every route below checks STRIPE_SECRET_KEY at request
+# time and returns a friendly "billing not configured" response instead of
+# erroring when it's unset, so verification keeps working with zero Stripe
+# setup. See the module docstring above for what each env var does.
+STRIPE_SECRET_KEY     = os.getenv("STRIPE_SECRET_KEY")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+INTERNAL_API_SECRET   = os.getenv("INTERNAL_API_SECRET")
+PRODUCT_BASE_URL      = os.getenv("PRODUCT_BASE_URL", "").rstrip("/")
+BOT_INVITE_PERMISSIONS = os.getenv("BOT_INVITE_PERMISSIONS", "8")
+SUBSCRIPTION_GRACE_PERIOD_DAYS = int(os.getenv("SUBSCRIPTION_GRACE_PERIOD_DAYS", "5"))
+SUPPORT_CONTACT       = os.getenv("SUPPORT_CONTACT", "the TrapAI team (see the server you got this bot from)")
+
+if STRIPE_SECRET_KEY:
+    stripe.api_key = STRIPE_SECRET_KEY
+
+# Local JSON persistence — same on-disk convention as bot.py's _save_data /
+# _load_data, but this is a completely separate process/deployment with no
+# shared filesystem, so it keeps its own copy here.
+DATA_DIR = "data"
+os.makedirs(DATA_DIR, exist_ok=True)
+
+
+def _data_path(name: str) -> str:
+    return os.path.join(DATA_DIR, f"{name}.json")
+
+
+def _save_json(name: str, value) -> None:
+    try:
+        with open(_data_path(name), "w", encoding="utf-8") as f:
+            json.dump(value, f, indent=2)
+    except OSError:
+        pass
+
+
+def _load_json(name: str, default):
+    path = _data_path(name)
+    if not os.path.exists(path):
+        return default
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return default
+
+
+# Price tiers — Starter/Pro/Premium recur monthly, Lifetime is a one-time
+# charge with no subscription at all. Keys here are the canonical "tier"
+# strings used everywhere: Stripe metadata, the subscription store, and
+# bot.py's ,subscribe command.
+TIERS = {
+    "starter":  {"label": "Starter",  "price_cents": 500,  "interval": "month", "best_value": False},
+    "pro":      {"label": "Pro",      "price_cents": 1000, "interval": "month", "best_value": False},
+    "premium":  {"label": "Premium",  "price_cents": 2000, "interval": "month", "best_value": False},
+    "lifetime": {"label": "Lifetime", "price_cents": 7500, "interval": None,    "best_value": True},
+}
+
+# tier -> Stripe Price ID, created once and cached here across restarts so
+# re-running this service doesn't spawn duplicate Products/Prices in Stripe.
+STRIPE_PRICE_IDS: dict = _load_json("stripe_price_ids", {})
+
+# SUBSCRIPTIONS[str(guild_id)] = {
+#   "tier": "starter"|"pro"|"premium"|"lifetime",
+#   "status": "active"|"past_due"|"suspended"|"canceled"|"lifetime",
+#   "stripe_customer_id": str, "stripe_subscription_id": str | None,
+#   "owner_discord_user_id": str,
+#   "current_period_end": unix_ts | None, "grace_period_ends_at": unix_ts | None,
+#   "last_reminder_sent_at": unix_ts | None, "created_at": unix_ts, "updated_at": unix_ts,
+# } — this file is the single source of truth for who has paid access;
+# checkout.session.completed and invoice.paid are what actually provision
+# and maintain it, straight from Stripe's webhook, never from the client-side
+# success page (which is just a friendly confirmation).
+SUBSCRIPTIONS: dict = _load_json("subscriptions", {})
 
 
 # Plain (non-f-string) constant — its braces are literal CSS/JS syntax, never
@@ -1048,13 +1162,705 @@ def build_authorize_url(guild_id: int, backup_guild_id: int | None = None) -> st
     )
 
 
+def build_bot_invite_url(guild_id) -> str:
+    """A one-click 'add TrapAI to your server' link, pre-scoped to the
+    server they just paid for via guild_id + disable_guild_select — the
+    closest thing Discord's platform allows to an "automatic" join. There
+    is no API for a bot to add itself to a guild; a human with Manage
+    Server there always has to click Authorize."""
+    return (
+        "https://discord.com/api/oauth2/authorize"
+        f"?client_id={CLIENT_ID}"
+        f"&permissions={BOT_INVITE_PERMISSIONS}"
+        "&scope=bot%20applications.commands"
+        f"&guild_id={guild_id}"
+        "&disable_guild_select=true"
+    )
+
+
+def _resolve_base_url(request: web.Request) -> str:
+    return PRODUCT_BASE_URL or str(request.url.origin())
+
+
+def _bootstrap_stripe_prices_sync():
+    """Idempotent — skips any tier that already has a cached Price ID, so
+    restarting this service never spawns duplicate Products/Prices in
+    Stripe. Runs on startup; also safe to call again if a tier is missing
+    (e.g. STRIPE_PRICE_IDS' backing file was deleted)."""
+    if not STRIPE_SECRET_KEY:
+        return
+    changed = False
+    for tier, cfg in TIERS.items():
+        if STRIPE_PRICE_IDS.get(tier):
+            continue
+        try:
+            product = stripe.Product.create(
+                name=f"TrapAI — {cfg['label']}",
+                metadata={"trapai_tier": tier},
+            )
+            price_kwargs = dict(
+                unit_amount=cfg["price_cents"],
+                currency="usd",
+                product=product.id,
+                metadata={"trapai_tier": tier},
+            )
+            if cfg["interval"]:
+                price_kwargs["recurring"] = {"interval": cfg["interval"]}
+            price = stripe.Price.create(**price_kwargs)
+            STRIPE_PRICE_IDS[tier] = price.id
+            changed = True
+            log.info("Created Stripe product/price for tier %r: %s", tier, price.id)
+        except stripe.error.StripeError as e:
+            log.error("Failed to create Stripe product/price for tier %r: %s", tier, e)
+    if changed:
+        _save_json("stripe_price_ids", STRIPE_PRICE_IDS)
+
+
+def _create_checkout_session_sync(tier: str, guild_id: str, discord_user_id: str, base_url: str):
+    price_id = STRIPE_PRICE_IDS.get(tier)
+    if not price_id:
+        raise RuntimeError(f"No Stripe price configured for tier {tier!r} yet")
+    metadata = {"guild_id": str(guild_id), "discord_user_id": str(discord_user_id), "tier": tier}
+    common = dict(
+        line_items=[{"price": price_id, "quantity": 1}],
+        success_url=f"{base_url}/checkout/success?session_id={{CHECKOUT_SESSION_ID}}",
+        cancel_url=f"{base_url}/checkout/cancel",
+        metadata=metadata,
+        client_reference_id=str(guild_id),
+    )
+    if tier == "lifetime":
+        return stripe.checkout.Session.create(mode="payment", **common)
+    return stripe.checkout.Session.create(
+        mode="subscription",
+        subscription_data={"metadata": metadata},
+        **common,
+    )
+
+
+def _tier_for_price_id(price_id: str):
+    for tier, pid in STRIPE_PRICE_IDS.items():
+        if pid == price_id:
+            return tier
+    return None
+
+
+def _find_by_subscription_id(sub_id: str):
+    for gid, rec in SUBSCRIPTIONS.items():
+        if rec.get("stripe_subscription_id") == sub_id:
+            return rec, gid
+    return None, None
+
+
+async def _send_dm(session: ClientSession, user_id: str, content: str):
+    """Same raw-REST DM pattern as the verification log posting above — a
+    bot token can open/send a DM by user ID with no gateway connection."""
+    headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
+    async with session.post(f"{DISCORD_API}/users/@me/channels", headers=headers, json={"recipient_id": user_id}) as resp:
+        if resp.status != 200:
+            log.warning("Opening DM channel with %s failed (%s): %s", user_id, resp.status, await resp.text())
+            return
+        dm = await resp.json()
+    async with session.post(f"{DISCORD_API}/channels/{dm['id']}/messages", headers=headers, json={"content": content[:2000]}) as resp2:
+        if resp2.status not in (200, 201):
+            log.warning("Sending DM to %s failed (%s): %s", user_id, resp2.status, await resp2.text())
+
+
+# ── Webhook event handlers ──────────────────────────────────
+# Per Stripe's own guidance, checkout.session.completed and invoice.paid
+# are what actually provision/maintain access — never the client-side
+# success page, which only ever shows a friendly confirmation.
+
+async def _handle_checkout_completed(obj: dict, session: ClientSession):
+    metadata = obj.get("metadata") or {}
+    guild_id = metadata.get("guild_id")
+    discord_user_id = metadata.get("discord_user_id")
+    tier = metadata.get("tier")
+    if not guild_id or tier not in TIERS:
+        log.warning("checkout.session.completed missing/invalid metadata on session %s", obj.get("id"))
+        return
+
+    rec = SUBSCRIPTIONS.setdefault(guild_id, {})
+    rec.setdefault("created_at", time.time())
+    rec.update({
+        "tier": tier,
+        "owner_discord_user_id": discord_user_id,
+        "stripe_customer_id": obj.get("customer"),
+        "updated_at": time.time(),
+    })
+    if obj.get("mode") == "payment":  # lifetime — one-time, no subscription object at all
+        rec["status"] = "lifetime"
+        rec["stripe_subscription_id"] = None
+        rec["grace_period_ends_at"] = None
+    else:
+        rec["status"] = "active"
+        rec["stripe_subscription_id"] = obj.get("subscription")
+        rec["grace_period_ends_at"] = None
+    _save_json("subscriptions", SUBSCRIPTIONS)
+
+    if discord_user_id:
+        label = TIERS[tier]["label"]
+        kind = "one-time purchase" if tier == "lifetime" else "subscription"
+        invite_url = build_bot_invite_url(guild_id)
+        await _send_dm(session, discord_user_id, (
+            f"✅ **Payment received — thank you!**\n\n"
+            f"Your **{label}** {kind} is now active for server `{guild_id}`.\n\n"
+            f"**Add TrapAI to your server:** {invite_url}\n\n"
+            "The ticket system unlocks as soon as the bot joins."
+        ))
+
+
+async def _handle_invoice_paid(obj: dict, session: ClientSession):
+    sub_id = obj.get("subscription")
+    if not sub_id:
+        return
+    rec, gid = _find_by_subscription_id(sub_id)
+    if not rec:
+        return
+    was_past_due = rec.get("status") == "past_due"
+    rec["status"] = "active"
+    rec["grace_period_ends_at"] = None
+    lines = obj.get("lines", {}).get("data") or []
+    period_end = lines[0].get("period", {}).get("end") if lines else None
+    if period_end:
+        rec["current_period_end"] = period_end
+    rec["updated_at"] = time.time()
+    _save_json("subscriptions", SUBSCRIPTIONS)
+
+    if was_past_due and rec.get("owner_discord_user_id"):
+        await _send_dm(session, rec["owner_discord_user_id"], (
+            "✅ **Payment received — your TrapAI subscription is active again!**\n"
+            "The ticket system has been restored for your server."
+        ))
+
+
+async def _handle_invoice_payment_failed(obj: dict, session: ClientSession):
+    sub_id = obj.get("subscription")
+    if not sub_id:
+        return
+    rec, gid = _find_by_subscription_id(sub_id)
+    if not rec:
+        return
+    if rec.get("status") == "past_due":
+        return  # already in grace period — don't reset the clock on a second failed retry
+    rec["status"] = "past_due"
+    rec["grace_period_ends_at"] = time.time() + SUBSCRIPTION_GRACE_PERIOD_DAYS * 86400
+    rec["last_reminder_sent_at"] = time.time()
+    rec["updated_at"] = time.time()
+    _save_json("subscriptions", SUBSCRIPTIONS)
+
+    if rec.get("owner_discord_user_id"):
+        label = TIERS.get(rec.get("tier"), {}).get("label", "TrapAI")
+        portal_hint = f"{PRODUCT_BASE_URL}/portal?guild_id={gid}" if PRODUCT_BASE_URL else "the Manage Subscription link from ,managesubscription"
+        await _send_dm(session, rec["owner_discord_user_id"], (
+            f"⚠️ **TrapAI payment failed.**\n\n"
+            f"Your card was declined for your **{label}** subscription (server `{gid}`).\n"
+            f"You have **{SUBSCRIPTION_GRACE_PERIOD_DAYS} days** to update your payment method before "
+            "the ticket system is disabled for that server.\n\n"
+            f"Update billing: {portal_hint}"
+        ))
+
+
+async def _handle_subscription_updated(obj: dict, session: ClientSession):
+    sub_id = obj.get("id")
+    rec, gid = _find_by_subscription_id(sub_id)
+    if not rec:
+        return
+    items = (obj.get("items") or {}).get("data") or []
+    if items:
+        price_id = (items[0].get("price") or {}).get("id")
+        tier = _tier_for_price_id(price_id)
+        if tier:
+            rec["tier"] = tier
+    # Best-effort fallback sync from Stripe's own subscription status —
+    # invoice.paid / invoice.payment_failed are the primary source of truth
+    # for active/past_due, this just catches drift.
+    if obj.get("status") == "active" and rec.get("status") == "past_due":
+        rec["status"] = "active"
+        rec["grace_period_ends_at"] = None
+    rec["updated_at"] = time.time()
+    _save_json("subscriptions", SUBSCRIPTIONS)
+
+
+async def _handle_subscription_deleted(obj: dict, session: ClientSession):
+    sub_id = obj.get("id")
+    rec, gid = _find_by_subscription_id(sub_id)
+    if not rec:
+        return
+    rec["status"] = "canceled"
+    rec["grace_period_ends_at"] = None
+    rec["updated_at"] = time.time()
+    _save_json("subscriptions", SUBSCRIPTIONS)
+
+    if rec.get("owner_discord_user_id"):
+        await _send_dm(session, rec["owner_discord_user_id"], (
+            "❌ **TrapAI subscription canceled.**\n\n"
+            "This server's TrapAI subscription has ended, and the ticket system is now disabled for it.\n"
+            "Resubscribe anytime to restore access."
+        ))
+
+
+async def _run_grace_period_sweep_once():
+    """One pass over SUBSCRIPTIONS: suspends any server whose grace period
+    has run out, and sends one reminder DM per day while still inside the
+    grace period. Split out from the loop below so it's independently
+    callable/testable without waiting on the real sleep interval."""
+    if not SUBSCRIPTIONS:
+        return
+    now = time.time()
+    changed = False
+    timeout = ClientTimeout(total=15)
+    async with ClientSession(timeout=timeout) as session:
+        for gid, rec in list(SUBSCRIPTIONS.items()):
+            if rec.get("status") != "past_due":
+                continue
+            grace_end = rec.get("grace_period_ends_at")
+            if not grace_end:
+                continue
+            owner = rec.get("owner_discord_user_id")
+            if now >= grace_end:
+                rec["status"] = "suspended"
+                rec["updated_at"] = now
+                changed = True
+                if owner:
+                    await _send_dm(session, owner, (
+                        "🚫 **TrapAI subscription suspended.**\n\n"
+                        f"The grace period for server `{gid}` has ended without a successful payment — "
+                        "the ticket system is now disabled for it.\n"
+                        "Update your payment method and the next successful charge will restore access automatically."
+                    ))
+            elif now - rec.get("last_reminder_sent_at", 0) >= 86400:
+                rec["last_reminder_sent_at"] = now
+                changed = True
+                if owner:
+                    days_left = max(1, round((grace_end - now) / 86400))
+                    await _send_dm(session, owner, (
+                        f"⏳ **Reminder: TrapAI payment still failing** for server `{gid}`.\n"
+                        f"**{days_left} day(s)** left in your grace period before the ticket system is suspended.\n"
+                        "Please update your payment method to avoid interruption."
+                    ))
+    if changed:
+        _save_json("subscriptions", SUBSCRIPTIONS)
+
+
+async def _grace_period_sweep_loop():
+    """Runs for the lifetime of the process."""
+    while True:
+        await asyncio.sleep(6 * 3600)
+        await _run_grace_period_sweep_once()
+
+
+def _check_internal_auth(request: web.Request) -> bool:
+    return bool(INTERNAL_API_SECRET) and request.headers.get("X-Internal-Secret") == INTERNAL_API_SECRET
+
+
+# ============================================================
+# BILLING PAGES — pricing/checkout, success/cancel, terms
+# ============================================================
+_BILLING_PAGE_STYLE = """
+<style>
+  .billing-header { padding: clamp(2.5rem, 6vw, 4rem) 1.5rem 1rem; text-align: center; }
+  .billing-header h1 { font-size: clamp(1.8rem, 5vw, 2.6rem); font-weight: 800; margin: 0 0 .5rem; color: #f2f3f5; }
+  .billing-header p { color: #8a8d94; margin: 0; }
+
+  .billing-form { max-width: 900px; margin: 2rem auto 4rem; padding: 0 1.5rem; }
+  .tier-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
+  .tier-card {
+    position: relative; background: rgba(255, 255, 255, .03); border: 2px solid rgba(255, 255, 255, .08);
+    border-radius: 14px; padding: 1.4rem 1.2rem; cursor: pointer; transition: all .15s ease;
+  }
+  .tier-card:hover { border-color: rgba(255, 198, 41, .35); transform: translateY(-2px); }
+  .tier-card input { position: absolute; opacity: 0; }
+  .tier-card.best { border-color: var(--gold); }
+  .tier-card input:checked + .tier-body { color: #fff; }
+  .tier-card:has(input:checked) { border-color: var(--gold); background: rgba(255, 198, 41, .06); }
+  .tier-best-badge {
+    position: absolute; top: -11px; left: 50%; transform: translateX(-50%);
+    background: var(--gold); color: #0b0b0d; font-size: .68rem; font-weight: 800;
+    letter-spacing: .04em; padding: .25rem .7rem; border-radius: 20px; white-space: nowrap;
+  }
+  .tier-name { font-weight: 800; font-size: 1.05rem; color: #f2f3f5; margin-bottom: .3rem; }
+  .tier-price { font-size: 1.5rem; font-weight: 800; color: var(--gold); }
+  .tier-price small { font-size: .7rem; font-weight: 600; color: #8a8d94; }
+
+  .field-group { margin-bottom: 1.2rem; }
+  .field-group label { display: block; font-size: .85rem; font-weight: 600; color: #c7cad0; margin-bottom: .4rem; }
+  .field-group input[type=text] {
+    width: 100%; padding: .8rem 1rem; border-radius: 10px; box-sizing: border-box;
+    border: 1px solid rgba(255, 255, 255, .1); background: rgba(255, 255, 255, .04);
+    color: #fff; font-size: .95rem; font-family: inherit;
+  }
+  .field-hint { font-size: .75rem; color: #5c5f66; margin-top: .35rem; }
+
+  .agree-row { display: flex; align-items: flex-start; gap: .6rem; margin: 1.4rem 0; font-size: .85rem; color: #a7abb3; }
+  .agree-row a { color: var(--gold); }
+
+  .billing-submit {
+    display: block; width: 100%; text-align: center; background: var(--gold); color: #0b0b0d;
+    font-weight: 800; font-size: 1rem; padding: 1rem; border: none; border-radius: 10px; cursor: pointer;
+    font-family: inherit; transition: transform .15s ease;
+  }
+  .billing-submit:hover { transform: translateY(-2px); }
+
+  .billing-note { max-width: 900px; margin: 0 auto 3rem; padding: 0 1.5rem; text-align: center; color: #5c5f66; font-size: .82rem; }
+
+  .result-page { max-width: 560px; margin: 4rem auto; padding: 0 1.5rem; text-align: center; }
+  .result-page h1 { font-size: clamp(1.6rem, 4vw, 2.2rem); font-weight: 800; margin: 0 0 1rem; color: #f2f3f5; }
+  .result-page p { color: #a7abb3; line-height: 1.6; margin: 0 0 1.6rem; }
+
+  .terms-page { max-width: 720px; margin: 0 auto; padding: 2rem 1.5rem 4rem; color: #c7cad0; line-height: 1.7; }
+  .terms-page h1 { color: #f2f3f5; font-size: clamp(1.6rem, 4vw, 2.2rem); margin-bottom: 1.5rem; }
+  .terms-page h2 { color: #f2f3f5; font-size: 1.1rem; margin-top: 2rem; }
+  .terms-page p, .terms-page li { color: #a7abb3; font-size: .92rem; }
+</style>
+"""
+
+
+def _billing_page_shell(title: str, body_html: str) -> str:
+    accent_style = f"<style>:root {{ --accent: {BRAND_GOLD}; --accent-soft: {BRAND_GOLD}22; --gold: {BRAND_GOLD}; }}</style>"
+    nav_html = (
+        '<nav class="nav">'
+        '<div class="nav-brand"><span class="nav-logo">🛡️</span> TrapAI</div>'
+        '<div class="nav-right"><a class="nav-link" href="/checkout">Pricing</a><a class="nav-link" href="/terms">Terms</a></div>'
+        '</nav>'
+    )
+    return f"""<!doctype html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{html.escape(title)}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+{accent_style}
+{_STYLE_AND_SCRIPT}
+{_BILLING_PAGE_STYLE}
+</head>
+<body class="ok">
+{nav_html}
+{body_html}
+<footer class="site-footer">Secured by Stripe • TrapAI</footer>
+</body></html>"""
+
+
+def _pricing_page(error: str = None) -> str:
+    error_html = f'<p style="color:#ED4245;text-align:center;margin-bottom:1.5rem;">{html.escape(error)}</p>' if error else ""
+
+    tier_order = ["starter", "pro", "premium", "lifetime"]
+    cards = []
+    for i, tier in enumerate(tier_order):
+        cfg = TIERS[tier]
+        price_str = f"${cfg['price_cents'] / 100:.0f}"
+        period_str = "one-time" if not cfg["interval"] else f"/{cfg['interval']}"
+        best_badge = '<div class="tier-best-badge">⭐ BEST VALUE</div>' if cfg["best_value"] else ""
+        cards.append(
+            f'<label class="tier-card{" best" if cfg["best_value"] else ""}">'
+            f'{best_badge}'
+            f'<input type="radio" name="tier" value="{tier}"{" checked" if i == 0 else ""}>'
+            f'<div class="tier-body">'
+            f'<div class="tier-name">{html.escape(cfg["label"])}</div>'
+            f'<div class="tier-price">{price_str} <small>{period_str}</small></div>'
+            f'</div></label>'
+        )
+
+    body = f"""
+<div class="billing-header">
+  <h1>Get TrapAI's Ticket System</h1>
+  <p>Pick a plan below — instant access to the ticket system for your server as soon as you pay.</p>
+</div>
+<form class="billing-form" method="post" action="/checkout/session">
+  {error_html}
+  <div class="tier-grid">{''.join(cards)}</div>
+  <div class="field-group">
+    <label for="guild_id">Your Discord Server ID</label>
+    <input type="text" id="guild_id" name="guild_id" inputmode="numeric" pattern="[0-9]+" required
+           placeholder="e.g. 123456789012345678">
+    <div class="field-hint">Enable Developer Mode in Discord, right-click your server icon → Copy Server ID.</div>
+  </div>
+  <div class="field-group">
+    <label for="discord_user_id">Your Discord User ID</label>
+    <input type="text" id="discord_user_id" name="discord_user_id" inputmode="numeric" pattern="[0-9]+" required
+           placeholder="e.g. 987654321098765432">
+    <div class="field-hint">Right-click your own name in Discord → Copy User ID. We'll DM your invite link and billing updates here.</div>
+  </div>
+  <div class="agree-row">
+    <input type="checkbox" name="agree_tos" required style="margin-top:.2rem;">
+    <span>I agree to the <a href="/terms" target="_blank">Terms of Service</a>, including that this is a license to use TrapAI, not a sale of its source code, and that Lifetime purchases are non-refundable.</span>
+  </div>
+  <button type="submit" class="billing-submit">Continue to Secure Checkout →</button>
+</form>
+<p class="billing-note">Payments are processed securely by Stripe — we never see or store your card details. Subscriptions renew automatically until canceled; Lifetime is a single one-time charge with no recurring billing.</p>
+"""
+    return _billing_page_shell("TrapAI Pricing", body)
+
+
+def _billing_not_configured_page() -> str:
+    body = """
+<div class="result-page">
+  <h1>Billing Isn't Live Yet</h1>
+  <p>This TrapAI deployment hasn't had its Stripe keys configured yet. Check back soon, or contact whoever runs this bot.</p>
+</div>
+"""
+    return _billing_page_shell("Billing Unavailable", body)
+
+
+def _checkout_result_page(title: str, message: str, *, invite_url: str = None) -> str:
+    button_html = (
+        f'<a class="btn" href="{invite_url}" style="opacity:1;animation:none;">Add TrapAI to Your Server →</a>'
+        if invite_url else ""
+    )
+    body = f"""
+<div class="result-page">
+  <h1>{html.escape(title)}</h1>
+  <p>{message}</p>
+  {button_html}
+</div>
+"""
+    return _billing_page_shell(title, body)
+
+
+def _terms_page() -> str:
+    body = f"""
+<div class="terms-page">
+  <h1>TrapAI — Terms of Service &amp; License</h1>
+  <p>This page explains what you're agreeing to when you subscribe to or purchase TrapAI's ticket system, especially the one-time <strong>Lifetime</strong> option.</p>
+
+  <h2>1. What you're buying</h2>
+  <p>A subscription or Lifetime purchase grants your Discord server a <strong>license to use</strong> TrapAI's ticket system and related features. It does not transfer ownership of, or any rights to, TrapAI's source code, which remains completely private. You may not decompile, extract, resell, or redistribute the bot itself.</p>
+
+  <h2>2. Lifetime plan</h2>
+  <p>The Lifetime plan is a single one-time charge of ${TIERS['lifetime']['price_cents'] / 100:.0f}. No subscription is created and you will never be charged again for it. In exchange, you get full access to the ticket system and all features it includes, for as long as TrapAI is offered and maintained (see Section 4).</p>
+
+  <h2>3. No refunds</h2>
+  <p>All payments — subscription charges and the Lifetime purchase alike — are final and non-refundable, except where required by law.</p>
+
+  <h2>4. Service availability &amp; discontinuation</h2>
+  <p>TrapAI is provided on a best-effort basis. The service may be modified, interrupted, or discontinued at any time, for any reason, without notice. If TrapAI is discontinued, including for Lifetime purchasers, no refunds or other compensation will be provided.</p>
+
+  <h2>5. No warranty</h2>
+  <p>TrapAI is provided "as is," without warranty of any kind. We do not guarantee the bot will be free of bugs, errors, downtime, or unexpected behavior. You assume all risk from using it.</p>
+
+  <h2>6. Subscription billing (Starter / Pro / Premium)</h2>
+  <p>Subscriptions bill automatically on a recurring monthly basis until canceled. If a payment fails, you'll get a grace period of {SUBSCRIPTION_GRACE_PERIOD_DAYS} days to update your payment method before the ticket system is suspended for your server. You can manage or cancel your subscription anytime via the Manage Subscription / customer portal link.</p>
+
+  <h2>7. Support</h2>
+  <p>If you run into any errors or issues, contact TrapAI support: {html.escape(SUPPORT_CONTACT)}.</p>
+</div>
+"""
+    return _billing_page_shell("TrapAI Terms of Service", body)
+
+
+async def handle_checkout_page(request: web.Request) -> web.Response:
+    if not STRIPE_SECRET_KEY:
+        return web.Response(text=_billing_not_configured_page(), content_type="text/html", status=503)
+    return web.Response(text=_pricing_page(), content_type="text/html", status=200)
+
+
+async def handle_create_checkout_session(request: web.Request) -> web.Response:
+    if not STRIPE_SECRET_KEY:
+        return web.Response(text=_billing_not_configured_page(), content_type="text/html", status=503)
+
+    form = await request.post()
+    guild_id = str(form.get("guild_id", "")).strip()
+    discord_user_id = str(form.get("discord_user_id", "")).strip()
+    tier = str(form.get("tier", "")).strip()
+    agreed = form.get("agree_tos") is not None
+
+    if not guild_id.isdigit() or not discord_user_id.isdigit() or tier not in TIERS or not agreed:
+        return web.Response(
+            text=_pricing_page(error="Please fill in a valid Server ID, User ID, pick a plan, and agree to the Terms of Service."),
+            content_type="text/html", status=400,
+        )
+
+    base_url = _resolve_base_url(request)
+    try:
+        session_obj = await asyncio.to_thread(_create_checkout_session_sync, tier, guild_id, discord_user_id, base_url)
+    except Exception as e:
+        log.error("Failed to create checkout session: %s", e)
+        return web.Response(text=_pricing_page(error="Couldn't start checkout — please try again in a moment."),
+                             content_type="text/html", status=502)
+
+    raise web.HTTPSeeOther(location=session_obj.url)
+
+
+async def handle_checkout_success(request: web.Request) -> web.Response:
+    if not STRIPE_SECRET_KEY:
+        return web.Response(text=_billing_not_configured_page(), content_type="text/html", status=503)
+
+    session_id = request.query.get("session_id")
+    guild_id = None
+    if session_id:
+        try:
+            session_obj = await asyncio.to_thread(stripe.checkout.Session.retrieve, session_id)
+            guild_id = (session_obj.get("metadata") or {}).get("guild_id")
+        except stripe.error.StripeError as e:
+            log.warning("Couldn't retrieve checkout session %s: %s", session_id, e)
+
+    invite_url = build_bot_invite_url(guild_id) if guild_id else None
+    message = (
+        "Payment confirmed — thanks for subscribing to TrapAI! Click below to add the bot to your server. "
+        "We've also DMed you this link on Discord."
+        if invite_url else
+        "Payment confirmed — thanks! Access is being set up now; check your Discord DMs for your server invite link."
+    )
+    return web.Response(text=_checkout_result_page("✅ Payment Successful", message, invite_url=invite_url),
+                         content_type="text/html", status=200)
+
+
+async def handle_checkout_cancel(request: web.Request) -> web.Response:
+    return web.Response(
+        text=_checkout_result_page("Checkout Canceled", "No charge was made. You can restart checkout anytime from the pricing page."),
+        content_type="text/html", status=200,
+    )
+
+
+async def handle_portal_redirect(request: web.Request) -> web.Response:
+    if not STRIPE_SECRET_KEY:
+        return web.Response(text=_billing_not_configured_page(), content_type="text/html", status=503)
+
+    guild_id = request.query.get("guild_id", "")
+    rec = SUBSCRIPTIONS.get(guild_id)
+    customer_id = rec.get("stripe_customer_id") if rec else None
+    if not customer_id:
+        return web.Response(
+            text=_checkout_result_page("No Billing Account Found", "This server doesn't have a billing account on file yet — subscribe first from the pricing page."),
+            content_type="text/html", status=404,
+        )
+
+    base_url = _resolve_base_url(request)
+    try:
+        portal = await asyncio.to_thread(
+            stripe.billing_portal.Session.create, customer=customer_id, return_url=f"{base_url}/checkout/success",
+        )
+    except stripe.error.StripeError as e:
+        log.error("Failed to create portal session for guild %s: %s", guild_id, e)
+        return web.Response(
+            text=_checkout_result_page("Couldn't Open Billing Portal", "Something went wrong opening your billing portal — please try again shortly."),
+            content_type="text/html", status=502,
+        )
+    raise web.HTTPSeeOther(location=portal.url)
+
+
+async def handle_terms_page(request: web.Request) -> web.Response:
+    return web.Response(text=_terms_page(), content_type="text/html", status=200)
+
+
+async def handle_stripe_webhook(request: web.Request) -> web.Response:
+    if not STRIPE_WEBHOOK_SECRET:
+        return web.json_response({"error": "billing not configured"}, status=503)
+
+    payload = await request.read()
+    sig_header = request.headers.get("Stripe-Signature", "")
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+    except (ValueError, stripe.error.SignatureVerificationError) as e:
+        log.warning("Stripe webhook signature verification failed: %s", e)
+        return web.json_response({"error": "invalid signature"}, status=400)
+
+    event_type = event["type"]
+    data_obj = event["data"]["object"]
+
+    timeout = ClientTimeout(total=15)
+    async with ClientSession(timeout=timeout) as session:
+        handler = {
+            "checkout.session.completed": _handle_checkout_completed,
+            "invoice.paid": _handle_invoice_paid,
+            "invoice.payment_failed": _handle_invoice_payment_failed,
+            "customer.subscription.updated": _handle_subscription_updated,
+            "customer.subscription.deleted": _handle_subscription_deleted,
+        }.get(event_type)
+        if handler:
+            await handler(data_obj, session)
+        else:
+            log.info("Ignoring unhandled Stripe event type: %s", event_type)
+
+    return web.json_response({"received": True})
+
+
+async def handle_internal_get_subscription(request: web.Request) -> web.Response:
+    if not _check_internal_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    guild_id = request.match_info["guild_id"]
+    rec = SUBSCRIPTIONS.get(guild_id)
+    if not rec:
+        return web.json_response({"status": "none"})
+    return web.json_response({
+        "tier": rec.get("tier"),
+        "status": rec.get("status"),
+        "current_period_end": rec.get("current_period_end"),
+        "grace_period_ends_at": rec.get("grace_period_ends_at"),
+    })
+
+
+async def handle_internal_checkout_link(request: web.Request) -> web.Response:
+    if not _check_internal_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if not STRIPE_SECRET_KEY:
+        return web.json_response({"error": "billing not configured"}, status=503)
+
+    body = await request.json()
+    guild_id = str(body.get("guild_id", ""))
+    discord_user_id = str(body.get("discord_user_id", ""))
+    tier = body.get("tier")
+    if not guild_id.isdigit() or not discord_user_id.isdigit() or tier not in TIERS:
+        return web.json_response({"error": "guild_id, discord_user_id, and a valid tier are required"}, status=400)
+
+    base_url = _resolve_base_url(request)
+    try:
+        session_obj = await asyncio.to_thread(_create_checkout_session_sync, tier, guild_id, discord_user_id, base_url)
+    except Exception as e:
+        log.error("Failed to create checkout session via internal API: %s", e)
+        return web.json_response({"error": "failed to create checkout session"}, status=502)
+    return web.json_response({"url": session_obj.url})
+
+
+async def handle_internal_portal_link(request: web.Request) -> web.Response:
+    if not _check_internal_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if not STRIPE_SECRET_KEY:
+        return web.json_response({"error": "billing not configured"}, status=503)
+
+    body = await request.json()
+    guild_id = str(body.get("guild_id", ""))
+    rec = SUBSCRIPTIONS.get(guild_id)
+    customer_id = rec.get("stripe_customer_id") if rec else None
+    if not customer_id:
+        return web.json_response({"error": "no billing account on file for this server"}, status=404)
+
+    base_url = _resolve_base_url(request)
+    try:
+        portal = await asyncio.to_thread(
+            stripe.billing_portal.Session.create, customer=customer_id, return_url=f"{base_url}/checkout/success",
+        )
+    except stripe.error.StripeError as e:
+        log.error("Failed to create portal session via internal API: %s", e)
+        return web.json_response({"error": "failed to create billing portal session"}, status=502)
+    return web.json_response({"url": portal.url})
+
+
 def create_app() -> web.Application:
     app = web.Application()
     app.router.add_get("/callback", handle_callback)
     app.router.add_get("/commands", handle_commands_page)
+    app.router.add_get("/checkout", handle_checkout_page)
+    app.router.add_post("/checkout/session", handle_create_checkout_session)
+    app.router.add_get("/checkout/success", handle_checkout_success)
+    app.router.add_get("/checkout/cancel", handle_checkout_cancel)
+    app.router.add_get("/portal", handle_portal_redirect)
+    app.router.add_get("/terms", handle_terms_page)
+    app.router.add_post("/stripe/webhook", handle_stripe_webhook)
+    app.router.add_get("/internal/subscription/{guild_id}", handle_internal_get_subscription)
+    app.router.add_post("/internal/checkout-link", handle_internal_checkout_link)
+    app.router.add_post("/internal/portal-link", handle_internal_portal_link)
     app.router.add_get("/", handle_health)
     app.router.add_get("/health", handle_health)
+    app.on_startup.append(_on_startup)
     return app
+
+
+async def _on_startup(app: web.Application):
+    if STRIPE_SECRET_KEY:
+        await asyncio.to_thread(_bootstrap_stripe_prices_sync)
+    asyncio.create_task(_grace_period_sweep_loop())
 
 
 if __name__ == "__main__":
