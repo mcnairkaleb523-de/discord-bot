@@ -1251,6 +1251,19 @@ def _find_by_subscription_id(sub_id: str):
     return None, None
 
 
+def _to_plain_dict(obj):
+    """Newer stripe-python versions return StripeObject instances that
+    deliberately raise on .get() (attribute/subscript access only, by
+    design — see stripe's own AttributeError message pointing at
+    .to_dict()). Every webhook event's data object and every retrieved
+    Session/Subscription goes through here once, so the rest of this file
+    can keep using plain-dict .get() everywhere without re-litigating this
+    per call site."""
+    if hasattr(obj, "to_dict"):
+        return obj.to_dict()
+    return obj
+
+
 async def _send_dm(session: ClientSession, user_id: str, content: str):
     """Same raw-REST DM pattern as the verification log posting above — a
     bot token can open/send a DM by user ID with no gateway connection."""
@@ -1691,7 +1704,8 @@ async def handle_checkout_success(request: web.Request) -> web.Response:
     if session_id:
         try:
             session_obj = await asyncio.to_thread(stripe.checkout.Session.retrieve, session_id)
-            guild_id = (session_obj.get("metadata") or {}).get("guild_id")
+            session_data = _to_plain_dict(session_obj)
+            guild_id = (session_data.get("metadata") or {}).get("guild_id")
         except stripe.error.StripeError as e:
             log.warning("Couldn't retrieve checkout session %s: %s", session_id, e)
 
@@ -1757,7 +1771,7 @@ async def handle_stripe_webhook(request: web.Request) -> web.Response:
         return web.json_response({"error": "invalid signature"}, status=400)
 
     event_type = event["type"]
-    data_obj = event["data"]["object"]
+    data_obj = _to_plain_dict(event["data"]["object"])
 
     timeout = ClientTimeout(total=15)
     async with ClientSession(timeout=timeout) as session:
