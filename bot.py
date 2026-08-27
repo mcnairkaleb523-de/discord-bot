@@ -634,11 +634,95 @@ TICKET_ONLY_GUILD_IDS = {
 # in ticket-only guilds, so it visibly reads as its own dedicated bot there
 # even though it's the same underlying bot account.
 TICKET_ONLY_NICKNAME = os.getenv("TICKET_ONLY_NICKNAME")
-TICKET_ONLY_ALLOWED_COMMANDS = {
+# Commands that actually create/manage tickets — these are what paid
+# access gates. subscribe/managesubscription/subscriptionstatus/help/cmds/
+# ping stay usable regardless of subscription status, since a suspended
+# server still needs to be able to pay to get back in.
+TICKET_MANAGEMENT_COMMANDS = {
     "sendtickets", "addticketcategory", "removeticketcategory",
     "ticketcategories", "setticketformat", "claimticket", "closeticket",
-    "setlogchannel", "help", "cmds", "ping",
+    "setlogchannel",
 }
+TICKET_ONLY_ALLOWED_COMMANDS = TICKET_MANAGEMENT_COMMANDS | {
+    "help", "cmds", "ping", "subscribe", "managesubscription", "subscriptionstatus",
+}
+
+# ── Billing (optional — see oauth_server.py's BILLING section for the
+# Stripe-backed subscription/lifetime purchase flow this talks to) ────────
+# BILLING_API_URL — that service's own public URL, e.g.
+# https://your-service.up.railway.app (same host as COMMANDS_SITE_URL).
+# INTERNAL_API_SECRET — must match the SAME env var on that service exactly;
+# authenticates bot.py's calls to its /internal/* endpoints. Leave either
+# unset to run with billing disabled: ,subscribe / ,managesubscription /
+# ,subscriptionstatus reply that billing isn't configured yet, and
+# ticket-only guilds are NOT gated on subscription status (so a ticket-only
+# deployment set up before billing existed keeps working as before).
+BILLING_API_URL = os.getenv("BILLING_API_URL", "").rstrip("/")
+INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET")
+BILLING_CONFIGURED = bool(BILLING_API_URL and INTERNAL_API_SECRET)
+
+BILLING_TIERS = {
+    "starter":  {"label": "Starter",  "price": "$5/mo",  "best_value": False},
+    "pro":      {"label": "Pro",      "price": "$10/mo", "best_value": False},
+    "premium":  {"label": "Premium",  "price": "$20/mo", "best_value": False},
+    "lifetime": {"label": "Lifetime", "price": "$75 one-time", "best_value": True},
+}
+# Statuses that still count as paid access — "past_due" is the grace
+# period: access continues while they have days left to fix payment.
+_SUBSCRIPTION_ACTIVE_STATUSES = {"active", "lifetime", "past_due"}
+
+# _SUBSCRIPTION_CACHE[guild_id] = (status_dict, fetched_at) — short-TTL
+# cache so a burst of commands in a ticket-only guild doesn't hit
+# oauth_server.py once per message.
+_SUBSCRIPTION_CACHE: dict[int, tuple] = {}
+_SUBSCRIPTION_CACHE_TTL = 60
+
+
+async def _billing_api_get(path: str):
+    if not BILLING_CONFIGURED:
+        return None
+    headers = {"X-Internal-Secret": INTERNAL_API_SECRET}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{BILLING_API_URL}{path}", headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status != 200:
+                    return None
+                return await resp.json()
+    except aiohttp.ClientError:
+        return None
+
+
+async def _billing_api_post(path: str, payload: dict):
+    if not BILLING_CONFIGURED:
+        return None, "Billing isn't configured on this bot yet."
+    headers = {"X-Internal-Secret": INTERNAL_API_SECRET, "Content-Type": "application/json"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{BILLING_API_URL}{path}", headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                data = await resp.json()
+                if resp.status != 200:
+                    return None, data.get("error", f"Request failed ({resp.status}).")
+                return data, None
+    except aiohttp.ClientError as e:
+        return None, f"Couldn't reach the billing service: {e}"
+
+
+async def _get_subscription_status(guild_id: int) -> dict:
+    """{"status": ..., "tier": ..., ...} — {"status": "none"} if unconfigured,
+    unreachable with nothing cached yet, or the guild has never paid."""
+    cached = _SUBSCRIPTION_CACHE.get(guild_id)
+    if cached and time.time() - cached[1] < _SUBSCRIPTION_CACHE_TTL:
+        return cached[0]
+    if not BILLING_CONFIGURED:
+        return {"status": "none"}
+    data = await _billing_api_get(f"/internal/subscription/{guild_id}")
+    if data is None:
+        # Unreachable — reuse a stale cached value rather than punishing a
+        # paying customer for a transient network blip; only fall back to
+        # "none" if we've never successfully fetched anything for them.
+        return cached[0] if cached else {"status": "none"}
+    _SUBSCRIPTION_CACHE[guild_id] = (data, time.time())
+    return data
 
 
 def _is_ticket_only_guild(guild) -> bool:
@@ -652,13 +736,23 @@ class TicketOnlyModeRestricted(commands.CheckFailure):
     pass
 
 
+class TicketSubscriptionInactive(commands.CheckFailure):
+    """Raised when a ticket-management command is used in a ticket-only
+    guild whose subscription isn't active/lifetime/in-grace."""
+    pass
+
+
 @bot.check
 async def _ticket_only_mode_gate(ctx):
     if not _is_ticket_only_guild(ctx.guild):
         return True
-    if ctx.command and ctx.command.qualified_name in TICKET_ONLY_ALLOWED_COMMANDS:
-        return True
-    raise TicketOnlyModeRestricted()
+    if not ctx.command or ctx.command.qualified_name not in TICKET_ONLY_ALLOWED_COMMANDS:
+        raise TicketOnlyModeRestricted()
+    if ctx.command.qualified_name in TICKET_MANAGEMENT_COMMANDS and BILLING_CONFIGURED:
+        status = (await _get_subscription_status(ctx.guild.id)).get("status")
+        if status not in _SUBSCRIPTION_ACTIVE_STATUSES:
+            raise TicketSubscriptionInactive()
+    return True
 
 
 async def _apply_ticket_only_nickname(guild):
@@ -2876,6 +2970,7 @@ HELP_CATEGORIES = [
     ('🏷️', 'Roles', ['role', 'roleall', 'massrole', 'massunrole', 'restoreallroles', 'autorole', 'setgifrole', 'protectedrole', 'br']),
     ('🎤', 'Voice Channels', ['vclock', 'vcunlock', 'vchide', 'vcshow', 'vcname', 'vclimit', 'vcbitrate', 'vcregion', 'vckick', 'vcban', 'vcunban', 'vcpermit', 'vcmute', 'vcunmute', 'vcdeafen', 'vcundeafen', 'vctransfer', 'vcclaim', 'vcmod', 'vcremovemod', 'vcstats', 'setupvc', 'setunmutevc']),
     ('🎫', 'Tickets', ['sendtickets', 'addticketcategory', 'removeticketcategory', 'ticketcategories', 'setticketformat', 'claimticket', 'closeticket']),
+    ('💳', 'Billing', ['subscribe', 'managesubscription', 'subscriptionstatus']),
     ('📊', 'Stats & Info', ['whois', 'chatstats', 'serverstats', 'invites', 'invitelogs', 'inviteleaderboard', 'setinvite', 'milestones', 'setmilestone', 'testmilestone', 'ping', 'exitsurveys']),
     ('✅', 'Vouch', ['vouch', 'unvouch', 'cancelvouch', 'pendingvouches', 'vouches', 'vouchleaderboard', 'vouchstats', 'vouchconfig']),
     ('🎉', 'Giveaways & Polls', ['giveaway', 'giveawayend', 'giveaways', 'poll', 'pollend']),
@@ -5123,6 +5218,12 @@ async def on_command_error(ctx, error):
         await ctx.send(f"⚠️ {ctx.author.mention}: `{ctx.command.qualified_name}` is bot-owner only.")
     elif isinstance(error, TicketOnlyModeRestricted):
         await ctx.send(f"🎫 {ctx.author.mention}: This bot is running in **ticket-only mode** — only the ticket system is available. Use `,help` to see what's active.")
+    elif isinstance(error, TicketSubscriptionInactive):
+        await ctx.send(
+            "🚫 **TrapAI Subscription Inactive**\n"
+            "This server's TrapAI subscription has expired. Renew your subscription to restore the ticket system.\n"
+            "Use `,subscribe` to renew, or `,subscriptionstatus` to see details."
+        )
     elif isinstance(error, commands.CheckFailure):
         # Catches MissingRole and any other custom permission check —
         # same "permitted role" wording as MissingPermissions above, since
@@ -6840,6 +6941,141 @@ async def closeticket(ctx):
         await channel.delete(reason=f"Ticket closed by {ctx.author}")
     except discord.HTTPException:
         pass
+
+
+# ============================================================
+# BILLING — Stripe-backed subscription/lifetime purchase, talks to
+# oauth_server.py's /internal/* endpoints (see that file's BILLING section)
+# ============================================================
+
+def _pricing_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="💳 TrapAI Pricing",
+        description="Pick a plan, then run `,subscribe <tier>` (e.g. `,subscribe pro`) to get a secure checkout link.",
+        color=discord.Color.gold(),
+        timestamp=discord.utils.utcnow()
+    )
+    for tier, cfg in BILLING_TIERS.items():
+        name = f"⭐ {cfg['label']} — Best Value" if cfg["best_value"] else cfg["label"]
+        embed.add_field(name=name, value=f"**{cfg['price']}**\n`,subscribe {tier}`", inline=True)
+    embed.set_footer(text="Payments are handled entirely by Stripe — TrapAI never sees your card details.")
+    return embed
+
+
+@bot.command()
+async def subscribe(ctx, tier: str = None):
+    """
+    Show TrapAI's pricing, or subscribe/purchase a tier. Usage:
+      ,subscribe             — show pricing for all tiers
+      ,subscribe <tier>      — get a secure checkout link (starter/pro/premium/lifetime)
+    """
+    if tier is None:
+        await ctx.send(embed=_pricing_embed())
+        return
+
+    tier = tier.lower()
+    if tier not in BILLING_TIERS:
+        await ctx.send(f"❌ Unknown tier `{tier}`. Valid tiers: {', '.join(BILLING_TIERS)}", delete_after=10)
+        return
+
+    if not BILLING_CONFIGURED:
+        await ctx.send("❌ Billing isn't configured on this bot yet — ask whoever runs it to finish setting up Stripe.", delete_after=12)
+        return
+
+    data, error = await _billing_api_post("/internal/checkout-link", {
+        "guild_id": ctx.guild.id, "discord_user_id": ctx.author.id, "tier": tier,
+    })
+    if error:
+        await ctx.send(f"❌ Couldn't start checkout: {error}", delete_after=12)
+        return
+
+    checkout_url = data["url"]
+    label = BILLING_TIERS[tier]["label"]
+    embed = discord.Embed(
+        title=f"💳 Checkout — {label}",
+        description=f"Click below to complete your **{label}** purchase securely via Stripe.\n\n[Complete Checkout]({checkout_url})",
+        color=discord.Color.gold(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_footer(text="TrapAI never sees your card details — Stripe handles all payment info.")
+
+    try:
+        await ctx.author.send(embed=embed)
+        await ctx.send(f"📨 {ctx.author.mention} Check your DMs for your secure checkout link.")
+    except (discord.Forbidden, discord.HTTPException):
+        await ctx.send(embed=embed)  # DMs closed — post it here instead
+
+
+@bot.command()
+async def managesubscription(ctx):
+    """DM you a link to Stripe's customer portal — manage billing details, change plans, or cancel. Usage: ,managesubscription"""
+    if not BILLING_CONFIGURED:
+        await ctx.send("❌ Billing isn't configured on this bot yet.", delete_after=10)
+        return
+
+    data, error = await _billing_api_post("/internal/portal-link", {"guild_id": ctx.guild.id})
+    if error:
+        await ctx.send(f"❌ {error}", delete_after=12)
+        return
+
+    portal_url = data["url"]
+    embed = discord.Embed(
+        title="💳 Manage Your Subscription",
+        description=f"[Open the billing portal]({portal_url}) to update your payment method, change plans, or cancel.",
+        color=discord.Color.blurple(),
+        timestamp=discord.utils.utcnow()
+    )
+    try:
+        await ctx.author.send(embed=embed)
+        await ctx.send(f"📨 {ctx.author.mention} Check your DMs for your billing portal link.")
+    except (discord.Forbidden, discord.HTTPException):
+        await ctx.send(embed=embed)
+
+
+@bot.command()
+async def subscriptionstatus(ctx):
+    """Show this server's current TrapAI subscription status. Usage: ,subscriptionstatus"""
+    if not BILLING_CONFIGURED:
+        await ctx.send("❌ Billing isn't configured on this bot yet.", delete_after=10)
+        return
+
+    data = await _get_subscription_status(ctx.guild.id)
+    status = data.get("status", "none")
+    tier = data.get("tier")
+
+    status_display = {
+        "active":    ("🟢", "Active"),
+        "lifetime":  ("💎", "Lifetime — never expires"),
+        "past_due":  ("🟡", "Payment failed — in grace period"),
+        "suspended": ("🔴", "Suspended — ticket system disabled"),
+        "canceled":  ("⚫", "Canceled"),
+        "none":      ("⚪", "No subscription on file"),
+    }.get(status, ("⚪", status))
+
+    embed = discord.Embed(
+        title="💳 Subscription Status",
+        color=discord.Color.green() if status in ("active", "lifetime") else discord.Color.orange(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(name="Status", value=f"{status_display[0]} {status_display[1]}", inline=True)
+    if tier:
+        embed.add_field(name="Plan", value=BILLING_TIERS.get(tier, {}).get("label", tier), inline=True)
+
+    grace_end = data.get("grace_period_ends_at")
+    if status == "past_due" and grace_end:
+        embed.add_field(name="⏳ Grace period ends", value=discord.utils.format_dt(discord.utils.utcnow().fromtimestamp(grace_end), "R"), inline=False)
+
+    period_end = data.get("current_period_end")
+    if status == "active" and period_end:
+        embed.add_field(name="🔄 Renews", value=discord.utils.format_dt(discord.utils.utcnow().fromtimestamp(period_end), "R"), inline=False)
+
+    if status in (None, "none", "canceled", "suspended"):
+        embed.add_field(name="Get started", value="Run `,subscribe` to see pricing.", inline=False)
+    else:
+        embed.add_field(name="Manage", value="Run `,managesubscription` to update billing or cancel.", inline=False)
+
+    embed.set_footer(text=f"TrapAI • {ctx.guild.name}")
+    await ctx.send(embed=embed)
 
 
 @bot.command()
