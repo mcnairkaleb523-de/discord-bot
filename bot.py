@@ -615,13 +615,25 @@ OAUTH_VERIFY_ENABLED = bool(DISCORD_CLIENT_ID and DISCORD_OAUTH_REDIRECT_URI)
 COMMANDS_SITE_URL = os.getenv("COMMANDS_SITE_URL")
 
 # ── Ticket-only mode (optional) ───────────────────────────────
-# For running this same bot process as a lean sales/pitch bot in a server
-# you don't otherwise manage (e.g. a FiveM server's Discord) — every
-# command except the ticket system is disabled, so all that server sees is
-# a ticket panel to inquire about buying the full bot. Set
-# TICKET_ONLY_MODE=true in .env to turn it on; leave unset/false for the
-# regular full-featured bot.
+# Lets this same bot process/token show up as a lean, ticket-only "sales
+# bot" in specific servers you don't otherwise manage (e.g. a FiveM
+# server's Discord you're pitching the full bot to), while staying fully
+# featured everywhere else — no second bot application/token needed, since
+# a single bot account can be invited into any number of servers at once
+# and this just changes its behavior per-guild.
+#
+# TICKET_ONLY_GUILD_IDS — comma-separated guild IDs that get the ticket-only
+# treatment. TICKET_ONLY_MODE=true is a blanket override that applies it to
+# EVERY guild instead (only useful if you really are running a second,
+# separate process on its own token purely for this).
 TICKET_ONLY_MODE = os.getenv("TICKET_ONLY_MODE", "false").strip().lower() in ("1", "true", "yes", "on")
+TICKET_ONLY_GUILD_IDS = {
+    int(g) for g in os.getenv("TICKET_ONLY_GUILD_IDS", "").split(",") if g.strip().isdigit()
+}
+# Optional per-guild nickname (e.g. "TrapAI Tickets") applied automatically
+# in ticket-only guilds, so it visibly reads as its own dedicated bot there
+# even though it's the same underlying bot account.
+TICKET_ONLY_NICKNAME = os.getenv("TICKET_ONLY_NICKNAME")
 TICKET_ONLY_ALLOWED_COMMANDS = {
     "sendtickets", "addticketcategory", "removeticketcategory",
     "ticketcategories", "setticketformat", "claimticket", "closeticket",
@@ -629,18 +641,35 @@ TICKET_ONLY_ALLOWED_COMMANDS = {
 }
 
 
+def _is_ticket_only_guild(guild) -> bool:
+    if TICKET_ONLY_MODE:
+        return True
+    return bool(guild) and guild.id in TICKET_ONLY_GUILD_IDS
+
+
 class TicketOnlyModeRestricted(commands.CheckFailure):
-    """Raised when a non-ticket command is used while TICKET_ONLY_MODE is on."""
+    """Raised when a non-ticket command is used in a ticket-only guild."""
     pass
 
 
 @bot.check
 async def _ticket_only_mode_gate(ctx):
-    if not TICKET_ONLY_MODE:
+    if not _is_ticket_only_guild(ctx.guild):
         return True
     if ctx.command and ctx.command.qualified_name in TICKET_ONLY_ALLOWED_COMMANDS:
         return True
     raise TicketOnlyModeRestricted()
+
+
+async def _apply_ticket_only_nickname(guild):
+    if not TICKET_ONLY_NICKNAME or not _is_ticket_only_guild(guild) or not guild.me:
+        return
+    if guild.me.nick == TICKET_ONLY_NICKNAME:
+        return
+    try:
+        await guild.me.edit(nick=TICKET_ONLY_NICKNAME)
+    except (discord.Forbidden, discord.HTTPException):
+        pass
 
 # VERIFY_BACKUP_GUILD[origin_guild_id] = backup_guild_id — where verified
 # members get auto-joined via the guilds.join OAuth scope, set with
@@ -2862,8 +2891,9 @@ HELP_CATEGORIES = [
 def _build_help_embed(guild: discord.Guild) -> discord.Embed:
     """One consolidated embed covering every command — no drill-down,
     no page-by-page buttons, just scroll one message."""
+    ticket_only_here = _is_ticket_only_guild(guild)
     categories = HELP_CATEGORIES
-    if TICKET_ONLY_MODE:
+    if ticket_only_here:
         # Only show what's actually usable here — everything else is
         # gated off by _ticket_only_mode_gate anyway.
         categories = [
@@ -2885,7 +2915,7 @@ def _build_help_embed(guild: discord.Guild) -> discord.Embed:
         f"**{total} commands** across **{len(categories)} categories** — all use the `,` prefix.\n"
         "Example: `,ban @user spamming`"
     )
-    if TICKET_ONLY_MODE:
+    if ticket_only_here:
         intro = (
             f"**{total} commands** available — all use the `,` prefix.\n"
             "This bot is running in **ticket-only mode**: open a ticket below to inquire about the full bot."
@@ -3577,6 +3607,13 @@ async def on_ready():
             name="discord.gg/ballin"
         )
     )
+    # Ticket-only guilds get their nickname applied right away, in case it
+    # was set/changed while the bot was offline or the guild's ticket-only
+    # status was just added.
+    for guild in bot.guilds:
+        if _is_ticket_only_guild(guild):
+            await _apply_ticket_only_nickname(guild)
+
     # Cache current invite use-counts for all guilds
     for guild in bot.guilds:
         try:
@@ -3660,6 +3697,15 @@ async def on_ready():
         _resume_vc_sessions()
 
     print(f"Logged in as {bot.user}")
+
+
+@bot.event
+async def on_guild_join(guild):
+    # If this guild is configured as ticket-only (TICKET_ONLY_GUILD_IDS),
+    # apply its nickname right away so it visibly reads as a dedicated
+    # ticket bot there from the moment it joins.
+    if _is_ticket_only_guild(guild):
+        await _apply_ticket_only_nickname(guild)
 
 
 @bot.event
