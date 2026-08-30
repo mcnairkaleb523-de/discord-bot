@@ -14694,4 +14694,17 @@ if not DISCORD_TOKEN:
         "DISCORD_TOKEN=your-bot-token-here"
     )
 
-bot.run(DISCORD_TOKEN)
+# _autosave_loop() only flushes every 30s — a redeploy/restart landing
+# between ticks would otherwise lose up to that much fresh activity (VC
+# time, chat stats, etc.) even with a persistent disk. bot.run() catches
+# SIGINT/SIGTERM internally and returns cleanly instead of raising, so this
+# finally block is what actually gets the LAST few seconds of state saved
+# the moment a shutdown/redeploy begins, regardless of how it was triggered.
+def _run_bot_with_state_flush():
+    try:
+        bot.run(DISCORD_TOKEN)
+    finally:
+        _save_all_state()
+
+
+_run_bot_with_state_flush()
