@@ -2304,18 +2304,24 @@ class TicketTypeSelect(discord.ui.Select):
         guild = interaction.guild
         member = interaction.user
 
+        # Reset the select's visual state as the very first response —
+        # otherwise Discord's client keeps showing whichever option was
+        # just picked as still "selected" on this message, which can stop
+        # the same option from being reselectable for a second ticket.
+        # Re-supplying the same view here is what clears that.
+        await interaction.response.edit_message(view=self.view)
+
         # Duplicate check
         guild_tickets = TICKETS.get(guild.id, {})
         if member.id in guild_tickets:
             existing = guild.get_channel(guild_tickets[member.id])
             if existing:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"❌ You already have an open ticket: {existing.mention}",
                     ephemeral=True
                 )
                 return
 
-        await interaction.response.defer(ephemeral=True, thinking=True)
         ticket_channel, already = await _create_ticket_channel(guild, member, ticket_key)
 
         if already == "PENDING":
