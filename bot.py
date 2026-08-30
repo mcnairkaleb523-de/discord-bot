@@ -7797,20 +7797,30 @@ async def timeout(ctx, member: discord.Member, minutes: int, *, reason="No reaso
 @_permitted_check(administrator=True)
 async def strip(ctx, member: discord.Member):
     """
-    Strip EVERY role from a member (except @everyone and anything above my
-    own top role, which I physically can't touch) — they'll show no roles
-    on their profile until restored. Usage: ,strip @user
+    Strip roles from a member — except @everyone, anything above my own top
+    role (which I physically can't touch), their verified member role, and
+    their own booster custom role (a cosmetic perk, not a staff role) —
+    those three stay on. Usage: ,strip @user
     """
+    verified_role = discord.utils.get(ctx.guild.roles, name=VERIFIED_ROLE)
+    booster_role_id = BOOSTER_ROLES.get(ctx.guild.id, {}).get(member.id)
+
+    kept_names = [
+        role.name for role in member.roles
+        if role.name != "@everyone" and role < ctx.guild.me.top_role
+        and (role == verified_role or role.id == booster_role_id)
+    ]
     removable = [
         role for role in member.roles
         if role.name != "@everyone" and role < ctx.guild.me.top_role
+        and role != verified_role and role.id != booster_role_id
     ]
     if not removable:
         await ctx.send("❌ That user has no roles I can remove.")
         return
 
     # Snapshot ALL non-everyone roles (including any above my top role that
-    # couldn't be removed now) for full restoration later.
+    # couldn't be removed now, and the kept ones) for full restoration later.
     snapshot = [r.id for r in member.roles if r.name != "@everyone"]
     ROLE_SNAPSHOTS.setdefault(ctx.guild.id, {})[member.id] = snapshot
     _save_role_snapshots()
@@ -7818,8 +7828,9 @@ async def strip(ctx, member: discord.Member):
     role_names = ", ".join(role.name for role in removable)
     await member.remove_roles(*removable, reason=f"Stripped by {ctx.author}")
     _log_mod_action(ctx.guild.id, member.id, "strip", ctx.author, f"Removed: {role_names}")
+    kept_note = f"\n🔒 Kept: {', '.join(kept_names)}" if kept_names else ""
     await ctx.send(
-        f"✅ Removed **all {len(removable)} role(s)** from {member.mention} — their profile now shows no roles.\n"
+        f"✅ Removed **{len(removable)} role(s)** from {member.mention}.{kept_note}\n"
         f"📸 Snapshot saved — use `,restoreallroles {member.mention}` to restore."
     )
     await log(ctx.guild, "strips", "All Roles Stripped", None, discord.Color.dark_red(),
@@ -7827,6 +7838,7 @@ async def strip(ctx, member: discord.Member):
                   ("👑 Admin",         f"{ctx.author.mention} (`{ctx.author.id}`)", True),
                   ("⚔️ User",          f"{member.mention} (`{member.id}`)",         True),
                   ("🏷️ Roles Removed", role_names[:512] or "*None*",                False),
+                  ("🔒 Roles Kept",    ", ".join(kept_names)[:512] or "*None*",     False),
                   ("📸 Snapshot",      f"{len(snapshot)} role(s) saved",             True),
               ],
               actor=ctx.author, target=member)
