@@ -1534,10 +1534,10 @@ class TicketControlView(discord.ui.View):
         await interaction.response.defer(ephemeral=True, thinking=True)
         channel = interaction.channel
         ticket_type = TICKET_TYPE.get(channel.id, "ticket")
-        file, msg_count = await _build_ticket_transcript(channel)
+        text, filename, msg_count = await _build_ticket_transcript(channel)
         await interaction.followup.send(
             content=f"📄 Transcript for **{channel.name}** (`{msg_count}` messages):",
-            file=file,
+            file=discord.File(fp=io.BytesIO(text.encode()), filename=filename),
             ephemeral=True
         )
         await log(
@@ -2225,8 +2225,12 @@ async def _update_ticket_header_claim(channel, claimed_by: discord.Member = None
         pass
 
 
-async def _build_ticket_transcript(channel) -> tuple[discord.File, int]:
-    """Render a ticket channel's message history into a downloadable .txt transcript."""
+async def _build_ticket_transcript(channel) -> tuple[str, str, int]:
+    """Render a ticket channel's message history into transcript text.
+    Returns (text, filename, message_count) rather than a discord.File —
+    a File's underlying stream is single-use, and this transcript needs to
+    go to more than one destination (log channel + a DM), so each caller
+    builds its own File from this text instead."""
     lines = []
     async for msg in channel.history(limit=500, oldest_first=True):
         ts = msg.created_at.strftime("%Y-%m-%d %H:%M:%S")
@@ -2235,19 +2239,18 @@ async def _build_ticket_transcript(channel) -> tuple[discord.File, int]:
         lines.append(f"[{ts}] {msg.author} ({msg.author.id}): {content}{embeds_note}")
     text = "\n".join(lines) or "(no messages)"
     filename = f"transcript-{channel.name}.txt"
-    file = discord.File(fp=io.BytesIO(text.encode()), filename=filename)
-    return file, len(lines)
+    return text, filename, len(lines)
 
 
 async def _send_closed_ticket_transcript(guild, channel, closer, owner_id, claimer, ticket_type):
-    """Post the full transcript to the ticket log channel when a ticket closes."""
-    log_channel = _resolve_log_channel(guild, "tickets")
-    if not log_channel:
-        return
+    """Post the full transcript to the ticket log channel AND DM a copy to
+    whoever closed the ticket — each is independent/best-effort, so a
+    missing log channel or closed DMs never blocks the other."""
     try:
-        file, msg_count = await _build_ticket_transcript(channel)
+        text, filename, msg_count = await _build_ticket_transcript(channel)
     except (discord.Forbidden, discord.HTTPException):
         return
+
     embed = discord.Embed(
         title="📄 Ticket Transcript",
         description=(
@@ -2262,10 +2265,18 @@ async def _send_closed_ticket_transcript(guild, channel, closer, owner_id, claim
         timestamp=discord.utils.utcnow()
     )
     embed.set_footer(text="TrapAI Ticket System")
+
+    log_channel = _resolve_log_channel(guild, "tickets")
+    if log_channel:
+        try:
+            await log_channel.send(embed=embed, file=discord.File(fp=io.BytesIO(text.encode()), filename=filename))
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
     try:
-        await log_channel.send(embed=embed, file=file)
+        await closer.send(embed=embed, file=discord.File(fp=io.BytesIO(text.encode()), filename=filename))
     except (discord.Forbidden, discord.HTTPException):
-        pass
+        pass  # DMs closed — silently skip, same as every other best-effort DM in this file
 
 
 def _split_emoji_label(label: str):
@@ -14683,4 +14694,17 @@ if not DISCORD_TOKEN:
         "DISCORD_TOKEN=your-bot-token-here"
     )
 
-bot.run(DISCORD_TOKEN)
+# _autosave_loop() only flushes every 30s — a redeploy/restart landing
+# between ticks would otherwise lose up to that much fresh activity (VC
+# time, chat stats, etc.) even with a persistent disk. bot.run() catches
+# SIGINT/SIGTERM internally and returns cleanly instead of raising, so this
+# finally block is what actually gets the LAST few seconds of state saved
+# the moment a shutdown/redeploy begins, regardless of how it was triggered.
+def _run_bot_with_state_flush():
+    try:
+        bot.run(DISCORD_TOKEN)
+    finally:
+        _save_all_state()
+
+
+_run_bot_with_state_flush()
