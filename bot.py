@@ -2279,11 +2279,24 @@ async def _send_closed_ticket_transcript(guild, channel, closer, owner_id, claim
         pass  # DMs closed — silently skip, same as every other best-effort DM in this file
 
 
+_CUSTOM_EMOJI_RE = re.compile(r"^<a?:\w+:\d+>$")
+
+
 def _split_emoji_label(label: str):
-    """Split a 'EMOJI Rest of label' string into (emoji, rest)."""
+    """Split a 'EMOJI Rest of label' string into (emoji, rest) — but only
+    if the first token actually looks like an emoji (a unicode emoji or a
+    <:name:id> custom one), never an ordinary word. A category added
+    without a leading emoji would otherwise have its first word mistaken
+    for one; Discord's API rejects that outright, which breaks the WHOLE
+    select menu (every category, not just the bad one) since they're all
+    sent together in one component."""
     parts = label.split(" ", 1)
-    if len(parts) == 2:
-        return parts[0], parts[1]
+    if len(parts) != 2:
+        return None, label
+    token = parts[0]
+    looks_like_emoji = bool(_CUSTOM_EMOJI_RE.match(token)) or not any(c.isascii() and c.isalpha() for c in token)
+    if looks_like_emoji:
+        return token, parts[1]
     return None, label
 
 
@@ -5258,6 +5271,12 @@ async def on_command_error(ctx, error):
         elif isinstance(original, discord.NotFound):
             await ctx.send("❌ That no longer exists (message/channel/role may have been deleted).")
         elif isinstance(original, discord.HTTPException):
+            # The chat message alone doesn't carry Discord's actual rejection
+            # reason (e.g. "Invalid Form Body: ... This field is required") —
+            # print it so it's at least visible in the host's logs, instead
+            # of being swallowed with zero trace anywhere.
+            print(f"[HTTPException] {ctx.command} in guild {ctx.guild.id if ctx.guild else 'DM'}: "
+                  f"status={original.status} code={getattr(original, 'code', '?')} text={original.text}")
             await ctx.send(f"❌ Discord rejected that action (`{original.status}`) — please try again.")
         else:
             await ctx.send("❌ An unexpected error occurred.")
