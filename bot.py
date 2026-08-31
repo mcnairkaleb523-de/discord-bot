@@ -792,6 +792,72 @@ async def _ticket_only_mode_gate(ctx):
     return True
 
 
+# Whole Bot "Regular" ($30) gets the commands most servers actually use day
+# to day; "Premium" ($50) unlocks everything else -- the systems that only
+# some servers want (economy/gambling, giveaways, vouch/trading trust,
+# birthdays, boost perks, staff task tracking) plus the advanced/riskier
+# moderation tools (hardban, nuke, lockdown, mass-role, backups, etc.) and
+# the temp-VC system. This only ever restricts a confirmed whole_bot+regular
+# customer -- everyone else (no subscription at all, a ticket_bot customer,
+# or whole_bot+premium) is untouched by this check.
+WHOLE_BOT_PREMIUM_ONLY_COMMANDS = {
+    # Advanced/higher-risk moderation
+    "hardban", "unhardban", "hardbans", "nuke", "lockdown", "unlockdown",
+    "raidmode", "strip", "trapwarn", "trapscan", "restart",
+    # Jail & Anti-Raid (whole category)
+    "jail", "unjail", "setupjail", "antiraid", "raidwhitelist",
+    # Advanced role management
+    "massrole", "massunrole", "restoreallroles", "protectedrole",
+    # Voice Channels — temp VC system (whole category)
+    "vclock", "vcunlock", "vchide", "vcshow", "vcname", "vclimit", "vcbitrate",
+    "vcregion", "vckick", "vcban", "vcunban", "vcpermit", "vcmute", "vcunmute",
+    "vcdeafen", "vcundeafen", "vctransfer", "vcclaim", "vcmod", "vcremovemod",
+    "vcstats", "setupvc", "setunmutevc",
+    # Vouch / trust system (whole category)
+    "vouch", "unvouch", "cancelvouch", "pendingvouches", "vouches",
+    "vouchleaderboard", "vouchstats", "vouchconfig",
+    # Giveaways & Polls (whole category)
+    "giveaway", "giveawayend", "giveaways", "poll", "pollend",
+    # Economy & Games (whole category)
+    "balance", "daily", "weekly", "work", "rob", "give", "deposit", "withdraw",
+    "leaderboard", "gamblers", "slots", "blackjack", "coinflip", "dice", "8ball",
+    "trivia", "hangman", "tictactoe", "numguess", "rockpaperscissors", "highlow",
+    "crash", "games",
+    # Birthdays (whole category)
+    "birthday", "removebirthday", "setbirthday", "setbirthdaychannel",
+    "birthdaylist", "settimezone",
+    # Boosts & Vanity, incl. custom booster roles (whole category)
+    "setboostchannel", "setvanitycode", "setvanityrole", "vanityconfig", "br",
+    # Staff Tools (whole category)
+    "staffpsa", "task", "tasklist",
+    # Advanced admin/setup
+    "backup", "restore", "listbackups", "deletebackup", "exportconfig",
+    # Niche fun/utility
+    "clearsnipe", "editsnipe", "quote",
+}
+
+
+class WholeBotPremiumRequired(commands.CheckFailure):
+    """Raised when a Whole Bot "Regular"-tier guild tries a Premium-only command."""
+    pass
+
+
+@bot.check
+async def _whole_bot_tier_gate(ctx):
+    if not ctx.guild or not BILLING_CONFIGURED:
+        return True
+    if not ctx.command or ctx.command.qualified_name not in WHOLE_BOT_PREMIUM_ONLY_COMMANDS:
+        return True
+    status_data = await _get_subscription_status(ctx.guild.id)
+    if status_data.get("product") != "whole_bot":
+        return True  # not a whole_bot customer -- this check doesn't apply to them
+    if status_data.get("status") not in _SUBSCRIPTION_ACTIVE_STATUSES:
+        return True  # inactive/no access at all is handled elsewhere, not this check
+    if status_data.get("tier") == "premium":
+        return True
+    raise WholeBotPremiumRequired()
+
+
 async def _apply_ticket_only_nickname(guild):
     if not TICKET_ONLY_NICKNAME or not _is_ticket_only_guild(guild) or not guild.me:
         return
@@ -3031,7 +3097,7 @@ class VCAddModModal(discord.ui.Modal, title="🛡 Add VC Moderator"):
 # manually with COMMAND_CATALOG in oauth_server.py (that file has no
 # import relationship with this one — see its docstring).
 HELP_CATEGORIES = [
-    ('🛡️', 'Moderation', ['kick', 'ban', 'mute', 'unmute', 'timeout', 'warn', 'warnings', 'clearwarnings', 'modhistory', 'hardban', 'unhardban', 'hardbans', 'clear', 'purge', 'lock', 'unlock', 'hide', 'unhide', 'slowmode', 'nuke', 'lockdown', 'unlockdown', 'nickname', 'strip', 'trapwarn', 'trapscan', 'restart']),
+    ('🛡️', 'Moderation', ['kick', 'ban', 'mute', 'unmute', 'timeout', 'warn', 'warnings', 'clearwarnings', 'modhistory', 'hardban', 'unhardban', 'hardbans', 'clear', 'purge', 'lock', 'unlock', 'hide', 'unhide', 'slowmode', 'nuke', 'lockdown', 'unlockdown', 'raidmode', 'nickname', 'strip', 'trapwarn', 'trapscan', 'restart']),
     ('🔒', 'Jail & Anti-Raid', ['jail', 'unjail', 'setupjail', 'antiraid', 'raidwhitelist']),
     ('🤖', 'Verification', ['verify', 'unverify', 'denyverify', 'sendverify', 'setverifybackup']),
     ('🏷️', 'Roles', ['role', 'roleall', 'massrole', 'massunrole', 'restoreallroles', 'autorole', 'setgifrole', 'protectedrole', 'br']),
@@ -5291,6 +5357,12 @@ async def on_command_error(ctx, error):
             "This server's TrapAI subscription has expired. Renew your subscription to restore the ticket system.\n"
             "Use `,subscribe` to renew, or `,subscriptionstatus` to see details."
         )
+    elif isinstance(error, WholeBotPremiumRequired):
+        await ctx.send(
+            f"🔒 **Premium Required**\n"
+            f"`,{ctx.command.qualified_name}` is part of the Whole Bot **Premium** tier — this server is on **Regular**.\n"
+            "Run `,subscribe wholebot premium` to upgrade."
+        )
     elif isinstance(error, commands.CheckFailure):
         # Catches MissingRole and any other custom permission check —
         # same "permitted role" wording as MissingPermissions above, since
@@ -7021,12 +7093,18 @@ async def closeticket(ctx):
 # oauth_server.py's /internal/* endpoints (see that file's BILLING section)
 # ============================================================
 
+_WHOLE_BOT_TIER_NOTES = {
+    "regular": "The commands most servers use day to day — moderation, roles, verification, tickets, and more.",
+    "premium": "Everything in Regular, plus the rest: economy/games, giveaways & polls, vouch, jail/anti-raid, temp VCs, birthdays, boost perks, staff tools, and advanced mod tools (hardban, nuke, lockdown, mass-role, backups).",
+}
+
+
 def _pricing_embed() -> discord.Embed:
     embed = discord.Embed(
         title="💳 TrapAI Pricing",
         description=(
             "Choose **Ticket Bot** (just the ticket/support system) or **Whole Bot** "
-            "(every command, one-time purchase, no subscription).\n"
+            "(one-time purchase, no subscription — Regular covers everyday commands, Premium unlocks everything else).\n"
             "Then run `,subscribe <product> <tier>` (e.g. `,subscribe ticketbot pro` or `,subscribe wholebot premium`)."
         ),
         color=discord.Color.gold(),
@@ -7037,7 +7115,11 @@ def _pricing_embed() -> discord.Embed:
         for tier, cfg in product_cfg["tiers"].items():
             star = "⭐ " if cfg["best_value"] else ""
             best = " — Best Value" if cfg["best_value"] else ""
-            lines.append(f"{star}**{cfg['label']}{best}** — {cfg['price']}\n`,subscribe {product} {tier}`")
+            line = f"{star}**{cfg['label']}{best}** — {cfg['price']}\n`,subscribe {product} {tier}`"
+            note = _WHOLE_BOT_TIER_NOTES.get(tier) if product == "whole_bot" else None
+            if note:
+                line += f"\n*{note}*"
+            lines.append(line)
         embed.add_field(name=f"🎫 {product_cfg['label']}" if product == "ticket_bot" else f"🤖 {product_cfg['label']}",
                          value="\n".join(lines), inline=False)
     embed.set_footer(text="Payments are handled entirely by Stripe — TrapAI never sees your card details.")
