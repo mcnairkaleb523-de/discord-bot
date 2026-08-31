@@ -661,15 +661,45 @@ BILLING_API_URL = os.getenv("BILLING_API_URL", "").rstrip("/")
 INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET")
 BILLING_CONFIGURED = bool(BILLING_API_URL and INTERNAL_API_SECRET)
 
-BILLING_TIERS = {
-    "starter":  {"label": "Starter",  "price": "$5/mo",  "best_value": False},
-    "pro":      {"label": "Pro",      "price": "$10/mo", "best_value": False},
-    "premium":  {"label": "Premium",  "price": "$20/mo", "best_value": False},
-    "lifetime": {"label": "Lifetime", "price": "$75 one-time", "best_value": True},
+# Two products: "ticket_bot" is just the ticket/support system, sold as a
+# subscription (Starter/Pro/Premium) or a one-time Lifetime purchase.
+# "whole_bot" is the full bot -- every command, not just tickets -- sold
+# ONLY as one-time purchases (Regular/Premium), never a subscription.
+# Buying ANY whole_bot tier graduates a ticket-only guild out of the
+# restriction entirely -- see _ticket_only_mode_gate.
+BILLING_PRODUCTS = {
+    "ticket_bot": {
+        "label": "Ticket Bot",
+        "tiers": {
+            "starter":  {"label": "Starter",  "price": "$5/mo",  "best_value": False},
+            "pro":      {"label": "Pro",      "price": "$10/mo", "best_value": False},
+            "premium":  {"label": "Premium",  "price": "$20/mo", "best_value": False},
+            "lifetime": {"label": "Lifetime", "price": "$75 one-time", "best_value": True},
+        },
+    },
+    "whole_bot": {
+        "label": "Whole Bot",
+        "tiers": {
+            "regular": {"label": "Regular", "price": "$30 one-time", "best_value": False},
+            "premium": {"label": "Premium", "price": "$50 one-time", "best_value": True},
+        },
+    },
+}
+# Friendlier aliases accepted in ,subscribe for the product argument.
+_PRODUCT_ALIASES = {
+    "ticket": "ticket_bot", "ticketbot": "ticket_bot", "tickets": "ticket_bot",
+    "whole": "whole_bot", "wholebot": "whole_bot", "full": "whole_bot", "fullbot": "whole_bot",
 }
 # Statuses that still count as paid access — "past_due" is the grace
 # period: access continues while they have days left to fix payment.
 _SUBSCRIPTION_ACTIVE_STATUSES = {"active", "lifetime", "past_due"}
+
+
+def _resolve_product(name: str):
+    name = (name or "").strip().lower()
+    if name in BILLING_PRODUCTS:
+        return name
+    return _PRODUCT_ALIASES.get(name)
 
 # _SUBSCRIPTION_CACHE[guild_id] = (status_dict, fetched_at) — short-TTL
 # cache so a burst of commands in a ticket-only guild doesn't hit
@@ -746,6 +776,13 @@ class TicketSubscriptionInactive(commands.CheckFailure):
 async def _ticket_only_mode_gate(ctx):
     if not _is_ticket_only_guild(ctx.guild):
         return True
+    # A ticket-only guild that has since bought Whole Bot access graduates
+    # out of the restriction entirely -- full command access, same as any
+    # other server, without needing to touch TICKET_ONLY_GUILD_IDS.
+    if BILLING_CONFIGURED:
+        status_data = await _get_subscription_status(ctx.guild.id)
+        if status_data.get("product") == "whole_bot" and status_data.get("status") in _SUBSCRIPTION_ACTIVE_STATUSES:
+            return True
     if not ctx.command or ctx.command.qualified_name not in TICKET_ONLY_ALLOWED_COMMANDS:
         raise TicketOnlyModeRestricted()
     if ctx.command.qualified_name in TICKET_MANAGEMENT_COMMANDS and BILLING_CONFIGURED:
@@ -6987,31 +7024,54 @@ async def closeticket(ctx):
 def _pricing_embed() -> discord.Embed:
     embed = discord.Embed(
         title="💳 TrapAI Pricing",
-        description="Pick a plan, then run `,subscribe <tier>` (e.g. `,subscribe pro`) to get a secure checkout link.",
+        description=(
+            "Choose **Ticket Bot** (just the ticket/support system) or **Whole Bot** "
+            "(every command, one-time purchase, no subscription).\n"
+            "Then run `,subscribe <product> <tier>` (e.g. `,subscribe ticketbot pro` or `,subscribe wholebot premium`)."
+        ),
         color=discord.Color.gold(),
         timestamp=discord.utils.utcnow()
     )
-    for tier, cfg in BILLING_TIERS.items():
-        name = f"⭐ {cfg['label']} — Best Value" if cfg["best_value"] else cfg["label"]
-        embed.add_field(name=name, value=f"**{cfg['price']}**\n`,subscribe {tier}`", inline=True)
+    for product, product_cfg in BILLING_PRODUCTS.items():
+        lines = []
+        for tier, cfg in product_cfg["tiers"].items():
+            star = "⭐ " if cfg["best_value"] else ""
+            best = " — Best Value" if cfg["best_value"] else ""
+            lines.append(f"{star}**{cfg['label']}{best}** — {cfg['price']}\n`,subscribe {product} {tier}`")
+        embed.add_field(name=f"🎫 {product_cfg['label']}" if product == "ticket_bot" else f"🤖 {product_cfg['label']}",
+                         value="\n".join(lines), inline=False)
     embed.set_footer(text="Payments are handled entirely by Stripe — TrapAI never sees your card details.")
     return embed
 
 
 @bot.command()
-async def subscribe(ctx, tier: str = None):
+async def subscribe(ctx, product: str = None, tier: str = None):
     """
-    Show TrapAI's pricing, or subscribe/purchase a tier. Usage:
-      ,subscribe             — show pricing for all tiers
-      ,subscribe <tier>      — get a secure checkout link (starter/pro/premium/lifetime)
+    Show TrapAI's pricing, or subscribe/purchase a plan. Usage:
+      ,subscribe                    — show pricing for both products
+      ,subscribe <product> <tier>   — get a secure checkout link
+                                       products: ticketbot, wholebot
+                                       ticketbot tiers: starter/pro/premium/lifetime
+                                       wholebot tiers: regular/premium
     """
-    if tier is None:
+    if product is None:
         await ctx.send(embed=_pricing_embed())
         return
 
+    resolved_product = _resolve_product(product)
+    if resolved_product is None:
+        await ctx.send(f"❌ Unknown product `{product}`. Valid products: `ticketbot`, `wholebot`", delete_after=10)
+        return
+
+    valid_tiers = BILLING_PRODUCTS[resolved_product]["tiers"]
+    if tier is None:
+        tier_list = ", ".join(valid_tiers)
+        await ctx.send(f"❌ Also pick a tier: `,subscribe {product} <tier>` — valid tiers for this product: `{tier_list}`", delete_after=12)
+        return
+
     tier = tier.lower()
-    if tier not in BILLING_TIERS:
-        await ctx.send(f"❌ Unknown tier `{tier}`. Valid tiers: {', '.join(BILLING_TIERS)}", delete_after=10)
+    if tier not in valid_tiers:
+        await ctx.send(f"❌ Unknown tier `{tier}` for `{resolved_product}`. Valid tiers: {', '.join(valid_tiers)}", delete_after=10)
         return
 
     if not BILLING_CONFIGURED:
@@ -7019,17 +7079,18 @@ async def subscribe(ctx, tier: str = None):
         return
 
     data, error = await _billing_api_post("/internal/checkout-link", {
-        "guild_id": ctx.guild.id, "discord_user_id": ctx.author.id, "tier": tier,
+        "guild_id": ctx.guild.id, "discord_user_id": ctx.author.id, "product": resolved_product, "tier": tier,
     })
     if error:
         await ctx.send(f"❌ Couldn't start checkout: {error}", delete_after=12)
         return
 
     checkout_url = data["url"]
-    label = BILLING_TIERS[tier]["label"]
+    product_label = BILLING_PRODUCTS[resolved_product]["label"]
+    tier_label = valid_tiers[tier]["label"]
     embed = discord.Embed(
-        title=f"💳 Checkout — {label}",
-        description=f"Click below to complete your **{label}** purchase securely via Stripe.\n\n[Complete Checkout]({checkout_url})",
+        title=f"💳 Checkout — {product_label} ({tier_label})",
+        description=f"Click below to complete your **{product_label} — {tier_label}** purchase securely via Stripe.\n\n[Complete Checkout]({checkout_url})",
         color=discord.Color.gold(),
         timestamp=discord.utils.utcnow()
     )
@@ -7077,6 +7138,7 @@ async def subscriptionstatus(ctx):
 
     data = await _get_subscription_status(ctx.guild.id)
     status = data.get("status", "none")
+    product = data.get("product")
     tier = data.get("tier")
 
     status_display = {
@@ -7094,8 +7156,11 @@ async def subscriptionstatus(ctx):
         timestamp=discord.utils.utcnow()
     )
     embed.add_field(name="Status", value=f"{status_display[0]} {status_display[1]}", inline=True)
+    if product:
+        embed.add_field(name="Product", value=BILLING_PRODUCTS.get(product, {}).get("label", product), inline=True)
     if tier:
-        embed.add_field(name="Plan", value=BILLING_TIERS.get(tier, {}).get("label", tier), inline=True)
+        tier_label = BILLING_PRODUCTS.get(product, {}).get("tiers", {}).get(tier, {}).get("label", tier)
+        embed.add_field(name="Plan", value=tier_label, inline=True)
 
     grace_end = data.get("grace_period_ends_at")
     if status == "past_due" and grace_end:
