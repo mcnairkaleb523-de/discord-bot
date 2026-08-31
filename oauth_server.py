@@ -169,23 +169,51 @@ def _load_json(name: str, default):
         return default
 
 
-# Price tiers — Starter/Pro/Premium recur monthly, Lifetime is a one-time
-# charge with no subscription at all. Keys here are the canonical "tier"
-# strings used everywhere: Stripe metadata, the subscription store, and
-# bot.py's ,subscribe command.
-TIERS = {
-    "starter":  {"label": "Starter",  "price_cents": 500,  "interval": "month", "best_value": False},
-    "pro":      {"label": "Pro",      "price_cents": 1000, "interval": "month", "best_value": False},
-    "premium":  {"label": "Premium",  "price_cents": 2000, "interval": "month", "best_value": False},
-    "lifetime": {"label": "Lifetime", "price_cents": 7500, "interval": None,    "best_value": True},
+# Two products, each with its own tiers. "ticket_bot" is the ticket/support
+# system only (Starter/Pro/Premium recur monthly, Lifetime is one-time).
+# "whole_bot" is the full bot — moderation, economy, everything — sold ONLY
+# as one-time purchases (no subscription at all for it), which is what
+# "lifetime" means for this product: buy once, keep it, no recurring charge.
+# Keys here are the canonical "product"/"tier" strings used everywhere:
+# Stripe metadata, the subscription store, and bot.py's ,subscribe command.
+PRODUCTS = {
+    "ticket_bot": {
+        "label": "Ticket Bot",
+        "description": "Just the ticket/support system for your server.",
+        "tiers": {
+            "starter":  {"label": "Starter",  "price_cents": 500,  "interval": "month", "best_value": False},
+            "pro":      {"label": "Pro",      "price_cents": 1000, "interval": "month", "best_value": False},
+            "premium":  {"label": "Premium",  "price_cents": 2000, "interval": "month", "best_value": False},
+            "lifetime": {"label": "Lifetime", "price_cents": 7500, "interval": None,    "best_value": True},
+        },
+    },
+    "whole_bot": {
+        "label": "Whole Bot",
+        "description": "The full TrapAI bot — moderation, economy, tickets, everything. One-time purchase, never expires, no subscription.",
+        "tiers": {
+            "regular": {"label": "Regular", "price_cents": 3000, "interval": None, "best_value": False},
+            "premium": {"label": "Premium", "price_cents": 5000, "interval": None, "best_value": True},
+        },
+    },
 }
 
-# tier -> Stripe Price ID, created once and cached here across restarts so
-# re-running this service doesn't spawn duplicate Products/Prices in Stripe.
+
+def _tier_cfg(product: str, tier: str):
+    return PRODUCTS.get(product, {}).get("tiers", {}).get(tier)
+
+
+def _price_key(product: str, tier: str) -> str:
+    return f"{product}:{tier}"
+
+
+# "product:tier" -> Stripe Price ID, created once and cached here across
+# restarts so re-running this service doesn't spawn duplicate Products/
+# Prices in Stripe.
 STRIPE_PRICE_IDS: dict = _load_json("stripe_price_ids", {})
 
 # SUBSCRIPTIONS[str(guild_id)] = {
-#   "tier": "starter"|"pro"|"premium"|"lifetime",
+#   "product": "ticket_bot"|"whole_bot",
+#   "tier": "starter"|"pro"|"premium"|"lifetime" (ticket_bot) or "regular"|"premium" (whole_bot),
 #   "status": "active"|"past_due"|"suspended"|"canceled"|"lifetime",
 #   "stripe_customer_id": str, "stripe_subscription_id": str | None,
 #   "owner_discord_user_id": str,
@@ -194,7 +222,10 @@ STRIPE_PRICE_IDS: dict = _load_json("stripe_price_ids", {})
 # } — this file is the single source of truth for who has paid access;
 # checkout.session.completed and invoice.paid are what actually provision
 # and maintain it, straight from Stripe's webhook, never from the client-side
-# success page (which is just a friendly confirmation).
+# success page (which is just a friendly confirmation). A guild that buys
+# "whole_bot" (any tier, any status in the active set) is meant to graduate
+# out of ticket-only restriction entirely on bot.py's side — see this
+# file's PRODUCTS docstring / bot.py's _ticket_only_mode_gate.
 SUBSCRIPTIONS: dict = _load_json("subscriptions", {})
 
 
@@ -1183,44 +1214,51 @@ def _resolve_base_url(request: web.Request) -> str:
 
 
 def _bootstrap_stripe_prices_sync():
-    """Idempotent — skips any tier that already has a cached Price ID, so
-    restarting this service never spawns duplicate Products/Prices in
-    Stripe. Runs on startup; also safe to call again if a tier is missing
+    """Idempotent — skips any product/tier that already has a cached Price
+    ID, so restarting this service never spawns duplicate Products/Prices
+    in Stripe. Runs on startup; also safe to call again if one is missing
     (e.g. STRIPE_PRICE_IDS' backing file was deleted)."""
     if not STRIPE_SECRET_KEY:
         return
     changed = False
-    for tier, cfg in TIERS.items():
-        if STRIPE_PRICE_IDS.get(tier):
-            continue
-        try:
-            product = stripe.Product.create(
-                name=f"TrapAI — {cfg['label']}",
-                metadata={"trapai_tier": tier},
-            )
-            price_kwargs = dict(
-                unit_amount=cfg["price_cents"],
-                currency="usd",
-                product=product.id,
-                metadata={"trapai_tier": tier},
-            )
-            if cfg["interval"]:
-                price_kwargs["recurring"] = {"interval": cfg["interval"]}
-            price = stripe.Price.create(**price_kwargs)
-            STRIPE_PRICE_IDS[tier] = price.id
-            changed = True
-            log.info("Created Stripe product/price for tier %r: %s", tier, price.id)
-        except stripe.error.StripeError as e:
-            log.error("Failed to create Stripe product/price for tier %r: %s", tier, e)
+    for product, product_cfg in PRODUCTS.items():
+        for tier, cfg in product_cfg["tiers"].items():
+            key = _price_key(product, tier)
+            if STRIPE_PRICE_IDS.get(key):
+                continue
+            try:
+                stripe_product = stripe.Product.create(
+                    name=f"TrapAI — {product_cfg['label']} — {cfg['label']}",
+                    metadata={"trapai_product": product, "trapai_tier": tier},
+                )
+                price_kwargs = dict(
+                    unit_amount=cfg["price_cents"],
+                    currency="usd",
+                    product=stripe_product.id,
+                    metadata={"trapai_product": product, "trapai_tier": tier},
+                )
+                if cfg["interval"]:
+                    price_kwargs["recurring"] = {"interval": cfg["interval"]}
+                price = stripe.Price.create(**price_kwargs)
+                STRIPE_PRICE_IDS[key] = price.id
+                changed = True
+                log.info("Created Stripe product/price for %s: %s", key, price.id)
+            except stripe.error.StripeError as e:
+                log.error("Failed to create Stripe product/price for %s: %s", key, e)
     if changed:
         _save_json("stripe_price_ids", STRIPE_PRICE_IDS)
 
 
-def _create_checkout_session_sync(tier: str, guild_id: str, discord_user_id: str, base_url: str):
-    price_id = STRIPE_PRICE_IDS.get(tier)
-    if not price_id:
-        raise RuntimeError(f"No Stripe price configured for tier {tier!r} yet")
-    metadata = {"guild_id": str(guild_id), "discord_user_id": str(discord_user_id), "tier": tier}
+def _create_checkout_session_sync(product: str, tier: str, guild_id: str, discord_user_id: str, base_url: str):
+    cfg = _tier_cfg(product, tier)
+    key = _price_key(product, tier)
+    price_id = STRIPE_PRICE_IDS.get(key)
+    if not cfg or not price_id:
+        raise RuntimeError(f"No Stripe price configured for {key!r} yet")
+    metadata = {
+        "guild_id": str(guild_id), "discord_user_id": str(discord_user_id),
+        "product": product, "tier": tier,
+    }
     common = dict(
         line_items=[{"price": price_id, "quantity": 1}],
         success_url=f"{base_url}/checkout/success?session_id={{CHECKOUT_SESSION_ID}}",
@@ -1228,7 +1266,7 @@ def _create_checkout_session_sync(tier: str, guild_id: str, discord_user_id: str
         metadata=metadata,
         client_reference_id=str(guild_id),
     )
-    if tier == "lifetime":
+    if not cfg["interval"]:  # one-time: ticket_bot's lifetime, or any whole_bot tier
         return stripe.checkout.Session.create(mode="payment", **common)
     return stripe.checkout.Session.create(
         mode="subscription",
@@ -1237,11 +1275,12 @@ def _create_checkout_session_sync(tier: str, guild_id: str, discord_user_id: str
     )
 
 
-def _tier_for_price_id(price_id: str):
-    for tier, pid in STRIPE_PRICE_IDS.items():
+def _product_tier_for_price_id(price_id: str):
+    for key, pid in STRIPE_PRICE_IDS.items():
         if pid == price_id:
-            return tier
-    return None
+            product, _, tier = key.partition(":")
+            return product, tier
+    return None, None
 
 
 def _find_by_subscription_id(sub_id: str):
@@ -1287,20 +1326,23 @@ async def _handle_checkout_completed(obj: dict, session: ClientSession):
     metadata = obj.get("metadata") or {}
     guild_id = metadata.get("guild_id")
     discord_user_id = metadata.get("discord_user_id")
+    product = metadata.get("product")
     tier = metadata.get("tier")
-    if not guild_id or tier not in TIERS:
+    cfg = _tier_cfg(product, tier)
+    if not guild_id or not cfg:
         log.warning("checkout.session.completed missing/invalid metadata on session %s", obj.get("id"))
         return
 
     rec = SUBSCRIPTIONS.setdefault(guild_id, {})
     rec.setdefault("created_at", time.time())
     rec.update({
+        "product": product,
         "tier": tier,
         "owner_discord_user_id": discord_user_id,
         "stripe_customer_id": obj.get("customer"),
         "updated_at": time.time(),
     })
-    if obj.get("mode") == "payment":  # lifetime — one-time, no subscription object at all
+    if obj.get("mode") == "payment":  # one-time — ticket_bot's lifetime, or any whole_bot tier
         rec["status"] = "lifetime"
         rec["stripe_subscription_id"] = None
         rec["grace_period_ends_at"] = None
@@ -1311,14 +1353,19 @@ async def _handle_checkout_completed(obj: dict, session: ClientSession):
     _save_json("subscriptions", SUBSCRIPTIONS)
 
     if discord_user_id:
-        label = TIERS[tier]["label"]
-        kind = "one-time purchase" if tier == "lifetime" else "subscription"
+        product_label = PRODUCTS[product]["label"]
+        kind = "one-time purchase" if obj.get("mode") == "payment" else "subscription"
+        access_note = (
+            "Full bot access unlocks as soon as the bot joins — every command, no ticket-only restriction."
+            if product == "whole_bot" else
+            "The ticket system unlocks as soon as the bot joins."
+        )
         invite_url = build_bot_invite_url(guild_id)
         await _send_dm(session, discord_user_id, (
             f"✅ **Payment received — thank you!**\n\n"
-            f"Your **{label}** {kind} is now active for server `{guild_id}`.\n\n"
+            f"Your **{product_label} — {cfg['label']}** {kind} is now active for server `{guild_id}`.\n\n"
             f"**Add TrapAI to your server:** {invite_url}\n\n"
-            "The ticket system unlocks as soon as the bot joins."
+            f"{access_note}"
         ))
 
 
@@ -1362,7 +1409,8 @@ async def _handle_invoice_payment_failed(obj: dict, session: ClientSession):
     _save_json("subscriptions", SUBSCRIPTIONS)
 
     if rec.get("owner_discord_user_id"):
-        label = TIERS.get(rec.get("tier"), {}).get("label", "TrapAI")
+        cfg = _tier_cfg(rec.get("product"), rec.get("tier"))
+        label = cfg["label"] if cfg else "TrapAI"
         portal_hint = f"{PRODUCT_BASE_URL}/portal?guild_id={gid}" if PRODUCT_BASE_URL else "the Manage Subscription link from ,managesubscription"
         await _send_dm(session, rec["owner_discord_user_id"], (
             f"⚠️ **TrapAI payment failed.**\n\n"
@@ -1381,8 +1429,9 @@ async def _handle_subscription_updated(obj: dict, session: ClientSession):
     items = (obj.get("items") or {}).get("data") or []
     if items:
         price_id = (items[0].get("price") or {}).get("id")
-        tier = _tier_for_price_id(price_id)
-        if tier:
+        product, tier = _product_tier_for_price_id(price_id)
+        if product and tier:
+            rec["product"] = product
             rec["tier"] = tier
     # Best-effort fallback sync from Stripe's own subscription status —
     # invoice.paid / invoice.payment_failed are the primary source of truth
@@ -1475,6 +1524,16 @@ _BILLING_PAGE_STYLE = """
   .billing-header h1 { font-size: clamp(1.8rem, 5vw, 2.6rem); font-weight: 800; margin: 0 0 .5rem; color: #f2f3f5; }
   .billing-header p { color: #8a8d94; margin: 0; }
 
+  .product-tabs { display: flex; justify-content: center; gap: .6rem; margin: 0 0 .8rem; }
+  .product-tab {
+    font-family: inherit; font-size: .9rem; font-weight: 700; color: #c7cad0;
+    background: rgba(255, 255, 255, .04); border: 1px solid rgba(255, 255, 255, .1);
+    border-radius: 20px; padding: .6rem 1.3rem; cursor: pointer; transition: all .15s ease;
+  }
+  .product-tab:hover { border-color: rgba(255, 198, 41, .4); color: #fff; }
+  .product-tab.active { background: var(--gold); color: #0b0b0d; border-color: var(--gold); }
+  .product-desc { text-align: center; color: #8a8d94; font-size: .88rem; max-width: 520px; margin: 0 auto 1.5rem; }
+
   .billing-form { max-width: 900px; margin: 2rem auto 4rem; padding: 0 1.5rem; }
   .tier-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
   .tier-card {
@@ -1555,34 +1614,47 @@ def _billing_page_shell(title: str, body_html: str) -> str:
 </body></html>"""
 
 
-def _pricing_page(error: str = None) -> str:
-    error_html = f'<p style="color:#ED4245;text-align:center;margin-bottom:1.5rem;">{html.escape(error)}</p>' if error else ""
-
-    tier_order = ["starter", "pro", "premium", "lifetime"]
+def _tier_cards_html(product: str, tier_order: list, selected: bool) -> str:
     cards = []
     for i, tier in enumerate(tier_order):
-        cfg = TIERS[tier]
+        cfg = PRODUCTS[product]["tiers"][tier]
         price_str = f"${cfg['price_cents'] / 100:.0f}"
         period_str = "one-time" if not cfg["interval"] else f"/{cfg['interval']}"
         best_badge = '<div class="tier-best-badge">⭐ BEST VALUE</div>' if cfg["best_value"] else ""
         cards.append(
             f'<label class="tier-card{" best" if cfg["best_value"] else ""}">'
             f'{best_badge}'
-            f'<input type="radio" name="tier" value="{tier}"{" checked" if i == 0 else ""}>'
+            f'<input type="radio" name="tier_{product}" value="{tier}"{" checked" if selected and i == 0 else ""}'
+            f'{"" if selected else " disabled"}>'
             f'<div class="tier-body">'
             f'<div class="tier-name">{html.escape(cfg["label"])}</div>'
             f'<div class="tier-price">{price_str} <small>{period_str}</small></div>'
             f'</div></label>'
         )
+    return "".join(cards)
+
+
+def _pricing_page(error: str = None) -> str:
+    error_html = f'<p style="color:#ED4245;text-align:center;margin-bottom:1.5rem;">{html.escape(error)}</p>' if error else ""
+
+    ticket_bot_cards = _tier_cards_html("ticket_bot", ["starter", "pro", "premium", "lifetime"], selected=True)
+    whole_bot_cards = _tier_cards_html("whole_bot", ["regular", "premium"], selected=False)
 
     body = f"""
 <div class="billing-header">
-  <h1>Get TrapAI's Ticket System</h1>
-  <p>Pick a plan below — instant access to the ticket system for your server as soon as you pay.</p>
+  <h1>Get TrapAI</h1>
+  <p>Choose what you want, pick a plan, and get instant access as soon as you pay.</p>
 </div>
+<div class="product-tabs">
+  <button type="button" class="product-tab active" data-product="ticket_bot">🎫 Ticket Bot</button>
+  <button type="button" class="product-tab" data-product="whole_bot">🤖 Whole Bot</button>
+</div>
+<p class="product-desc" id="product-desc">{html.escape(PRODUCTS['ticket_bot']['description'])}</p>
 <form class="billing-form" method="post" action="/checkout/session">
   {error_html}
-  <div class="tier-grid">{''.join(cards)}</div>
+  <input type="hidden" name="product" id="product-field" value="ticket_bot">
+  <div class="tier-grid product-panel" data-product="ticket_bot">{ticket_bot_cards}</div>
+  <div class="tier-grid product-panel" data-product="whole_bot" style="display:none;">{whole_bot_cards}</div>
   <div class="field-group">
     <label for="guild_id">Your Discord Server ID</label>
     <input type="text" id="guild_id" name="guild_id" inputmode="numeric" pattern="[0-9]+" required
@@ -1597,11 +1669,37 @@ def _pricing_page(error: str = None) -> str:
   </div>
   <div class="agree-row">
     <input type="checkbox" name="agree_tos" required style="margin-top:.2rem;">
-    <span>I agree to the <a href="/terms" target="_blank">Terms of Service</a>, including that this is a license to use TrapAI, not a sale of its source code, and that Lifetime purchases are non-refundable.</span>
+    <span>I agree to the <a href="/terms" target="_blank">Terms of Service</a>, including that this is a license to use TrapAI, not a sale of its source code, and that one-time purchases are non-refundable.</span>
   </div>
   <button type="submit" class="billing-submit">Continue to Secure Checkout →</button>
 </form>
-<p class="billing-note">Payments are processed securely by Stripe — we never see or store your card details. Subscriptions renew automatically until canceled; Lifetime is a single one-time charge with no recurring billing.</p>
+<p class="billing-note">Payments are processed securely by Stripe — we never see or store your card details. Subscriptions renew automatically until canceled; one-time plans are a single charge with no recurring billing.</p>
+<script>
+document.addEventListener('DOMContentLoaded', function () {{
+  var tabs = document.querySelectorAll('.product-tab');
+  var panels = document.querySelectorAll('.product-panel');
+  var field = document.getElementById('product-field');
+  var desc = document.getElementById('product-desc');
+  var descriptions = {{
+    ticket_bot: {json.dumps(PRODUCTS['ticket_bot']['description'])},
+    whole_bot: {json.dumps(PRODUCTS['whole_bot']['description'])}
+  }};
+  tabs.forEach(function (tab) {{
+    tab.addEventListener('click', function () {{
+      var product = tab.dataset.product;
+      tabs.forEach(function (t) {{ t.classList.remove('active'); }});
+      tab.classList.add('active');
+      field.value = product;
+      if (desc && descriptions[product]) desc.textContent = descriptions[product];
+      panels.forEach(function (panel) {{
+        var isActive = panel.dataset.product === product;
+        panel.style.display = isActive ? '' : 'none';
+        panel.querySelectorAll('input[type=radio]').forEach(function (r) {{ r.disabled = !isActive; }});
+      }});
+    }});
+  }});
+}});
+</script>
 """
     return _billing_page_shell("TrapAI Pricing", body)
 
@@ -1632,28 +1730,31 @@ def _checkout_result_page(title: str, message: str, *, invite_url: str = None) -
 
 
 def _terms_page() -> str:
+    ticket_lifetime_price = PRODUCTS["ticket_bot"]["tiers"]["lifetime"]["price_cents"] / 100
+    whole_regular_price = PRODUCTS["whole_bot"]["tiers"]["regular"]["price_cents"] / 100
+    whole_premium_price = PRODUCTS["whole_bot"]["tiers"]["premium"]["price_cents"] / 100
     body = f"""
 <div class="terms-page">
   <h1>TrapAI — Terms of Service &amp; License</h1>
-  <p>This page explains what you're agreeing to when you subscribe to or purchase TrapAI's ticket system, especially the one-time <strong>Lifetime</strong> option.</p>
+  <p>This page explains what you're agreeing to when you subscribe to or purchase TrapAI — the Ticket Bot (support/ticket system only) or the Whole Bot (everything) — including the one-time plans.</p>
 
   <h2>1. What you're buying</h2>
-  <p>A subscription or Lifetime purchase grants your Discord server a <strong>license to use</strong> TrapAI's ticket system and related features. It does not transfer ownership of, or any rights to, TrapAI's source code, which remains completely private. You may not decompile, extract, resell, or redistribute the bot itself.</p>
+  <p>A subscription or one-time purchase grants your Discord server a <strong>license to use</strong> the TrapAI product and tier you selected. It does not transfer ownership of, or any rights to, TrapAI's source code, which remains completely private. You may not decompile, extract, resell, or redistribute the bot itself.</p>
 
-  <h2>2. Lifetime plan</h2>
-  <p>The Lifetime plan is a single one-time charge of ${TIERS['lifetime']['price_cents'] / 100:.0f}. No subscription is created and you will never be charged again for it. In exchange, you get full access to the ticket system and all features it includes, for as long as TrapAI is offered and maintained (see Section 4).</p>
+  <h2>2. One-time plans</h2>
+  <p>Ticket Bot's Lifetime plan (${ticket_lifetime_price:.0f}) and both Whole Bot plans — Regular (${whole_regular_price:.0f}) and Premium (${whole_premium_price:.0f}) — are single one-time charges. No subscription is created and you will never be charged again for them. In exchange, you get access to that product for as long as TrapAI is offered and maintained (see Section 4). The Whole Bot plans include every feature of the full bot, not just the ticket system.</p>
 
   <h2>3. No refunds</h2>
-  <p>All payments — subscription charges and the Lifetime purchase alike — are final and non-refundable, except where required by law.</p>
+  <p>All payments — subscription charges and one-time purchases alike — are final and non-refundable, except where required by law.</p>
 
   <h2>4. Service availability &amp; discontinuation</h2>
-  <p>TrapAI is provided on a best-effort basis. The service may be modified, interrupted, or discontinued at any time, for any reason, without notice. If TrapAI is discontinued, including for Lifetime purchasers, no refunds or other compensation will be provided.</p>
+  <p>TrapAI is provided on a best-effort basis. The service may be modified, interrupted, or discontinued at any time, for any reason, without notice. If TrapAI is discontinued, including for one-time purchasers, no refunds or other compensation will be provided.</p>
 
   <h2>5. No warranty</h2>
   <p>TrapAI is provided "as is," without warranty of any kind. We do not guarantee the bot will be free of bugs, errors, downtime, or unexpected behavior. You assume all risk from using it.</p>
 
-  <h2>6. Subscription billing (Starter / Pro / Premium)</h2>
-  <p>Subscriptions bill automatically on a recurring monthly basis until canceled. If a payment fails, you'll get a grace period of {SUBSCRIPTION_GRACE_PERIOD_DAYS} days to update your payment method before the ticket system is suspended for your server. You can manage or cancel your subscription anytime via the Manage Subscription / customer portal link.</p>
+  <h2>6. Subscription billing (Ticket Bot: Starter / Pro / Premium)</h2>
+  <p>These plans bill automatically on a recurring monthly basis until canceled. If a payment fails, you'll get a grace period of {SUBSCRIPTION_GRACE_PERIOD_DAYS} days to update your payment method before the ticket system is suspended for your server. You can manage or cancel your subscription anytime via the Manage Subscription / customer portal link. The Whole Bot plans are one-time purchases only and never bill on a recurring basis.</p>
 
   <h2>7. Support</h2>
   <p>If you run into any errors or issues, contact TrapAI support: {html.escape(SUPPORT_CONTACT)}.</p>
@@ -1675,10 +1776,11 @@ async def handle_create_checkout_session(request: web.Request) -> web.Response:
     form = await request.post()
     guild_id = str(form.get("guild_id", "")).strip()
     discord_user_id = str(form.get("discord_user_id", "")).strip()
-    tier = str(form.get("tier", "")).strip()
+    product = str(form.get("product", "")).strip()
+    tier = str(form.get(f"tier_{product}", "")).strip()
     agreed = form.get("agree_tos") is not None
 
-    if not guild_id.isdigit() or not discord_user_id.isdigit() or tier not in TIERS or not agreed:
+    if not guild_id.isdigit() or not discord_user_id.isdigit() or not _tier_cfg(product, tier) or not agreed:
         return web.Response(
             text=_pricing_page(error="Please fill in a valid Server ID, User ID, pick a plan, and agree to the Terms of Service."),
             content_type="text/html", status=400,
@@ -1686,7 +1788,7 @@ async def handle_create_checkout_session(request: web.Request) -> web.Response:
 
     base_url = _resolve_base_url(request)
     try:
-        session_obj = await asyncio.to_thread(_create_checkout_session_sync, tier, guild_id, discord_user_id, base_url)
+        session_obj = await asyncio.to_thread(_create_checkout_session_sync, product, tier, guild_id, discord_user_id, base_url)
     except Exception as e:
         log.error("Failed to create checkout session: %s", e)
         return web.Response(text=_pricing_page(error="Couldn't start checkout — please try again in a moment."),
@@ -1798,6 +1900,7 @@ async def handle_internal_get_subscription(request: web.Request) -> web.Response
     if not rec:
         return web.json_response({"status": "none"})
     return web.json_response({
+        "product": rec.get("product"),
         "tier": rec.get("tier"),
         "status": rec.get("status"),
         "current_period_end": rec.get("current_period_end"),
@@ -1814,13 +1917,14 @@ async def handle_internal_checkout_link(request: web.Request) -> web.Response:
     body = await request.json()
     guild_id = str(body.get("guild_id", ""))
     discord_user_id = str(body.get("discord_user_id", ""))
+    product = body.get("product")
     tier = body.get("tier")
-    if not guild_id.isdigit() or not discord_user_id.isdigit() or tier not in TIERS:
-        return web.json_response({"error": "guild_id, discord_user_id, and a valid tier are required"}, status=400)
+    if not guild_id.isdigit() or not discord_user_id.isdigit() or not _tier_cfg(product, tier):
+        return web.json_response({"error": "guild_id, discord_user_id, and a valid product/tier are required"}, status=400)
 
     base_url = _resolve_base_url(request)
     try:
-        session_obj = await asyncio.to_thread(_create_checkout_session_sync, tier, guild_id, discord_user_id, base_url)
+        session_obj = await asyncio.to_thread(_create_checkout_session_sync, product, tier, guild_id, discord_user_id, base_url)
     except Exception as e:
         log.error("Failed to create checkout session via internal API: %s", e)
         return web.json_response({"error": "failed to create checkout session"}, status=502)
