@@ -831,7 +831,7 @@ WHOLE_BOT_PREMIUM_ONLY_COMMANDS = {
     # Boosts & Vanity, incl. custom booster roles (whole category)
     "setboostchannel", "setvanitycode", "setvanityrole", "vanityconfig", "br",
     # Staff Tools (whole category)
-    "staffpsa", "task", "tasklist", "acceptstaff", "setstaffrules", "staffleaderboard", "staffstats",
+    "staffpsa", "task", "tasklist", "acceptstaff", "denystaff", "setstaffrules", "staffleaderboard", "staffstats",
     # Advanced admin/setup
     "backup", "restore", "listbackups", "deletebackup", "exportconfig",
     # Niche fun/utility
@@ -3129,7 +3129,7 @@ HELP_CATEGORIES = [
     ('💰', 'Economy & Games', ['balance', 'daily', 'weekly', 'work', 'rob', 'give', 'deposit', 'withdraw', 'leaderboard', 'gamblers', 'slots', 'blackjack', 'coinflip', 'dice', '8ball', 'trivia', 'hangman', 'tictactoe', 'numguess', 'rockpaperscissors', 'highlow', 'crash', 'games']),
     ('🎂', 'Birthdays', ['birthday', 'removebirthday', 'setbirthday', 'setbirthdaychannel', 'birthdaylist', 'settimezone']),
     ('🚀', 'Boosts & Vanity', ['setboostchannel', 'setvanitycode', 'setvanityrole', 'vanityconfig']),
-    ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist', 'acceptstaff', 'setstaffrules', 'staffleaderboard', 'staffstats']),
+    ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist', 'acceptstaff', 'denystaff', 'setstaffrules', 'staffleaderboard', 'staffstats']),
     ('⚙️', 'Admin & Setup', ['setup', 'backup', 'restore', 'listbackups', 'deletebackup', 'exportconfig', 'setlogchannel', 'setwelcome', 'disablewelcome', 'sendwelcome', 'welcome', 'sendinvite', 'announce']),
     ('🎲', 'Fun & Utility', ['snipe', 'clearsnipe', 'editsnipe', 'quote', 'rules', 'cmds', 'help']),
 ]
@@ -11935,6 +11935,56 @@ async def acceptstaff(ctx, member: discord.Member, role: discord.Role):
                   ("🆕 New Staff",     f"{member.mention} (`{member.id}`)",          True),
                   ("🏷️ Role Granted",  role.mention,                                 True),
                   ("📨 DM Sent",       "✅ Yes" if dm_sent else "❌ No (DMs closed)", True),
+              ],
+              actor=ctx.author, target=member)
+
+
+@bot.command()
+@_permitted_check(administrator=True)
+async def denystaff(ctx, member: discord.Member, *, reason: str = "No reason provided"):
+    """
+    Reject a member's staff application — DMs them a polite decline notice
+    with the reason (no roles are touched). Usage: ,denystaff @user [reason]
+    """
+    dm_embed = discord.Embed(
+        title="📋 Staff Application Update",
+        description=(
+            f"Thank you for applying to join the staff team at **{ctx.guild.name}**.\n\n"
+            "After review, your application was **not accepted** at this time.\n\n"
+            f"**Reason:** {reason}\n\n"
+            "You're welcome to apply again in the future."
+        ),
+        color=discord.Color.red(),
+        timestamp=discord.utils.utcnow()
+    )
+    if ctx.guild.icon:
+        dm_embed.set_thumbnail(url=ctx.guild.icon.url)
+    dm_embed.set_footer(text=f"TrapAI • {ctx.guild.name}")
+
+    dm_sent = True
+    try:
+        await member.send(embed=dm_embed)
+    except (discord.Forbidden, discord.HTTPException):
+        dm_sent = False
+
+    confirm = discord.Embed(
+        title="🚫 Staff Application Denied",
+        description=(
+            f"{member.mention}'s staff application has been denied.\n**Reason:** {reason}"
+            + ("" if dm_sent else "\n⚠️ Couldn't DM them — their DMs may be closed.")
+        ),
+        color=discord.Color.red(),
+        timestamp=discord.utils.utcnow()
+    )
+    confirm.set_footer(text=f"Denied by {ctx.author}", icon_url=ctx.author.display_avatar.url)
+    await ctx.send(embed=confirm)
+
+    await log(ctx.guild, "mod", "Staff Application Denied", None, discord.Color.red(),
+              fields=[
+                  ("👑 Denied By",  f"{ctx.author.mention} (`{ctx.author.id}`)", True),
+                  ("🚫 Applicant",  f"{member.mention} (`{member.id}`)",          True),
+                  ("📝 Reason",     reason,                                       False),
+                  ("📨 DM Sent",    "✅ Yes" if dm_sent else "❌ No (DMs closed)", True),
               ],
               actor=ctx.author, target=member)
 
