@@ -624,6 +624,9 @@ MUTED_ROLE = "🔇 Muted"
 # Ownership-tier role allowed to issue formal staff warnings/strikes —
 # see the "STAFF DISCIPLINE" section below.
 STAFF_DISCIPLINE_ROLE = "os"
+# Reaching exactly this many strikes auto-terminates a staff member (all
+# removable roles stripped, same exemptions as ,strip) — see ,staffstrike.
+STAFF_TERMINATION_STRIKES = 3
 
 # ── Self-service unmute VC(s) ─────────────────────────────────
 # UNMUTE_VC_CHANNELS[guild_id] = [channel_id, ...] — voice channels a member
@@ -1357,7 +1360,7 @@ _LOG_ICONS = {
     "lockdowns":    "🔐", "unlockdowns":"🔓", "clears":     "🧹",
     "purges":       "🗑️",  "hides":      "👁️",  "strips":     "⚔️",
     "massroles":    "📦", "roleall":    "📢", "invites":    "📨",
-    "staff warning": "⚠️", "staff strike": "❌",
+    "staff warning": "⚠️", "staff strike": "❌", "terminated": "🚨",
 }
 
 
@@ -8253,6 +8256,44 @@ async def timeout(ctx, member: discord.Member, minutes: int, *, reason="No reaso
               actor=ctx.author, target=member)
 
 
+async def _strip_member_roles(guild: discord.Guild, member: discord.Member, actor, reason: str):
+    """
+    Strip all removable roles from a member — except @everyone, anything
+    above the bot's own top role (physically can't touch it), their
+    verified member role, and their own booster custom role (a cosmetic
+    perk, not a staff role). Saves a role snapshot so ,restoreallroles can
+    undo it. Shared by ,strip and the 3-strikes staff termination in
+    ,staffstrike. Returns (removed_role_names, kept_role_names, snapshot_len).
+    """
+    verified_role = discord.utils.get(guild.roles, name=VERIFIED_ROLE)
+    booster_role_id = BOOSTER_ROLES.get(guild.id, {}).get(member.id)
+
+    kept_names = [
+        role.name for role in member.roles
+        if role.name != "@everyone" and role < guild.me.top_role
+        and (role == verified_role or role.id == booster_role_id)
+    ]
+    removable = [
+        role for role in member.roles
+        if role.name != "@everyone" and role < guild.me.top_role
+        and role != verified_role and role.id != booster_role_id
+    ]
+    if not removable:
+        return [], kept_names, 0
+
+    # Snapshot ALL non-everyone roles (including any above the bot's top
+    # role that couldn't be removed now, and the kept ones) for full
+    # restoration later.
+    snapshot = [r.id for r in member.roles if r.name != "@everyone"]
+    ROLE_SNAPSHOTS.setdefault(guild.id, {})[member.id] = snapshot
+    _save_role_snapshots()
+
+    role_names = [role.name for role in removable]
+    await member.remove_roles(*removable, reason=reason)
+    _log_mod_action(guild.id, member.id, "strip", actor, f"Removed: {', '.join(role_names)}")
+    return role_names, kept_names, len(snapshot)
+
+
 @bot.command()
 @_permitted_check(administrator=True)
 async def strip(ctx, member: discord.Member):
@@ -8262,44 +8303,25 @@ async def strip(ctx, member: discord.Member):
     their own booster custom role (a cosmetic perk, not a staff role) —
     those three stay on. Usage: ,strip @user
     """
-    verified_role = discord.utils.get(ctx.guild.roles, name=VERIFIED_ROLE)
-    booster_role_id = BOOSTER_ROLES.get(ctx.guild.id, {}).get(member.id)
-
-    kept_names = [
-        role.name for role in member.roles
-        if role.name != "@everyone" and role < ctx.guild.me.top_role
-        and (role == verified_role or role.id == booster_role_id)
-    ]
-    removable = [
-        role for role in member.roles
-        if role.name != "@everyone" and role < ctx.guild.me.top_role
-        and role != verified_role and role.id != booster_role_id
-    ]
-    if not removable:
+    role_names, kept_names, snap_len = await _strip_member_roles(
+        ctx.guild, member, ctx.author, f"Stripped by {ctx.author}"
+    )
+    if not role_names:
         await ctx.send("❌ That user has no roles I can remove.")
         return
 
-    # Snapshot ALL non-everyone roles (including any above my top role that
-    # couldn't be removed now, and the kept ones) for full restoration later.
-    snapshot = [r.id for r in member.roles if r.name != "@everyone"]
-    ROLE_SNAPSHOTS.setdefault(ctx.guild.id, {})[member.id] = snapshot
-    _save_role_snapshots()
-
-    role_names = ", ".join(role.name for role in removable)
-    await member.remove_roles(*removable, reason=f"Stripped by {ctx.author}")
-    _log_mod_action(ctx.guild.id, member.id, "strip", ctx.author, f"Removed: {role_names}")
     kept_note = f"\n🔒 Kept: {', '.join(kept_names)}" if kept_names else ""
     await ctx.send(
-        f"✅ Removed **{len(removable)} role(s)** from {member.mention}.{kept_note}\n"
+        f"✅ Removed **{len(role_names)} role(s)** from {member.mention}.{kept_note}\n"
         f"📸 Snapshot saved — use `,restoreallroles {member.mention}` to restore."
     )
     await log(ctx.guild, "strips", "All Roles Stripped", None, discord.Color.dark_red(),
               fields=[
                   ("👑 Admin",         f"{ctx.author.mention} (`{ctx.author.id}`)", True),
                   ("⚔️ User",          f"{member.mention} (`{member.id}`)",         True),
-                  ("🏷️ Roles Removed", role_names[:512] or "*None*",                False),
+                  ("🏷️ Roles Removed", ", ".join(role_names)[:512] or "*None*",    False),
                   ("🔒 Roles Kept",    ", ".join(kept_names)[:512] or "*None*",     False),
-                  ("📸 Snapshot",      f"{len(snapshot)} role(s) saved",             True),
+                  ("📸 Snapshot",      f"{snap_len} role(s) saved",                 True),
               ],
               actor=ctx.author, target=member)
 
@@ -9889,7 +9911,9 @@ async def staffwarn(ctx, member: discord.Member, *, reason="No reason provided")
 async def staffstrike(ctx, member: discord.Member, *, reason="No reason provided"):
     """
     Issue a formal staff strike — a more serious escalation than a staff
-    warning. Restricted to the "os" role.
+    warning. Restricted to the "os" role. Reaching
+    STAFF_TERMINATION_STRIKES (3) auto-terminates the staff member —
+    every removable role is stripped, same as ,strip.
     Usage: ,staffstrike @staffmember [reason]
     """
     if member == ctx.author:
@@ -9907,15 +9931,33 @@ async def staffstrike(ctx, member: discord.Member, *, reason="No reason provided
     _save_staff_strikes()
     count = len(user_strikes)
 
+    terminated = count == STAFF_TERMINATION_STRIKES
+    stripped_roles = []
+    if terminated:
+        stripped_roles, _, _ = await _strip_member_roles(
+            ctx.guild, member, ctx.author,
+            f"Staff terminated — {STAFF_TERMINATION_STRIKES} strikes (issued by {ctx.author})"
+        )
+
     dm_sent = True
-    dm_embed = discord.Embed(
-        title="❌ Staff Strike Issued",
-        description=(
+    if terminated:
+        dm_desc = (
+            f"You've reached **{STAFF_TERMINATION_STRIKES} staff strikes** in **{ctx.guild.name}** "
+            "and have been **removed from the staff team**.\n\n"
+            f"**Reason for this strike:** {reason}"
+        )
+        dm_title = "🚨 Staff Termination — 3 Strikes"
+    else:
+        dm_desc = (
             f"You've received a formal staff strike in **{ctx.guild.name}**.\n\n"
             f"**Reason:** {reason}\n"
             f"**Total staff strikes:** {count}"
-        ),
-        color=discord.Color.red(),
+        )
+        dm_title = "❌ Staff Strike Issued"
+    dm_embed = discord.Embed(
+        title=dm_title,
+        description=dm_desc,
+        color=discord.Color.dark_red() if terminated else discord.Color.red(),
         timestamp=discord.utils.utcnow()
     )
     dm_embed.set_footer(text=f"TrapAI • {ctx.guild.name}")
@@ -9924,28 +9966,39 @@ async def staffstrike(ctx, member: discord.Member, *, reason="No reason provided
     except (discord.Forbidden, discord.HTTPException):
         dm_sent = False
 
+    if terminated:
+        desc = f"{member.mention} reached **{STAFF_TERMINATION_STRIKES} strikes** and has been **automatically terminated** from the staff team."
+    else:
+        desc = f"{member.mention} has received a formal staff strike."
+    if not dm_sent:
+        desc += "\n⚠️ Couldn't DM them — their DMs may be closed."
+
     embed = discord.Embed(
-        title="❌ Staff Strike Issued",
-        description=(
-            f"{member.mention} has received a formal staff strike."
-            + ("" if dm_sent else "\n⚠️ Couldn't DM them — their DMs may be closed.")
-        ),
-        color=discord.Color.red(),
+        title="🚨 Staff Terminated" if terminated else "❌ Staff Strike Issued",
+        description=desc,
+        color=discord.Color.dark_red() if terminated else discord.Color.red(),
         timestamp=discord.utils.utcnow()
     )
     embed.add_field(name="Reason", value=reason, inline=False)
     embed.add_field(name="Total Staff Strikes", value=str(count), inline=False)
+    if terminated:
+        embed.add_field(name="🗑️ Roles Removed", value=", ".join(stripped_roles)[:1024] or "*None*", inline=False)
     embed.set_footer(text=f"Issued by {ctx.author}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
 
-    await log(ctx.guild, "staff", "Staff Strike Issued", None, discord.Color.red(),
-              fields=[
-                  ("👑 Issued By", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
-                  ("❌ Staff Member", f"{member.mention} (`{member.id}`)", True),
-                  ("🔢 Total Staff Strikes", str(count), True),
-                  ("📝 Reason", reason, False),
-                  ("📨 DM Sent", "✅ Yes" if dm_sent else "❌ No (DMs closed)", True),
-              ],
+    log_fields = [
+        ("👑 Issued By", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
+        ("❌ Staff Member", f"{member.mention} (`{member.id}`)", True),
+        ("🔢 Total Staff Strikes", str(count), True),
+        ("📝 Reason", reason, False),
+        ("📨 DM Sent", "✅ Yes" if dm_sent else "❌ No (DMs closed)", True),
+    ]
+    if terminated:
+        log_fields.append(("🗑️ Roles Removed", ", ".join(stripped_roles)[:512] or "*None*", False))
+    await log(ctx.guild, "staff",
+              "Staff Terminated — 3 Strikes" if terminated else "Staff Strike Issued", None,
+              discord.Color.dark_red() if terminated else discord.Color.red(),
+              fields=log_fields,
               actor=ctx.author, target=member)
 
 
