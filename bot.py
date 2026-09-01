@@ -3339,7 +3339,10 @@ async def _apply_jail_overwrites(member: discord.Member):
 
     async def _hide(channel):
         try:
-            await channel.set_permissions(member, view_channel=False, reason="Jailed — channel hidden")
+            if isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+                await channel.set_permissions(member, view_channel=False, connect=False, reason="Jailed — channel hidden")
+            else:
+                await channel.set_permissions(member, view_channel=False, reason="Jailed — channel hidden")
         except (discord.Forbidden, discord.HTTPException):
             pass
 
@@ -3353,6 +3356,14 @@ async def _apply_jail_overwrites(member: discord.Member):
     if targets:
         await asyncio.gather(*(_hide(c) for c in targets))
 
+    # Hiding/denying connect doesn't disconnect someone already in a VC —
+    # boot them out immediately so they can't just stay put.
+    if member.voice and member.voice.channel:
+        try:
+            await member.move_to(None, reason="Jailed — removed from voice channel")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
 
 async def _remove_jail_overwrites(member: discord.Member):
     """Remove the jail-applied view_channel overwrite from every channel —
@@ -3361,8 +3372,9 @@ async def _remove_jail_overwrites(member: discord.Member):
 
     async def _restore(channel, ow):
         try:
-            # Clear just the view_channel bit; preserve any other bits
+            # Clear just the view_channel/connect bits; preserve any other bits
             ow.view_channel = None
+            ow.connect = None
             if ow.is_empty():
                 await channel.set_permissions(member, overwrite=None, reason="Unjailed — channel access restored")
             else:
@@ -3373,8 +3385,8 @@ async def _remove_jail_overwrites(member: discord.Member):
     tasks = []
     for channel in guild.channels:
         ow = channel.overwrites_for(member)
-        # Only touch it if we set a deny on view_channel — leave anything else untouched
-        if ow.view_channel is False:
+        # Only touch it if we set a deny on view_channel or connect — leave anything else untouched
+        if ow.view_channel is False or ow.connect is False:
             tasks.append(_restore(channel, ow))
     if tasks:
         await asyncio.gather(*tasks)
