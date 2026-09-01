@@ -3117,9 +3117,9 @@ class VCAddModModal(discord.ui.Modal, title="🛡 Add VC Moderator"):
 # import relationship with this one — see its docstring).
 HELP_CATEGORIES = [
     ('🛡️', 'Moderation', ['kick', 'ban', 'mute', 'unmute', 'timeout', 'warn', 'warnings', 'clearwarnings', 'modhistory', 'hardban', 'unhardban', 'hardbans', 'clear', 'purge', 'lock', 'unlock', 'hide', 'unhide', 'slowmode', 'nuke', 'lockdown', 'unlockdown', 'raidmode', 'nickname', 'strip', 'trapwarn', 'trapscan', 'restart']),
-    ('🔒', 'Jail & Anti-Raid', ['jail', 'unjail', 'setupjail', 'antiraid', 'raidwhitelist']),
+    ('🔒', 'Jail & Anti-Raid', ['jail', 'unjail', 'setupjail', 'antiraid', 'raidwhitelist', 'wl']),
     ('🤖', 'Verification', ['verify', 'unverify', 'denyverify', 'sendverify', 'setverifybackup']),
-    ('🏷️', 'Roles', ['role', 'roleall', 'massrole', 'massunrole', 'restoreallroles', 'autorole', 'setgifrole', 'protectedrole', 'br']),
+    ('🏷️', 'Roles', ['role', 'roleall', 'massrole', 'massunrole', 'restoreallroles', 'autorole', 'setgifrole', 'protectedrole', 'br', 'roles']),
     ('🎤', 'Voice Channels', ['vclock', 'vcunlock', 'vchide', 'vcshow', 'vcname', 'vclimit', 'vcbitrate', 'vcregion', 'vckick', 'vcban', 'vcunban', 'vcpermit', 'vcmute', 'vcunmute', 'vcdeafen', 'vcundeafen', 'vctransfer', 'vcclaim', 'vcmod', 'vcremovemod', 'vcstats', 'setupvc', 'setunmutevc']),
     ('🎫', 'Tickets', ['sendtickets', 'addticketcategory', 'removeticketcategory', 'ticketcategories', 'setticketformat', 'claimticket', 'closeticket']),
     ('💳', 'Billing', ['subscribe', 'managesubscription', 'subscriptionstatus']),
@@ -3130,7 +3130,7 @@ HELP_CATEGORIES = [
     ('🎂', 'Birthdays', ['birthday', 'removebirthday', 'setbirthday', 'setbirthdaychannel', 'birthdaylist', 'settimezone']),
     ('🚀', 'Boosts & Vanity', ['setboostchannel', 'setvanitycode', 'setvanityrole', 'vanityconfig']),
     ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist', 'acceptstaff', 'denystaff', 'setstaffrules', 'staffleaderboard', 'staffstats']),
-    ('⚙️', 'Admin & Setup', ['setup', 'backup', 'restore', 'listbackups', 'deletebackup', 'exportconfig', 'setlogchannel', 'setwelcome', 'disablewelcome', 'sendwelcome', 'welcome', 'sendinvite', 'announce']),
+    ('⚙️', 'Admin & Setup', ['setup', 'backup', 'restore', 'listbackups', 'deletebackup', 'exportconfig', 'setlogchannel', 'setwelcome', 'disablewelcome', 'sendwelcome', 'welcome', 'sendinvite', 'announce', 'setpermittedrole', 'setbotbio']),
     ('🎲', 'Fun & Utility', ['snipe', 'clearsnipe', 'editsnipe', 'quote', 'rules', 'cmds', 'help']),
 ]
 
@@ -7292,23 +7292,39 @@ async def rules(ctx):
             "```yaml\n"
             "TrapAI Status: ACTIVE\n"
             "Rule Enforcement: ENABLED\n"
-            "Violation Response: WARNING / TIMEOUT / JAIL / BAN\n"
+            "Violation Response: WARNING / TIMEOUT / STRIP / JAIL / BAN / HARDBAN\n"
             "```"
         ),
         color=discord.Color.dark_grey(),
         timestamp=discord.utils.utcnow()
     )
     embed.add_field(name="1️⃣ Respect Everyone", value="No harassment, racism, hate speech, threats, or bullying.", inline=False)
-    embed.add_field(name="2️⃣ No Spamming", value="Do not flood chats, mass mention, or spam messages, emojis, or reactions.", inline=False)
+    embed.add_field(name="2️⃣ No Spamming", value="Do not flood chats, mass mention, or spam messages, emojis, or reactions. **Punishment: Instant Timeout.**", inline=False)
     embed.add_field(name="3️⃣ No Ads or Links", value="No self-promo, invite links, or outside advertising without staff approval.", inline=False)
-    embed.add_field(name="4️⃣ Keep It Clean", value="No harmful content, scams, doxxing, or anything meant to harm the server.", inline=False)
+    embed.add_field(name="4️⃣ Keep It Clean", value="No harmful content, scams, or anything meant to harm the server.", inline=False)
     embed.add_field(name="5️⃣ Use Channels Correctly", value="Keep topics in the right channels and follow staff directions.", inline=False)
     embed.add_field(name="6️⃣ VC Rules", value="No mic spam, earrape, screaming, or trolling in voice channels.", inline=False)
     embed.add_field(name="7️⃣ No Impersonation", value="Do not impersonate other members, staff, or bots. Violations may result in an immediate ban.", inline=False)
     embed.add_field(name="8️⃣ Staff Decisions", value="Arguing with moderation actions in public may lead to more punishment. Contact staff calmly.", inline=False)
+    embed.add_field(name="9️⃣ Respect The Server", value="No disrespecting, trash-talking, or badmouthing this server — including telling others to leave or spreading negativity about it.", inline=False)
+    embed.add_field(name="🔟 Respect The Staff", value="Disrespecting staff, their decisions, or the team as a whole will not be tolerated. Take issues to the proper channels calmly.", inline=False)
+    embed.add_field(name="⛔ No NSFW / Nudity", value="No NSFW, nudity, or explicit content of any kind. **Punishment: Instant Ban.**", inline=False)
+    embed.add_field(name="⛔ No Gore", value="No gore, graphic violence, or disturbing content of any kind. **Punishment: Instant Ban.**", inline=False)
+    embed.add_field(name="⛔ No Staff/Admin Abuse", value="Abusing admin or staff permissions in any way will not be tolerated. **Punishment: Instant Strip + Jail.**", inline=False)
+    embed.add_field(name="⛔ No Doxxing", value="Attempting to dox any member will not be tolerated. **Punishment: Instant Hardban + reported to Discord.**", inline=False)
     embed.add_field(
         name="⚠ TrapAI Enforcement",
-        value="Breaking rules may result in:\n• Warning\n• Timeout\n• Jail\n• Ban",
+        value="Breaking rules may result in:\n• Warning\n• Timeout\n• Strip\n• Jail\n• Ban\n• Hardban",
+        inline=False
+    )
+    embed.add_field(
+        name="🚨 Final Warning",
+        value="If you can't follow any of these rules, that's an **instant ban.**",
+        inline=False
+    )
+    embed.add_field(
+        name="📜 Discord Community Guidelines",
+        value="[discord.com/guidelines](https://discord.com/guidelines)",
         inline=False
     )
     if ctx.guild.icon:
