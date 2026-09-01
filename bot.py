@@ -3117,9 +3117,9 @@ class VCAddModModal(discord.ui.Modal, title="🛡 Add VC Moderator"):
 # import relationship with this one — see its docstring).
 HELP_CATEGORIES = [
     ('🛡️', 'Moderation', ['kick', 'ban', 'mute', 'unmute', 'timeout', 'warn', 'warnings', 'clearwarnings', 'modhistory', 'hardban', 'unhardban', 'hardbans', 'clear', 'purge', 'lock', 'unlock', 'hide', 'unhide', 'slowmode', 'nuke', 'lockdown', 'unlockdown', 'raidmode', 'nickname', 'strip', 'trapwarn', 'trapscan', 'restart']),
-    ('🔒', 'Jail & Anti-Raid', ['jail', 'unjail', 'setupjail', 'antiraid', 'raidwhitelist']),
+    ('🔒', 'Jail & Anti-Raid', ['jail', 'unjail', 'setupjail', 'antiraid', 'raidwhitelist', 'wl']),
     ('🤖', 'Verification', ['verify', 'unverify', 'denyverify', 'sendverify', 'setverifybackup']),
-    ('🏷️', 'Roles', ['role', 'roleall', 'massrole', 'massunrole', 'restoreallroles', 'autorole', 'setgifrole', 'protectedrole', 'br']),
+    ('🏷️', 'Roles', ['role', 'roleall', 'massrole', 'massunrole', 'restoreallroles', 'autorole', 'setgifrole', 'protectedrole', 'br', 'roles']),
     ('🎤', 'Voice Channels', ['vclock', 'vcunlock', 'vchide', 'vcshow', 'vcname', 'vclimit', 'vcbitrate', 'vcregion', 'vckick', 'vcban', 'vcunban', 'vcpermit', 'vcmute', 'vcunmute', 'vcdeafen', 'vcundeafen', 'vctransfer', 'vcclaim', 'vcmod', 'vcremovemod', 'vcstats', 'setupvc', 'setunmutevc']),
     ('🎫', 'Tickets', ['sendtickets', 'addticketcategory', 'removeticketcategory', 'ticketcategories', 'setticketformat', 'claimticket', 'closeticket']),
     ('💳', 'Billing', ['subscribe', 'managesubscription', 'subscriptionstatus']),
@@ -3130,7 +3130,7 @@ HELP_CATEGORIES = [
     ('🎂', 'Birthdays', ['birthday', 'removebirthday', 'setbirthday', 'setbirthdaychannel', 'birthdaylist', 'settimezone']),
     ('🚀', 'Boosts & Vanity', ['setboostchannel', 'setvanitycode', 'setvanityrole', 'vanityconfig']),
     ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist', 'acceptstaff', 'denystaff', 'setstaffrules', 'staffleaderboard', 'staffstats']),
-    ('⚙️', 'Admin & Setup', ['setup', 'backup', 'restore', 'listbackups', 'deletebackup', 'exportconfig', 'setlogchannel', 'setwelcome', 'disablewelcome', 'sendwelcome', 'welcome', 'sendinvite', 'announce', 'setpermittedrole']),
+    ('⚙️', 'Admin & Setup', ['setup', 'backup', 'restore', 'listbackups', 'deletebackup', 'exportconfig', 'setlogchannel', 'setwelcome', 'disablewelcome', 'sendwelcome', 'welcome', 'sendinvite', 'announce', 'setpermittedrole', 'setbotbio']),
     ('🎲', 'Fun & Utility', ['snipe', 'clearsnipe', 'editsnipe', 'quote', 'rules', 'cmds', 'help']),
 ]
 
