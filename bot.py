@@ -388,6 +388,7 @@ def _save_all_state() -> None:
     _save_role_vouch_pending()
     _save_protected_roles()
     _save_permitted_roles()
+    _save_staff_rules()
     _save_autorole()
     _save_hard_banned()
     _save_role_snapshots()
@@ -829,7 +830,7 @@ WHOLE_BOT_PREMIUM_ONLY_COMMANDS = {
     # Boosts & Vanity, incl. custom booster roles (whole category)
     "setboostchannel", "setvanitycode", "setvanityrole", "vanityconfig", "br",
     # Staff Tools (whole category)
-    "staffpsa", "task", "tasklist",
+    "staffpsa", "task", "tasklist", "acceptstaff", "setstaffrules",
     # Advanced admin/setup
     "backup", "restore", "listbackups", "deletebackup", "exportconfig",
     # Niche fun/utility
@@ -3110,7 +3111,7 @@ HELP_CATEGORIES = [
     ('💰', 'Economy & Games', ['balance', 'daily', 'weekly', 'work', 'rob', 'give', 'deposit', 'withdraw', 'leaderboard', 'gamblers', 'slots', 'blackjack', 'coinflip', 'dice', '8ball', 'trivia', 'hangman', 'tictactoe', 'numguess', 'rockpaperscissors', 'highlow', 'crash', 'games']),
     ('🎂', 'Birthdays', ['birthday', 'removebirthday', 'setbirthday', 'setbirthdaychannel', 'birthdaylist', 'settimezone']),
     ('🚀', 'Boosts & Vanity', ['setboostchannel', 'setvanitycode', 'setvanityrole', 'vanityconfig']),
-    ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist']),
+    ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist', 'acceptstaff', 'setstaffrules']),
     ('⚙️', 'Admin & Setup', ['setup', 'backup', 'restore', 'listbackups', 'deletebackup', 'exportconfig', 'setlogchannel', 'setwelcome', 'disablewelcome', 'sendwelcome', 'welcome', 'sendinvite', 'announce']),
     ('🎲', 'Fun & Utility', ['snipe', 'clearsnipe', 'editsnipe', 'quote', 'rules', 'cmds', 'help']),
 ]
@@ -11699,6 +11700,129 @@ async def tasklist(ctx, filter_status: str = None):
         text=f"Showing {shown} of {total} task(s)  ·  TrapAI Staff Tasks  ·  {ctx.guild.name}"
     )
     await ctx.send(embed=embed)
+
+
+# ============================================================
+# STAFF APPLICATIONS — accept flow
+# ============================================================
+
+# STAFF_RULES[guild_id] = "custom rules text" — optional per-guild override
+# for the rules shown to a member when they're accepted via ,acceptstaff.
+# Falls back to _DEFAULT_STAFF_RULES if never set.
+STAFF_RULES: dict[int, str] = _load_depth(_load_data("staff_rules", {}), 1)
+
+_DEFAULT_STAFF_RULES = (
+    "1️⃣ Treat every member with respect — no favoritism, no abuse of power.\n"
+    "2️⃣ Keep staff discussions and decisions confidential.\n"
+    "3️⃣ Only use your permissions for their intended purpose.\n"
+    "4️⃣ Stay active and communicate with the team if you'll be away.\n"
+    "5️⃣ Follow the chain of command — escalate what you're unsure about.\n"
+    "6️⃣ Lead by example: follow the server rules yourself.\n"
+    "7️⃣ Major actions (bans, role changes) should be logged and explainable."
+)
+
+
+def _save_staff_rules():
+    _save_data("staff_rules", _dump_depth(STAFF_RULES, 1))
+
+
+def _resolve_staff_rules(guild_id: int) -> str:
+    return STAFF_RULES.get(guild_id) or _DEFAULT_STAFF_RULES
+
+
+@bot.command()
+@_permitted_check(administrator=True)
+async def setstaffrules(ctx, *, text: str = None):
+    """
+    Set (or clear) this server's custom staff rules — shown in the DM sent
+    to a member when they're accepted via ,acceptstaff. Run with no text
+    to clear the override and fall back to the default rules.
+    Usage: ,setstaffrules <rules text>
+    """
+    if text is None:
+        had_override = STAFF_RULES.pop(ctx.guild.id, None) is not None
+        _save_staff_rules()
+        await ctx.send(
+            "↩️ Cleared this server's custom staff rules — falling back to the default."
+            if had_override else "ℹ️ No custom staff rules were set — already using the default."
+        )
+        return
+
+    STAFF_RULES[ctx.guild.id] = text
+    _save_staff_rules()
+    embed = discord.Embed(
+        title="✅ Staff Rules Updated",
+        description=text[:4000],
+        color=discord.Color.green(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_footer(text=f"Set by {ctx.author} • Shown to new staff via ,acceptstaff")
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+@_permitted_check(administrator=True)
+async def acceptstaff(ctx, member: discord.Member, role: discord.Role):
+    """
+    Accept a member's staff application — grants them the given role and
+    DMs them a welcome message with their new role and the staff rules.
+    Usage: ,acceptstaff @user @role
+    """
+    if role >= ctx.guild.me.top_role:
+        await ctx.send("❌ I can't grant a role higher than or equal to my own top role.", delete_after=8)
+        return
+    if role in member.roles:
+        await ctx.send(f"❌ {member.mention} already has {role.mention}.", delete_after=8)
+        return
+
+    try:
+        await member.add_roles(role, reason=f"Staff application accepted by {ctx.author}")
+    except (discord.Forbidden, discord.HTTPException) as e:
+        await ctx.send(f"❌ Couldn't grant that role: {e}", delete_after=10)
+        return
+
+    rules_text = _resolve_staff_rules(ctx.guild.id)
+    dm_embed = discord.Embed(
+        title="🎉 You've Been Accepted to the Staff Team!",
+        description=(
+            f"Congratulations — your staff application for **{ctx.guild.name}** has been **accepted**!\n\n"
+            f"**🏷️ Your Role:** {role.name}\n\n"
+            "Please read the staff rules below before you begin."
+        ),
+        color=discord.Color.green(),
+        timestamp=discord.utils.utcnow()
+    )
+    dm_embed.add_field(name="📋 Staff Rules", value=rules_text[:1024], inline=False)
+    if ctx.guild.icon:
+        dm_embed.set_thumbnail(url=ctx.guild.icon.url)
+    dm_embed.set_footer(text=f"TrapAI • {ctx.guild.name}")
+
+    dm_sent = True
+    try:
+        await member.send(embed=dm_embed)
+    except (discord.Forbidden, discord.HTTPException):
+        dm_sent = False
+
+    confirm = discord.Embed(
+        title="✅ Staff Application Accepted",
+        description=(
+            f"{member.mention} has been granted {role.mention} and welcomed to the team."
+            + ("" if dm_sent else "\n⚠️ Couldn't DM them — their DMs may be closed.")
+        ),
+        color=discord.Color.green(),
+        timestamp=discord.utils.utcnow()
+    )
+    confirm.set_footer(text=f"Accepted by {ctx.author}", icon_url=ctx.author.display_avatar.url)
+    await ctx.send(embed=confirm)
+
+    await log(ctx.guild, "mod", "Staff Application Accepted", None, discord.Color.green(),
+              fields=[
+                  ("👑 Accepted By",   f"{ctx.author.mention} (`{ctx.author.id}`)", True),
+                  ("🆕 New Staff",     f"{member.mention} (`{member.id}`)",          True),
+                  ("🏷️ Role Granted",  role.mention,                                 True),
+                  ("📨 DM Sent",       "✅ Yes" if dm_sent else "❌ No (DMs closed)", True),
+              ],
+              actor=ctx.author, target=member)
 
 
 # ============================================================
