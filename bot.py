@@ -5040,6 +5040,23 @@ async def on_voice_state_update(member, before, after):
     now = time.time()
     guild = member.guild
 
+    # ── Active enforcement for ,vcban / ,vckick ──────────────────────
+    # A channel overwrite of connect=False can be bypassed by anyone with
+    # guild-level Administrator, or a staff role with Move Members/Manage
+    # Channels — Discord lets those override per-channel denies entirely,
+    # so the overwrite alone isn't a real ban. Actively watch for a
+    # banned/kicked member landing in the channel anyway (staff, the
+    # owner re-adding them, whatever route) and immediately disconnect
+    # them again — no exceptions, regardless of who they are.
+    if after.channel:
+        vc_id = after.channel.id
+        if member.id in vc_banned.get(vc_id, set()) or member.id in vc_kicked.get(vc_id, set()):
+            try:
+                await member.move_to(None, reason="Still banned/kicked from this VC")
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+            return
+
     # ── Self-service unmute: joining a registered unmute VC instantly
     # clears their VC server mute AND server deafen, no staff needed, then
     # bounces them back out so the channel/slot is free for the next person.
@@ -6224,6 +6241,12 @@ async def vckick(ctx, member: discord.Member):
     ch = get_owned_temp_vc(ctx.author)
     if not ch:
         await ctx.send("❌ You must be in a VC you own or moderate.")
+        return
+    if member == ctx.author:
+        await ctx.send("❌ You can't VC kick yourself.")
+        return
+    if _is_vc_owner(member, ch):
+        await ctx.send("❌ You can't kick the VC owner.")
         return
     if not member.voice or member.voice.channel != ch:
         await ctx.send("❌ That user is not in your VC.")
