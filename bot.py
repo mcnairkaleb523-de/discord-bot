@@ -961,12 +961,25 @@ temp_vc_text_channels = _load_depth(_load_data("temp_vc_text_channels", {}), 1)
 vc_banned = {int(k): set(v) for k, v in _load_data("vc_banned", {}).items()}
 # vc_mods[vc_id] = {user_id, ...}  — users with VC-mod privileges
 vc_mods = {int(k): set(v) for k, v in _load_data("vc_mods", {}).items()}
+# vc_owner_bans[guild_id][owner_id] = {user_id, ...}  — persists across the
+# owner's temp VC being deleted and recreated. vc_banned above is scoped to
+# one specific channel ID, which gets wiped when that (empty) temp VC is
+# torn down — without this, a banned user could just wait the VC out and
+# rejoin the owner's next one.
+vc_owner_bans: dict[int, dict[int, set]] = {
+    int(gid): {int(uid): set(banned) for uid, banned in owners.items()}
+    for gid, owners in _load_data("vc_owner_bans", {}).items()
+}
 
 
 def _save_temp_vcs():
     _save_data("temp_vc_owners", _dump_depth(temp_vc_owners, 1))
     _save_data("temp_vc_text_channels", _dump_depth(temp_vc_text_channels, 1))
     _save_data("vc_banned", {str(vid): list(users) for vid, users in vc_banned.items()})
+    _save_data("vc_owner_bans", {
+        str(gid): {str(uid): list(banned) for uid, banned in owners.items()}
+        for gid, owners in vc_owner_bans.items()
+    })
     _save_data("vc_mods", {str(vid): list(users) for vid, users in vc_mods.items()})
 
 # jailed_users[(guild_id, user_id)] = asyncio.Task — the pending auto_unjail
@@ -5219,6 +5232,22 @@ async def on_voice_state_update(member, before, after):
         temp_vc_owners[new_vc.id] = member.id
         temp_vc_text_channels[new_vc.id] = new_vc.id
 
+        # Re-apply any bans this owner handed out on a previous temp VC —
+        # see vc_owner_bans above for why vc_banned alone isn't enough.
+        persisted_bans = vc_owner_bans.get(guild.id, {}).get(member.id, set())
+        if persisted_bans:
+            vc_banned[new_vc.id] = set()
+            for banned_id in persisted_bans:
+                banned_member = guild.get_member(banned_id)
+                if banned_member is None:
+                    continue
+                try:
+                    await new_vc.set_permissions(banned_member, connect=False, view_channel=False)
+                    vc_banned[new_vc.id].add(banned_id)
+                except discord.HTTPException:
+                    pass
+            _save_temp_vcs()
+
         await member.move_to(new_vc)
         await send_vc_control_panel(new_vc, member, new_vc)
 
@@ -6156,6 +6185,10 @@ async def vcban(ctx, member: discord.Member):
         return
     await ch.set_permissions(member, connect=False, view_channel=False)
     vc_banned.setdefault(ch.id, set()).add(member.id)
+    owner_id = temp_vc_owners.get(ch.id)
+    if owner_id is not None:
+        vc_owner_bans.setdefault(ctx.guild.id, {}).setdefault(owner_id, set()).add(member.id)
+    _save_temp_vcs()
     if member.voice and member.voice.channel == ch:
         await member.move_to(None)
     await ctx.send(embed=_vc_embed("🚫 VC Ban Applied", f"{member.mention} was banned from **{ch.name}**.", discord.Color.red()))
@@ -6170,6 +6203,10 @@ async def vcunban(ctx, member: discord.Member):
         return
     await ch.set_permissions(member, overwrite=None)
     vc_banned.get(ch.id, set()).discard(member.id)
+    owner_id = temp_vc_owners.get(ch.id)
+    if owner_id is not None:
+        vc_owner_bans.get(ctx.guild.id, {}).get(owner_id, set()).discard(member.id)
+    _save_temp_vcs()
     await ctx.send(embed=_vc_embed("✔️ VC Ban Removed", f"{member.mention} can join **{ch.name}** again.", discord.Color.green()))
     await _vc_announce(ctx.guild, ch, f"✔️ **{ctx.author.display_name}** unbanned **{member.display_name}**.")
 
