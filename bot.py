@@ -388,6 +388,8 @@ def _save_all_state() -> None:
     _save_role_vouch_pending()
     _save_protected_roles()
     _save_permitted_roles()
+    _save_staff_rules()
+    _save_staff_ticket_claims()
     _save_autorole()
     _save_hard_banned()
     _save_role_snapshots()
@@ -829,7 +831,7 @@ WHOLE_BOT_PREMIUM_ONLY_COMMANDS = {
     # Boosts & Vanity, incl. custom booster roles (whole category)
     "setboostchannel", "setvanitycode", "setvanityrole", "vanityconfig", "br",
     # Staff Tools (whole category)
-    "staffpsa", "task", "tasklist",
+    "staffpsa", "task", "tasklist", "acceptstaff", "setstaffrules", "staffleaderboard", "staffstats",
     # Advanced admin/setup
     "backup", "restore", "listbackups", "deletebackup", "exportconfig",
     # Niche fun/utility
@@ -1049,6 +1051,22 @@ def _save_invite_data():
     TICKET_PRIORITY,
     TICKET_LOCKED,
 ) = _load_tickets()
+
+# STAFF_TICKET_CLAIMS[guild_id][member_id] = total tickets ever claimed
+# (all-time, persisted) — TICKET_CLAIMED above only tracks currently-open
+# tickets and is cleared the moment one closes, so this is the durable
+# historical count behind ,staffstats / ,staffleaderboard.
+STAFF_TICKET_CLAIMS: dict[int, dict[int, int]] = _load_depth(_load_data("staff_ticket_claims", {}), 2)
+
+
+def _save_staff_ticket_claims():
+    _save_data("staff_ticket_claims", _dump_depth(STAFF_TICKET_CLAIMS, 2))
+
+
+def _record_ticket_claim(guild_id: int, member_id: int):
+    guild_counts = STAFF_TICKET_CLAIMS.setdefault(guild_id, {})
+    guild_counts[member_id] = guild_counts.get(member_id, 0) + 1
+    _save_staff_ticket_claims()
 
 # ── Vouch system ────────────────────────────────────────────
 # VOUCHES[guild_id][user_id] = count (net vouch score)
@@ -1429,6 +1447,7 @@ class TicketControlView(discord.ui.View):
 
         TICKET_CLAIMED[channel.id] = interaction.user.id
         _save_tickets()
+        _record_ticket_claim(interaction.guild.id, interaction.user.id)
         await _update_ticket_header_claim(channel, claimed_by=interaction.user)
 
         embed = discord.Embed(
@@ -3110,7 +3129,7 @@ HELP_CATEGORIES = [
     ('💰', 'Economy & Games', ['balance', 'daily', 'weekly', 'work', 'rob', 'give', 'deposit', 'withdraw', 'leaderboard', 'gamblers', 'slots', 'blackjack', 'coinflip', 'dice', '8ball', 'trivia', 'hangman', 'tictactoe', 'numguess', 'rockpaperscissors', 'highlow', 'crash', 'games']),
     ('🎂', 'Birthdays', ['birthday', 'removebirthday', 'setbirthday', 'setbirthdaychannel', 'birthdaylist', 'settimezone']),
     ('🚀', 'Boosts & Vanity', ['setboostchannel', 'setvanitycode', 'setvanityrole', 'vanityconfig']),
-    ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist']),
+    ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist', 'acceptstaff', 'setstaffrules', 'staffleaderboard', 'staffstats']),
     ('⚙️', 'Admin & Setup', ['setup', 'backup', 'restore', 'listbackups', 'deletebackup', 'exportconfig', 'setlogchannel', 'setwelcome', 'disablewelcome', 'sendwelcome', 'welcome', 'sendinvite', 'announce']),
     ('🎲', 'Fun & Utility', ['snipe', 'clearsnipe', 'editsnipe', 'quote', 'rules', 'cmds', 'help']),
 ]
@@ -6997,6 +7016,7 @@ async def claimticket(ctx):
 
     TICKET_CLAIMED[channel.id] = ctx.author.id
     _save_tickets()
+    _record_ticket_claim(ctx.guild.id, ctx.author.id)
     await _update_ticket_header_claim(channel, claimed_by=ctx.author)
 
     embed = discord.Embed(
@@ -9401,6 +9421,101 @@ async def modhistory(ctx, member: discord.Member = None, *, filter_action: str =
     await ctx.send(embed=embed)
 
 
+# ── Staff leaderboard / stats ──────────────────────────────────
+_STAFF_LEADERBOARD_ACTIONS = ["ban", "hardban", "jail", "kick", "timeout", "mute", "warn", "strip"]
+_STAFF_ACTION_LABELS = {
+    "ban": ("🔨", "Bans"), "hardban": ("🔴", "Hardbans"), "jail": ("🔒", "Jails"),
+    "kick": ("👢", "Kicks"), "timeout": ("⏳", "Timeouts"), "mute": ("🔇", "Mutes"),
+    "warn": ("⚠️", "Warns"), "strip": ("⚔️", "Strips"),
+}
+
+
+def _staff_action_counts(guild_id: int) -> dict[int, dict[str, int]]:
+    """{moderator_id: {"ban": n, "jail": n, ...}} — aggregated from
+    MOD_HISTORY (every target member's timeline) and regrouped by who
+    performed each action rather than who it was done to."""
+    counts: dict[int, dict[str, int]] = {}
+    for target_history in MOD_HISTORY.get(guild_id, {}).values():
+        for entry in target_history:
+            mod_id = entry.get("moderator_id")
+            action = entry.get("action")
+            if mod_id is None or action not in _STAFF_LEADERBOARD_ACTIONS:
+                continue
+            per_mod = counts.setdefault(mod_id, {})
+            per_mod[action] = per_mod.get(action, 0) + 1
+    return counts
+
+
+@bot.command()
+async def staffleaderboard(ctx):
+    """
+    Rank staff by total moderation actions (bans, jails, kicks, timeouts,
+    mutes, warns, hardbans, strips) plus tickets claimed. Usage: ,staffleaderboard
+    """
+    action_counts = _staff_action_counts(ctx.guild.id)
+    claim_counts = STAFF_TICKET_CLAIMS.get(ctx.guild.id, {})
+
+    totals: dict[int, int] = {}
+    for mod_id, counts in action_counts.items():
+        totals[mod_id] = totals.get(mod_id, 0) + sum(counts.values())
+    for mod_id, n in claim_counts.items():
+        totals[mod_id] = totals.get(mod_id, 0) + n
+
+    if not totals:
+        await ctx.send("📭 No staff moderation activity recorded yet.")
+        return
+
+    ranked = sorted(totals.items(), key=lambda kv: kv[1], reverse=True)[:15]
+    medals = ["🥇", "🥈", "🥉"]
+    lines = []
+    for i, (mod_id, total) in enumerate(ranked, 1):
+        member = ctx.guild.get_member(mod_id)
+        name = member.mention if member else f"`{mod_id}` (left server)"
+        rank_icon = medals[i - 1] if i <= 3 else f"`#{i}`"
+        claims = claim_counts.get(mod_id, 0)
+        lines.append(f"{rank_icon} {name} — **{total}** total actions ({claims} 🎫 claimed)")
+
+    embed = discord.Embed(
+        title="🏆 Staff Leaderboard",
+        description="Ranked by total moderation actions + tickets claimed.\n\n" + "\n".join(lines),
+        color=discord.Color.gold(),
+        timestamp=discord.utils.utcnow()
+    )
+    if ctx.guild.icon:
+        embed.set_thumbnail(url=ctx.guild.icon.url)
+    embed.set_footer(text=f"TrapAI • {ctx.guild.name} • ,staffstats @user for a full breakdown")
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+async def staffstats(ctx, member: discord.Member = None):
+    """Show one staff member's moderation action breakdown. Usage: ,staffstats [@member]"""
+    member = member or ctx.author
+    action_counts = _staff_action_counts(ctx.guild.id).get(member.id, {})
+    claims = STAFF_TICKET_CLAIMS.get(ctx.guild.id, {}).get(member.id, 0)
+    total = sum(action_counts.values()) + claims
+
+    if total == 0:
+        await ctx.send(f"📭 No recorded staff activity for {member.mention}.")
+        return
+
+    embed = discord.Embed(
+        title=f"📊 Staff Stats — {member}",
+        color=discord.Color.blurple(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    for action in _STAFF_LEADERBOARD_ACTIONS:
+        n = action_counts.get(action, 0)
+        if n:
+            icon, label = _STAFF_ACTION_LABELS[action]
+            embed.add_field(name=f"{icon} {label}", value=str(n), inline=True)
+    embed.add_field(name="🎫 Tickets Claimed", value=str(claims), inline=True)
+    embed.add_field(name="Σ Total Actions", value=str(total), inline=True)
+    embed.set_footer(text=f"TrapAI Staff Stats • {ctx.guild.name}")
+    await ctx.send(embed=embed)
+
+
 @bot.command()
 @_permitted_check(moderate_members=True)
 async def clearwarnings(ctx, member: discord.Member):
@@ -11699,6 +11814,129 @@ async def tasklist(ctx, filter_status: str = None):
         text=f"Showing {shown} of {total} task(s)  ·  TrapAI Staff Tasks  ·  {ctx.guild.name}"
     )
     await ctx.send(embed=embed)
+
+
+# ============================================================
+# STAFF APPLICATIONS — accept flow
+# ============================================================
+
+# STAFF_RULES[guild_id] = "custom rules text" — optional per-guild override
+# for the rules shown to a member when they're accepted via ,acceptstaff.
+# Falls back to _DEFAULT_STAFF_RULES if never set.
+STAFF_RULES: dict[int, str] = _load_depth(_load_data("staff_rules", {}), 1)
+
+_DEFAULT_STAFF_RULES = (
+    "1️⃣ Treat every member with respect — no favoritism, no abuse of power.\n"
+    "2️⃣ Keep staff discussions and decisions confidential.\n"
+    "3️⃣ Only use your permissions for their intended purpose.\n"
+    "4️⃣ Stay active and communicate with the team if you'll be away.\n"
+    "5️⃣ Follow the chain of command — escalate what you're unsure about.\n"
+    "6️⃣ Lead by example: follow the server rules yourself.\n"
+    "7️⃣ Major actions (bans, role changes) should be logged and explainable."
+)
+
+
+def _save_staff_rules():
+    _save_data("staff_rules", _dump_depth(STAFF_RULES, 1))
+
+
+def _resolve_staff_rules(guild_id: int) -> str:
+    return STAFF_RULES.get(guild_id) or _DEFAULT_STAFF_RULES
+
+
+@bot.command()
+@_permitted_check(administrator=True)
+async def setstaffrules(ctx, *, text: str = None):
+    """
+    Set (or clear) this server's custom staff rules — shown in the DM sent
+    to a member when they're accepted via ,acceptstaff. Run with no text
+    to clear the override and fall back to the default rules.
+    Usage: ,setstaffrules <rules text>
+    """
+    if text is None:
+        had_override = STAFF_RULES.pop(ctx.guild.id, None) is not None
+        _save_staff_rules()
+        await ctx.send(
+            "↩️ Cleared this server's custom staff rules — falling back to the default."
+            if had_override else "ℹ️ No custom staff rules were set — already using the default."
+        )
+        return
+
+    STAFF_RULES[ctx.guild.id] = text
+    _save_staff_rules()
+    embed = discord.Embed(
+        title="✅ Staff Rules Updated",
+        description=text[:4000],
+        color=discord.Color.green(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_footer(text=f"Set by {ctx.author} • Shown to new staff via ,acceptstaff")
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+@_permitted_check(administrator=True)
+async def acceptstaff(ctx, member: discord.Member, role: discord.Role):
+    """
+    Accept a member's staff application — grants them the given role and
+    DMs them a welcome message with their new role and the staff rules.
+    Usage: ,acceptstaff @user @role
+    """
+    if role >= ctx.guild.me.top_role:
+        await ctx.send("❌ I can't grant a role higher than or equal to my own top role.", delete_after=8)
+        return
+    if role in member.roles:
+        await ctx.send(f"❌ {member.mention} already has {role.mention}.", delete_after=8)
+        return
+
+    try:
+        await member.add_roles(role, reason=f"Staff application accepted by {ctx.author}")
+    except (discord.Forbidden, discord.HTTPException) as e:
+        await ctx.send(f"❌ Couldn't grant that role: {e}", delete_after=10)
+        return
+
+    rules_text = _resolve_staff_rules(ctx.guild.id)
+    dm_embed = discord.Embed(
+        title="🎉 You've Been Accepted to the Staff Team!",
+        description=(
+            f"Congratulations — your staff application for **{ctx.guild.name}** has been **accepted**!\n\n"
+            f"**🏷️ Your Role:** {role.name}\n\n"
+            "Please read the staff rules below before you begin."
+        ),
+        color=discord.Color.green(),
+        timestamp=discord.utils.utcnow()
+    )
+    dm_embed.add_field(name="📋 Staff Rules", value=rules_text[:1024], inline=False)
+    if ctx.guild.icon:
+        dm_embed.set_thumbnail(url=ctx.guild.icon.url)
+    dm_embed.set_footer(text=f"TrapAI • {ctx.guild.name}")
+
+    dm_sent = True
+    try:
+        await member.send(embed=dm_embed)
+    except (discord.Forbidden, discord.HTTPException):
+        dm_sent = False
+
+    confirm = discord.Embed(
+        title="✅ Staff Application Accepted",
+        description=(
+            f"{member.mention} has been granted {role.mention} and welcomed to the team."
+            + ("" if dm_sent else "\n⚠️ Couldn't DM them — their DMs may be closed.")
+        ),
+        color=discord.Color.green(),
+        timestamp=discord.utils.utcnow()
+    )
+    confirm.set_footer(text=f"Accepted by {ctx.author}", icon_url=ctx.author.display_avatar.url)
+    await ctx.send(embed=confirm)
+
+    await log(ctx.guild, "mod", "Staff Application Accepted", None, discord.Color.green(),
+              fields=[
+                  ("👑 Accepted By",   f"{ctx.author.mention} (`{ctx.author.id}`)", True),
+                  ("🆕 New Staff",     f"{member.mention} (`{member.id}`)",          True),
+                  ("🏷️ Role Granted",  role.mention,                                 True),
+                  ("📨 DM Sent",       "✅ Yes" if dm_sent else "❌ No (DMs closed)", True),
+              ],
+              actor=ctx.author, target=member)
 
 
 # ============================================================
