@@ -2594,7 +2594,7 @@ class VCControlView(discord.ui.View):
         vc = await self._check(interaction)
         if not vc:
             return
-        await vc.set_permissions(interaction.guild.default_role, connect=False)
+        await _vc_lock(vc)
         embed = discord.Embed(description="🔒 VC **locked** — only permitted users can join.", color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
         await _vc_announce(interaction.guild, vc, f"🔒 **{interaction.user.display_name}** locked the VC.")
@@ -2604,7 +2604,7 @@ class VCControlView(discord.ui.View):
         vc = await self._check(interaction)
         if not vc:
             return
-        await vc.set_permissions(interaction.guild.default_role, connect=True)
+        await _vc_unlock(vc)
         embed = discord.Embed(description="🔓 VC **unlocked** — anyone can join.", color=discord.Color.green())
         await interaction.response.send_message(embed=embed, ephemeral=True)
         await _vc_announce(interaction.guild, vc, f"🔓 **{interaction.user.display_name}** unlocked the VC.")
@@ -2779,6 +2779,115 @@ async def _vc_announce(guild: discord.Guild, vc: discord.VoiceChannel, message: 
 
 
 # ============================================================
+# SHARED VC ACTION HELPERS
+# ============================================================
+# The ,vc* text commands and the control-panel buttons/modals both need
+# to perform these exact same actions. They used to each have their own
+# copy of the logic, which is how the buttons quietly fell out of sync
+# with fixes made to the text commands (vc_locked/vc_kicked/vc_owner_bans/
+# vc_owner_mods tracking, self/owner guards, etc. only ever landed in one
+# of the two places). Routing both through these means a fix only has to
+# happen once. Each returns an error string on failure, None on success,
+# so callers can format the error however fits their context (embed vs.
+# ephemeral interaction reply).
+
+async def _vc_lock(ch):
+    await ch.set_permissions(ch.guild.default_role, connect=False)
+    vc_locked.add(ch.id)
+    _save_temp_vcs()
+
+
+async def _vc_unlock(ch):
+    await ch.set_permissions(ch.guild.default_role, connect=True)
+    vc_locked.discard(ch.id)
+    _save_temp_vcs()
+
+
+async def _vc_kick_member(ch, actor, member):
+    if member == actor:
+        return "❌ You can't VC kick yourself."
+    if _is_vc_owner(member, ch):
+        return "❌ You can't kick the VC owner."
+    if not member.voice or member.voice.channel != ch:
+        return "❌ That user is not in your VC."
+    await member.move_to(None)
+    await ch.set_permissions(member, connect=False)
+    vc_kicked.setdefault(ch.id, set()).add(member.id)
+    _save_temp_vcs()
+    return None
+
+
+async def _vc_ban_member(ch, guild_id, actor, member):
+    if member == actor:
+        return "❌ You cannot VC ban yourself."
+    if _is_vc_owner(member, ch):
+        return "❌ You can't ban the VC owner."
+    await ch.set_permissions(member, connect=False, view_channel=False)
+    vc_banned.setdefault(ch.id, set()).add(member.id)
+    owner_id = temp_vc_owners.get(ch.id)
+    if owner_id is not None:
+        vc_owner_bans.setdefault(guild_id, {}).setdefault(owner_id, set()).add(member.id)
+    _save_temp_vcs()
+    if member.voice and member.voice.channel == ch:
+        await member.move_to(None)
+    return None
+
+
+async def _vc_unban_member(ch, guild_id, member):
+    await ch.set_permissions(member, overwrite=None)
+    vc_banned.get(ch.id, set()).discard(member.id)
+    owner_id = temp_vc_owners.get(ch.id)
+    if owner_id is not None:
+        vc_owner_bans.get(guild_id, {}).get(owner_id, set()).discard(member.id)
+    _save_temp_vcs()
+
+
+async def _vc_permit_member(ch, guild_id, member):
+    await ch.set_permissions(member, connect=True, view_channel=True)
+    # A permit lifts any standing ban too — see the text-command version
+    # of ,vcpermit for why this matters.
+    vc_banned.get(ch.id, set()).discard(member.id)
+    owner_id = temp_vc_owners.get(ch.id)
+    if owner_id is not None:
+        vc_owner_bans.get(guild_id, {}).get(owner_id, set()).discard(member.id)
+    _save_temp_vcs()
+
+
+async def _vc_transfer_ownership(ch, guild, member):
+    if not member.voice or member.voice.channel != ch:
+        return "❌ That user must be in your VC."
+    old_owner_id = temp_vc_owners.get(ch.id)
+    old_owner = guild.get_member(old_owner_id) if old_owner_id else None
+    temp_vc_owners[ch.id] = member.id
+    _save_temp_vcs()
+    await ch.set_permissions(member, manage_channels=True, manage_permissions=True, move_members=True, connect=True, speak=True)
+    # Revoke the previous owner's channel-admin overwrite — otherwise
+    # they'd keep native Discord control even though the bot now
+    # considers someone else the owner.
+    if old_owner and old_owner.id != member.id:
+        try:
+            await ch.set_permissions(old_owner, overwrite=None)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+    text_id = temp_vc_text_channels.get(ch.id)
+    if text_id:
+        text_ch = guild.get_channel(text_id)
+        if text_ch:
+            await text_ch.set_permissions(member, view_channel=True, send_messages=True, read_message_history=True)
+    return None
+
+
+async def _vc_add_mod(ch, guild_id, actor, member):
+    if not member.voice or member.voice.channel != ch:
+        return "❌ That user must be in your VC."
+    vc_mods.setdefault(ch.id, set()).add(member.id)
+    vc_owner_mods.setdefault(guild_id, {}).setdefault(actor.id, set()).add(member.id)
+    _save_temp_vcs()
+    await ch.set_permissions(member, move_members=True, mute_members=True, deafen_members=True, manage_channels=True)
+    return None
+
+
+# ============================================================
 # MODALS — one per button action that needs input
 # ============================================================
 
@@ -2882,7 +2991,7 @@ class VCPermitModal(discord.ui.Modal, title="✅ Permit User"):
         if not member:
             await interaction.response.send_message("❌ Member not found in this server.", ephemeral=True)
             return
-        await self.vc.set_permissions(member, connect=True, view_channel=True)
+        await _vc_permit_member(self.vc, self.guild.id, member)
         await interaction.response.send_message(f"✅ **{member.display_name}** can now join.", ephemeral=True)
         await _vc_announce(interaction.guild, self.vc, f"✅ **{interaction.user.display_name}** permitted **{member.display_name}** to join.")
 
@@ -2906,11 +3015,11 @@ class VCKickModal(discord.ui.Modal, title="👢 Kick from VC"):
         if not member:
             await interaction.response.send_message("❌ Member not found.", ephemeral=True)
             return
-        if not member.voice or member.voice.channel != self.vc:
-            await interaction.response.send_message("❌ That user is not in your VC.", ephemeral=True)
+        err = await _vc_kick_member(self.vc, interaction.user, member)
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
             return
-        await member.move_to(None)
-        await interaction.response.send_message(f"👢 **{member.display_name}** was kicked from the VC.", ephemeral=True)
+        await interaction.response.send_message(f"👢 **{member.display_name}** was kicked from the VC and can't rejoin until the owner leaves the call.", ephemeral=True)
         await _vc_announce(interaction.guild, self.vc, f"👢 **{interaction.user.display_name}** kicked **{member.display_name}** from the VC.")
 
 
@@ -2933,13 +3042,10 @@ class VCBanModal(discord.ui.Modal, title="🚫 Ban from VC"):
         if not member:
             await interaction.response.send_message("❌ Member not found.", ephemeral=True)
             return
-        if _is_vc_owner(member, self.vc):
-            await interaction.response.send_message("❌ You can't ban the VC owner.", ephemeral=True)
+        err = await _vc_ban_member(self.vc, self.guild.id, interaction.user, member)
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
             return
-        await self.vc.set_permissions(member, connect=False, view_channel=False)
-        vc_banned.setdefault(self.vc.id, set()).add(member.id)
-        if member.voice and member.voice.channel == self.vc:
-            await member.move_to(None)
         await interaction.response.send_message(f"🚫 **{member.display_name}** was banned from the VC.", ephemeral=True)
         await _vc_announce(interaction.guild, self.vc, f"🚫 **{interaction.user.display_name}** banned **{member.display_name}** from the VC.")
 
@@ -2963,8 +3069,7 @@ class VCUnbanModal(discord.ui.Modal, title="✔️ Unban from VC"):
         if not member:
             await interaction.response.send_message("❌ Member not found.", ephemeral=True)
             return
-        await self.vc.set_permissions(member, overwrite=None)
-        vc_banned.get(self.vc.id, set()).discard(member.id)
+        await _vc_unban_member(self.vc, self.guild.id, member)
         await interaction.response.send_message(f"✔️ **{member.display_name}** can join again.", ephemeral=True)
         await _vc_announce(interaction.guild, self.vc, f"✔️ **{interaction.user.display_name}** unbanned **{member.display_name}**.")
 
@@ -3090,30 +3195,10 @@ class VCTransferModal(discord.ui.Modal, title="👑 Transfer VC Ownership"):
         if not member:
             await interaction.response.send_message("❌ Member not found.", ephemeral=True)
             return
-        if not member.voice or member.voice.channel != self.vc:
-            await interaction.response.send_message("❌ That user must be in the VC.", ephemeral=True)
+        err = await _vc_transfer_ownership(self.vc, self.guild, member)
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
             return
-
-        old_owner_id = temp_vc_owners.get(self.vc.id)
-        old_owner = self.guild.get_member(old_owner_id) if old_owner_id else None
-
-        temp_vc_owners[self.vc.id] = member.id
-        await self.vc.set_permissions(member, manage_channels=True, manage_permissions=True, move_members=True, connect=True, speak=True)
-        # Revoke the previous owner's channel-admin overwrite (manage_channels/
-        # manage_permissions/move_members) — otherwise they'd keep full native
-        # Discord control (rename, delete, edit overwrites, move anyone) even
-        # though the bot now considers someone else the owner.
-        if old_owner and old_owner.id != member.id:
-            try:
-                await self.vc.set_permissions(old_owner, overwrite=None)
-            except (discord.Forbidden, discord.HTTPException):
-                pass
-        # Grant new owner text access
-        text_id = temp_vc_text_channels.get(self.vc.id)
-        if text_id:
-            text_ch = self.guild.get_channel(text_id)
-            if text_ch:
-                await text_ch.set_permissions(member, view_channel=True, send_messages=True, read_message_history=True)
         await interaction.response.send_message(f"👑 Ownership transferred to **{member.display_name}**.", ephemeral=True)
         await _vc_announce(interaction.guild, self.vc, f"👑 **{interaction.user.display_name}** transferred ownership to **{member.display_name}**.")
 
@@ -3137,11 +3222,10 @@ class VCAddModModal(discord.ui.Modal, title="🛡 Add VC Moderator"):
         if not member:
             await interaction.response.send_message("❌ Member not found.", ephemeral=True)
             return
-        if not member.voice or member.voice.channel != self.vc:
-            await interaction.response.send_message("❌ That user must be in the VC.", ephemeral=True)
+        err = await _vc_add_mod(self.vc, self.guild.id, interaction.user, member)
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
             return
-        vc_mods.setdefault(self.vc.id, set()).add(member.id)
-        await self.vc.set_permissions(member, move_members=True, mute_members=True, deafen_members=True, manage_channels=True)
         await interaction.response.send_message(f"🛡 **{member.display_name}** is now a VC moderator.", ephemeral=True)
         await _vc_announce(interaction.guild, self.vc, f"🛡 **{interaction.user.display_name}** made **{member.display_name}** a VC moderator.")
 
@@ -6160,9 +6244,7 @@ async def vclock(ctx):
     if not ch:
         await ctx.send("❌ You must be in a VC you own or moderate.")
         return
-    await ch.set_permissions(ctx.guild.default_role, connect=False)
-    vc_locked.add(ch.id)
-    _save_temp_vcs()
+    await _vc_lock(ch)
     await ctx.send(embed=_vc_embed("🔒 VC Locked", f"Only permitted users can now join **{ch.name}** — enforced for everyone, staff and the server owner included."))
     await _vc_announce(ctx.guild, ch, f"🔒 **{ctx.author.display_name}** locked the VC.")
 
@@ -6173,9 +6255,7 @@ async def vcunlock(ctx):
     if not ch:
         await ctx.send("❌ You must be in a VC you own or moderate.")
         return
-    await ch.set_permissions(ctx.guild.default_role, connect=True)
-    vc_locked.discard(ch.id)
-    _save_temp_vcs()
+    await _vc_unlock(ch)
     await ctx.send(embed=_vc_embed("🔓 VC Unlocked", f"**{ch.name}** is now open to everyone.", discord.Color.green()))
     await _vc_announce(ctx.guild, ch, f"🔓 **{ctx.author.display_name}** unlocked the VC.")
 
@@ -6266,19 +6346,10 @@ async def vckick(ctx, member: discord.Member):
     if not ch:
         await ctx.send("❌ You must be in a VC you own or moderate.")
         return
-    if member == ctx.author:
-        await ctx.send("❌ You can't VC kick yourself.")
+    err = await _vc_kick_member(ch, ctx.author, member)
+    if err:
+        await ctx.send(err)
         return
-    if _is_vc_owner(member, ch):
-        await ctx.send("❌ You can't kick the VC owner.")
-        return
-    if not member.voice or member.voice.channel != ch:
-        await ctx.send("❌ That user is not in your VC.")
-        return
-    await member.move_to(None)
-    await ch.set_permissions(member, connect=False)
-    vc_kicked.setdefault(ch.id, set()).add(member.id)
-    _save_temp_vcs()
     await ctx.send(embed=_vc_embed("👢 Member Kicked", f"{member.mention} was kicked from **{ch.name}** and can't rejoin until the owner leaves the call.", discord.Color.orange()))
     await _vc_announce(ctx.guild, ch, f"👢 **{ctx.author.display_name}** kicked **{member.display_name}** from the VC.")
 
@@ -6289,20 +6360,10 @@ async def vcban(ctx, member: discord.Member):
     if not ch:
         await ctx.send("❌ You must be in a VC you own or moderate.")
         return
-    if member == ctx.author:
-        await ctx.send("❌ You cannot VC ban yourself.")
+    err = await _vc_ban_member(ch, ctx.guild.id, ctx.author, member)
+    if err:
+        await ctx.send(err)
         return
-    if _is_vc_owner(member, ch):
-        await ctx.send("❌ You can't ban the VC owner.")
-        return
-    await ch.set_permissions(member, connect=False, view_channel=False)
-    vc_banned.setdefault(ch.id, set()).add(member.id)
-    owner_id = temp_vc_owners.get(ch.id)
-    if owner_id is not None:
-        vc_owner_bans.setdefault(ctx.guild.id, {}).setdefault(owner_id, set()).add(member.id)
-    _save_temp_vcs()
-    if member.voice and member.voice.channel == ch:
-        await member.move_to(None)
     await ctx.send(embed=_vc_embed("🚫 VC Ban Applied", f"{member.mention} was banned from **{ch.name}**.", discord.Color.red()))
     await _vc_announce(ctx.guild, ch, f"🚫 **{ctx.author.display_name}** banned **{member.display_name}** from the VC.")
 
@@ -6313,12 +6374,7 @@ async def vcunban(ctx, member: discord.Member):
     if not ch:
         await ctx.send("❌ You must be in a VC you own or moderate.")
         return
-    await ch.set_permissions(member, overwrite=None)
-    vc_banned.get(ch.id, set()).discard(member.id)
-    owner_id = temp_vc_owners.get(ch.id)
-    if owner_id is not None:
-        vc_owner_bans.get(ctx.guild.id, {}).get(owner_id, set()).discard(member.id)
-    _save_temp_vcs()
+    await _vc_unban_member(ch, ctx.guild.id, member)
     await ctx.send(embed=_vc_embed("✔️ VC Ban Removed", f"{member.mention} can join **{ch.name}** again.", discord.Color.green()))
     await _vc_announce(ctx.guild, ch, f"✔️ **{ctx.author.display_name}** unbanned **{member.display_name}**.")
 
@@ -6329,15 +6385,7 @@ async def vcpermit(ctx, member: discord.Member):
     if not ch:
         await ctx.send("❌ You must be in a VC you own or moderate.")
         return
-    await ch.set_permissions(member, connect=True, view_channel=True)
-    # A permit should also lift any standing ban — otherwise it looks
-    # like it worked, but the ban's overwrite quietly reasserts itself
-    # (or comes back) the next time this owner's VC gets recreated.
-    vc_banned.get(ch.id, set()).discard(member.id)
-    owner_id = temp_vc_owners.get(ch.id)
-    if owner_id is not None:
-        vc_owner_bans.get(ctx.guild.id, {}).get(owner_id, set()).discard(member.id)
-    _save_temp_vcs()
+    await _vc_permit_member(ch, ctx.guild.id, member)
     await ctx.send(embed=_vc_embed("✅ Access Granted", f"{member.mention} can now join **{ch.name}**.", discord.Color.green()))
     await _vc_announce(ctx.guild, ch, f"✅ **{ctx.author.display_name}** permitted **{member.display_name}** to join.")
 
@@ -6398,28 +6446,10 @@ async def vctransfer(ctx, member: discord.Member):
     if not ch:
         await ctx.send("❌ You must be the **owner** of a temporary VC.")
         return
-    if not member.voice or member.voice.channel != ch:
-        await ctx.send("❌ That user must be in your VC.")
+    err = await _vc_transfer_ownership(ch, ctx.guild, member)
+    if err:
+        await ctx.send(err)
         return
-
-    old_owner_id = temp_vc_owners.get(ch.id)
-    old_owner = ctx.guild.get_member(old_owner_id) if old_owner_id else None
-
-    temp_vc_owners[ch.id] = member.id
-    _save_temp_vcs()
-    await ch.set_permissions(member, manage_channels=True, manage_permissions=True, move_members=True, connect=True, speak=True)
-    # Revoke the previous owner's channel-admin overwrite — see VCTransferModal
-    # for why this matters (otherwise they keep native Discord control).
-    if old_owner and old_owner.id != member.id:
-        try:
-            await ch.set_permissions(old_owner, overwrite=None)
-        except (discord.Forbidden, discord.HTTPException):
-            pass
-    text_id = temp_vc_text_channels.get(ch.id)
-    if text_id:
-        text_ch = ctx.guild.get_channel(text_id)
-        if text_ch:
-            await text_ch.set_permissions(member, view_channel=True, send_messages=True, read_message_history=True)
     await ctx.send(embed=_vc_embed("👑 Ownership Transferred", f"{member.mention} is now the owner of **{ch.name}**.", discord.Color.gold()))
     await _vc_announce(ctx.guild, ch, f"👑 **{ctx.author.display_name}** transferred ownership to **{member.display_name}**.")
 
@@ -6487,13 +6517,10 @@ async def vcmod(ctx, member: discord.Member):
     if not ch:
         await ctx.send("❌ You must be the **owner** of a temporary VC.")
         return
-    if not member.voice or member.voice.channel != ch:
-        await ctx.send("❌ That user must be in your VC.")
+    err = await _vc_add_mod(ch, ctx.guild.id, ctx.author, member)
+    if err:
+        await ctx.send(err)
         return
-    vc_mods.setdefault(ch.id, set()).add(member.id)
-    vc_owner_mods.setdefault(ctx.guild.id, {}).setdefault(ctx.author.id, set()).add(member.id)
-    _save_temp_vcs()
-    await ch.set_permissions(member, move_members=True, mute_members=True, deafen_members=True, manage_channels=True)
     await ctx.send(embed=_vc_embed("🛡 VC Mod Granted", f"{member.mention} is now a VC moderator in **{ch.name}**.", discord.Color.blurple()))
     await _vc_announce(ctx.guild, ch, f"🛡 **{ctx.author.display_name}** made **{member.display_name}** a VC moderator.")
 
