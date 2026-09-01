@@ -164,6 +164,36 @@ def _load_warnings():
     }
 
 
+def _save_staff_warnings():
+    _save_data("staff_warnings", {
+        str(gid): {str(uid): _dt_to_iso(entries) for uid, entries in udict.items()}
+        for gid, udict in STAFF_WARNINGS.items()
+    })
+
+
+def _load_staff_warnings():
+    raw = _load_data("staff_warnings", {})
+    return {
+        int(gid): {int(uid): _dt_from_iso(entries) for uid, entries in udict.items()}
+        for gid, udict in raw.items()
+    }
+
+
+def _save_staff_strikes():
+    _save_data("staff_strikes", {
+        str(gid): {str(uid): _dt_to_iso(entries) for uid, entries in udict.items()}
+        for gid, udict in STAFF_STRIKES.items()
+    })
+
+
+def _load_staff_strikes():
+    raw = _load_data("staff_strikes", {})
+    return {
+        int(gid): {int(uid): _dt_from_iso(entries) for uid, entries in udict.items()}
+        for gid, udict in raw.items()
+    }
+
+
 def _save_mod_history():
     _save_data("mod_history", {
         str(gid): {str(uid): _dt_to_iso(entries) for uid, entries in udict.items()}
@@ -378,6 +408,8 @@ def _save_all_state() -> None:
     the high-churn stuff between those explicit saves."""
     _save_log_channel_overrides()
     _save_warnings()
+    _save_staff_warnings()
+    _save_staff_strikes()
     _save_mod_history()
     _save_tickets()
     _save_guild_ticket_types()
@@ -472,6 +504,7 @@ LOG_CHANNELS = {
     "vanity":         "vanity-logs",
     "polls":          "poll-logs",
     "vouches":        "vouch-logs",
+    "staff":          "staff-logs",
 }
 
 # Per-guild channel overrides: LOG_CHANNEL_OVERRIDES[guild_id][key] = channel_id
@@ -588,6 +621,9 @@ UNVERIFIED_ROLE = "🚫 Unverified"
 VERIFIED_ROLE = "✅ Ballin Member"
 JAIL_ROLE = "🔒 Jailed"
 MUTED_ROLE = "🔇 Muted"
+# Ownership-tier role allowed to issue formal staff warnings/strikes —
+# see the "STAFF DISCIPLINE" section below.
+STAFF_DISCIPLINE_ROLE = "os"
 
 # ── Self-service unmute VC(s) ─────────────────────────────────
 # UNMUTE_VC_CHANNELS[guild_id] = [channel_id, ...] — voice channels a member
@@ -832,6 +868,7 @@ WHOLE_BOT_PREMIUM_ONLY_COMMANDS = {
     "setboostchannel", "setvanitycode", "setvanityrole", "vanityconfig", "br",
     # Staff Tools (whole category)
     "staffpsa", "task", "tasklist", "acceptstaff", "denystaff", "setstaffrules", "staffleaderboard", "staffstats",
+    "staffwarn", "staffstrike", "staffwarnings", "staffstrikes", "clearstaffwarnings", "clearstaffstrikes",
     # Advanced admin/setup
     "backup", "restore", "listbackups", "deletebackup", "exportconfig",
     # Niche fun/utility
@@ -1037,6 +1074,13 @@ def _clear_jail_expiry(guild_id: int, user_id: int) -> None:
 # WARNINGS[guild_id][user_id] = [ {reason, moderator, moderator_id, time}, ... ]
 WARNINGS = _load_warnings()
 
+# STAFF_WARNINGS/STAFF_STRIKES[guild_id][user_id] = [ {reason, moderator,
+# moderator_id, time}, ... ] — same shape as WARNINGS, but a separate track
+# for formal staff discipline, issued only by the "os" role (see
+# STAFF_DISCIPLINE_ROLE / _os_only_check above).
+STAFF_WARNINGS = _load_staff_warnings()
+STAFF_STRIKES = _load_staff_strikes()
+
 # ── Moderation history ────────────────────────────────────────
 # MOD_HISTORY[guild_id][user_id] = [ {action, moderator, moderator_id, reason, extra, time}, ... ]
 # A single searchable timeline of every punishment action taken against a
@@ -1164,6 +1208,17 @@ def _permitted_check(**perms):
                 return True
         raise commands.MissingPermissions(missing)
 
+    return commands.check(predicate)
+
+
+def _os_only_check():
+    """Restricts a command to members holding the STAFF_DISCIPLINE_ROLE
+    ("os") — used for the staff warning/strike system, which is meant to
+    stay with Ownership-tier only rather than every administrator."""
+    async def predicate(ctx):
+        if ctx.guild is None:
+            return False
+        return discord.utils.get(ctx.author.roles, name=STAFF_DISCIPLINE_ROLE) is not None
     return commands.check(predicate)
 
 # Pending vouch-role requests awaiting owner approval
@@ -1302,6 +1357,7 @@ _LOG_ICONS = {
     "lockdowns":    "🔐", "unlockdowns":"🔓", "clears":     "🧹",
     "purges":       "🗑️",  "hides":      "👁️",  "strips":     "⚔️",
     "massroles":    "📦", "roleall":    "📢", "invites":    "📨",
+    "staff warning": "⚠️", "staff strike": "❌",
 }
 
 
@@ -3252,7 +3308,7 @@ HELP_CATEGORIES = [
     ('💰', 'Economy & Games', ['balance', 'daily', 'weekly', 'work', 'rob', 'give', 'deposit', 'withdraw', 'leaderboard', 'gamblers', 'slots', 'blackjack', 'coinflip', 'dice', '8ball', 'trivia', 'hangman', 'tictactoe', 'numguess', 'rockpaperscissors', 'highlow', 'crash', 'games']),
     ('🎂', 'Birthdays', ['birthday', 'removebirthday', 'setbirthday', 'setbirthdaychannel', 'birthdaylist', 'settimezone']),
     ('🚀', 'Boosts & Vanity', ['setboostchannel', 'setvanitycode', 'setvanityrole', 'vanityconfig']),
-    ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist', 'acceptstaff', 'denystaff', 'setstaffrules', 'staffleaderboard', 'staffstats']),
+    ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist', 'acceptstaff', 'denystaff', 'setstaffrules', 'staffleaderboard', 'staffstats', 'staffwarn', 'staffstrike', 'staffwarnings', 'staffstrikes', 'clearstaffwarnings', 'clearstaffstrikes']),
     ('⚙️', 'Admin & Setup', ['setup', 'backup', 'restore', 'listbackups', 'deletebackup', 'exportconfig', 'setlogchannel', 'setwelcome', 'disablewelcome', 'sendwelcome', 'welcome', 'sendinvite', 'announce', 'setpermittedrole', 'setbotbio']),
     ('🎲', 'Fun & Utility', ['snipe', 'clearsnipe', 'editsnipe', 'quote', 'rules', 'cmds', 'help']),
 ]
@@ -9752,6 +9808,256 @@ async def clearwarnings(ctx, member: discord.Member):
     await ctx.send(embed=embed)
     await log(ctx.guild, "warns", "Warnings Cleared", None, discord.Color.green(),
               fields=[("🛡 Moderator", f"{ctx.author.mention} (`{ctx.author.id}`)", True), ("👤 User", f"{member.mention} (`{member.id}`)", True), ("🗑️ Warnings Removed", str(count), True)],
+              actor=ctx.author, target=member)
+
+
+# ============================================================
+# STAFF DISCIPLINE — os-only warnings & strikes
+# ============================================================
+# Separate from the regular ,warn/,warnings system above — this track is
+# specifically for disciplining STAFF (not members), and issuing one is
+# restricted to whoever holds the "os" role (see STAFF_DISCIPLINE_ROLE /
+# _os_only_check).
+
+@bot.command()
+@_os_only_check()
+async def staffwarn(ctx, member: discord.Member, *, reason="No reason provided"):
+    """
+    Issue a formal staff warning (separate from ,warn, which is for
+    regular members). Restricted to the "os" role.
+    Usage: ,staffwarn @staffmember [reason]
+    """
+    if member == ctx.author:
+        await ctx.send("❌ You can't staff-warn yourself.")
+        return
+
+    guild_warns = STAFF_WARNINGS.setdefault(ctx.guild.id, {})
+    user_warns = guild_warns.setdefault(member.id, [])
+    user_warns.append({
+        "reason": reason,
+        "moderator": str(ctx.author),
+        "moderator_id": ctx.author.id,
+        "time": discord.utils.utcnow()
+    })
+    _save_staff_warnings()
+    count = len(user_warns)
+
+    dm_sent = True
+    dm_embed = discord.Embed(
+        title="⚠️ Staff Warning Issued",
+        description=(
+            f"You've received a formal staff warning in **{ctx.guild.name}**.\n\n"
+            f"**Reason:** {reason}\n"
+            f"**Total staff warnings:** {count}"
+        ),
+        color=discord.Color.orange(),
+        timestamp=discord.utils.utcnow()
+    )
+    dm_embed.set_footer(text=f"TrapAI • {ctx.guild.name}")
+    try:
+        await member.send(embed=dm_embed)
+    except (discord.Forbidden, discord.HTTPException):
+        dm_sent = False
+
+    embed = discord.Embed(
+        title="⚠️ Staff Warning Issued",
+        description=(
+            f"{member.mention} has received a formal staff warning."
+            + ("" if dm_sent else "\n⚠️ Couldn't DM them — their DMs may be closed.")
+        ),
+        color=discord.Color.orange(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(name="Reason", value=reason, inline=False)
+    embed.add_field(name="Total Staff Warnings", value=str(count), inline=False)
+    embed.set_footer(text=f"Issued by {ctx.author}", icon_url=ctx.author.display_avatar.url)
+    await ctx.send(embed=embed)
+
+    await log(ctx.guild, "staff", "Staff Warning Issued", None, discord.Color.orange(),
+              fields=[
+                  ("👑 Issued By", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
+                  ("⚠️ Staff Member", f"{member.mention} (`{member.id}`)", True),
+                  ("🔢 Total Staff Warnings", str(count), True),
+                  ("📝 Reason", reason, False),
+                  ("📨 DM Sent", "✅ Yes" if dm_sent else "❌ No (DMs closed)", True),
+              ],
+              actor=ctx.author, target=member)
+
+
+@bot.command()
+@_os_only_check()
+async def staffstrike(ctx, member: discord.Member, *, reason="No reason provided"):
+    """
+    Issue a formal staff strike — a more serious escalation than a staff
+    warning. Restricted to the "os" role.
+    Usage: ,staffstrike @staffmember [reason]
+    """
+    if member == ctx.author:
+        await ctx.send("❌ You can't staff-strike yourself.")
+        return
+
+    guild_strikes = STAFF_STRIKES.setdefault(ctx.guild.id, {})
+    user_strikes = guild_strikes.setdefault(member.id, [])
+    user_strikes.append({
+        "reason": reason,
+        "moderator": str(ctx.author),
+        "moderator_id": ctx.author.id,
+        "time": discord.utils.utcnow()
+    })
+    _save_staff_strikes()
+    count = len(user_strikes)
+
+    dm_sent = True
+    dm_embed = discord.Embed(
+        title="❌ Staff Strike Issued",
+        description=(
+            f"You've received a formal staff strike in **{ctx.guild.name}**.\n\n"
+            f"**Reason:** {reason}\n"
+            f"**Total staff strikes:** {count}"
+        ),
+        color=discord.Color.red(),
+        timestamp=discord.utils.utcnow()
+    )
+    dm_embed.set_footer(text=f"TrapAI • {ctx.guild.name}")
+    try:
+        await member.send(embed=dm_embed)
+    except (discord.Forbidden, discord.HTTPException):
+        dm_sent = False
+
+    embed = discord.Embed(
+        title="❌ Staff Strike Issued",
+        description=(
+            f"{member.mention} has received a formal staff strike."
+            + ("" if dm_sent else "\n⚠️ Couldn't DM them — their DMs may be closed.")
+        ),
+        color=discord.Color.red(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(name="Reason", value=reason, inline=False)
+    embed.add_field(name="Total Staff Strikes", value=str(count), inline=False)
+    embed.set_footer(text=f"Issued by {ctx.author}", icon_url=ctx.author.display_avatar.url)
+    await ctx.send(embed=embed)
+
+    await log(ctx.guild, "staff", "Staff Strike Issued", None, discord.Color.red(),
+              fields=[
+                  ("👑 Issued By", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
+                  ("❌ Staff Member", f"{member.mention} (`{member.id}`)", True),
+                  ("🔢 Total Staff Strikes", str(count), True),
+                  ("📝 Reason", reason, False),
+                  ("📨 DM Sent", "✅ Yes" if dm_sent else "❌ No (DMs closed)", True),
+              ],
+              actor=ctx.author, target=member)
+
+
+@bot.command()
+@_os_only_check()
+async def staffwarnings(ctx, member: discord.Member = None):
+    """View a staff member's formal warning history. Usage: ,staffwarnings [@member]"""
+    member = member or ctx.author
+    entries = STAFF_WARNINGS.get(ctx.guild.id, {}).get(member.id, [])
+
+    embed = discord.Embed(
+        title=f"⚠️ Staff Warnings — {member}",
+        color=discord.Color.orange(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+
+    if not entries:
+        embed.description = "This staff member has no formal warnings."
+    else:
+        for index, entry in enumerate(entries, start=1):
+            t = entry["time"]
+            time_str = discord.utils.format_dt(t, "F") if hasattr(t, "tzinfo") else str(t)[:19] + " UTC"
+            embed.add_field(
+                name=f"Warning #{index}",
+                value=(
+                    f"**Reason:** {entry['reason']}\n"
+                    f"**Issued By:** {entry['moderator']}\n"
+                    f"**Date:** {time_str}"
+                ),
+                inline=False
+            )
+
+    embed.set_footer(text=f"Requested by {ctx.author}")
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+@_os_only_check()
+async def staffstrikes(ctx, member: discord.Member = None):
+    """View a staff member's formal strike history. Usage: ,staffstrikes [@member]"""
+    member = member or ctx.author
+    entries = STAFF_STRIKES.get(ctx.guild.id, {}).get(member.id, [])
+
+    embed = discord.Embed(
+        title=f"❌ Staff Strikes — {member}",
+        color=discord.Color.red(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+
+    if not entries:
+        embed.description = "This staff member has no formal strikes."
+    else:
+        for index, entry in enumerate(entries, start=1):
+            t = entry["time"]
+            time_str = discord.utils.format_dt(t, "F") if hasattr(t, "tzinfo") else str(t)[:19] + " UTC"
+            embed.add_field(
+                name=f"Strike #{index}",
+                value=(
+                    f"**Reason:** {entry['reason']}\n"
+                    f"**Issued By:** {entry['moderator']}\n"
+                    f"**Date:** {time_str}"
+                ),
+                inline=False
+            )
+
+    embed.set_footer(text=f"Requested by {ctx.author}")
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+@_os_only_check()
+async def clearstaffwarnings(ctx, member: discord.Member):
+    """Clear a staff member's formal warnings. Usage: ,clearstaffwarnings @member"""
+    guild_warns = STAFF_WARNINGS.setdefault(ctx.guild.id, {})
+    count = len(guild_warns.get(member.id, []))
+    guild_warns[member.id] = []
+    _save_staff_warnings()
+
+    embed = discord.Embed(
+        title="✅ Staff Warnings Cleared",
+        description=f"Cleared **{count}** staff warning(s) for {member.mention}.",
+        color=discord.Color.green(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_footer(text=f"Cleared by {ctx.author}", icon_url=ctx.author.display_avatar.url)
+    await ctx.send(embed=embed)
+    await log(ctx.guild, "staff", "Staff Warnings Cleared", None, discord.Color.green(),
+              fields=[("👑 Cleared By", f"{ctx.author.mention} (`{ctx.author.id}`)", True), ("👤 Staff Member", f"{member.mention} (`{member.id}`)", True), ("🗑️ Warnings Removed", str(count), True)],
+              actor=ctx.author, target=member)
+
+
+@bot.command()
+@_os_only_check()
+async def clearstaffstrikes(ctx, member: discord.Member):
+    """Clear a staff member's formal strikes. Usage: ,clearstaffstrikes @member"""
+    guild_strikes = STAFF_STRIKES.setdefault(ctx.guild.id, {})
+    count = len(guild_strikes.get(member.id, []))
+    guild_strikes[member.id] = []
+    _save_staff_strikes()
+
+    embed = discord.Embed(
+        title="✅ Staff Strikes Cleared",
+        description=f"Cleared **{count}** staff strike(s) for {member.mention}.",
+        color=discord.Color.green(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_footer(text=f"Cleared by {ctx.author}", icon_url=ctx.author.display_avatar.url)
+    await ctx.send(embed=embed)
+    await log(ctx.guild, "staff", "Staff Strikes Cleared", None, discord.Color.green(),
+              fields=[("👑 Cleared By", f"{ctx.author.mention} (`{ctx.author.id}`)", True), ("👤 Staff Member", f"{member.mention} (`{member.id}`)", True), ("🗑️ Strikes Removed", str(count), True)],
               actor=ctx.author, target=member)
 
 
