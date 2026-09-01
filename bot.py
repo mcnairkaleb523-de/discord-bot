@@ -8992,21 +8992,35 @@ async def role_remove(ctx, member: discord.Member, role: discord.Role):
 
 @role_group.command(name="create")
 @_permitted_check(manage_roles=True)
-async def role_create(ctx, name: str, color: str = None, hoist: bool = False):
+async def role_create(ctx, *, rest: str):
     """
-    Create a new role. Color is optional — a name (red, blue, gold, ...) or
-    hex (#ff0000) both work, and an unrecognized/invalid color never blocks
-    creation, it just falls back to no color.
-    Usage: ,role create "Ballin Member" [color] [hoist]
+    Create a new role — just type the name normally, spaces and all, no
+    quotes needed. Optionally end it with a color (red, blue, gold, ...
+    or hex like ff0000) and/or the word "hoist" to display the role
+    separately in the member list; both are peeled off the end if present,
+    everything else becomes the name.
+    Usage: ,role create Ballin Member
+           ,role create Ballin Member gold
+           ,role create Ballin Member gold hoist
     """
+    tokens = rest.split()
+
+    hoist = False
+    if tokens and tokens[-1].lower() == "hoist":
+        hoist = True
+        tokens.pop()
+
     disc_color = discord.Color.default()
-    color_note = ""
-    if color:
-        parsed = _parse_ticket_color(color)
+    if tokens:
+        parsed = _parse_ticket_color(tokens[-1])
         if parsed is not None:
             disc_color = parsed
-        else:
-            color_note = f"\n⚠️ Didn't recognize color `{color}` — created with no color instead."
+            tokens.pop()
+
+    name = " ".join(tokens).strip()
+    if not name:
+        await ctx.send("❌ You need to give the role a name. Usage: `,role create <name> [color] [hoist]`", delete_after=10)
+        return
 
     new_role = await ctx.guild.create_role(
         name=name, color=disc_color, hoist=hoist,
@@ -9014,7 +9028,7 @@ async def role_create(ctx, name: str, color: str = None, hoist: bool = False):
     )
     embed = discord.Embed(
         title="✅ Role Created",
-        description=f"{new_role.mention} has been created.{color_note}",
+        description=f"{new_role.mention} has been created.",
         color=new_role.color,
         timestamp=discord.utils.utcnow()
     )
