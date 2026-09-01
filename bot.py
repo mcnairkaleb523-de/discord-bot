@@ -970,6 +970,13 @@ vc_owner_bans: dict[int, dict[int, set]] = {
     int(gid): {int(uid): set(banned) for uid, banned in owners.items()}
     for gid, owners in _load_data("vc_owner_bans", {}).items()
 }
+# vc_owner_mods[guild_id][owner_id] = {user_id, ...}  — same idea as
+# vc_owner_bans, for VC-mod grants: vc_mods is scoped to one channel
+# instance and gets wiped when that temp VC empties out and is deleted.
+vc_owner_mods: dict[int, dict[int, set]] = {
+    int(gid): {int(uid): set(mods) for uid, mods in owners.items()}
+    for gid, owners in _load_data("vc_owner_mods", {}).items()
+}
 
 
 def _save_temp_vcs():
@@ -979,6 +986,10 @@ def _save_temp_vcs():
     _save_data("vc_owner_bans", {
         str(gid): {str(uid): list(banned) for uid, banned in owners.items()}
         for gid, owners in vc_owner_bans.items()
+    })
+    _save_data("vc_owner_mods", {
+        str(gid): {str(uid): list(mods) for uid, mods in owners.items()}
+        for gid, owners in vc_owner_mods.items()
     })
     _save_data("vc_mods", {str(vid): list(users) for vid, users in vc_mods.items()})
 
@@ -5232,9 +5243,14 @@ async def on_voice_state_update(member, before, after):
         temp_vc_owners[new_vc.id] = member.id
         temp_vc_text_channels[new_vc.id] = new_vc.id
 
-        # Re-apply any bans this owner handed out on a previous temp VC —
-        # see vc_owner_bans above for why vc_banned alone isn't enough.
+        # Re-apply any bans/mods this owner handed out on a previous temp VC —
+        # see vc_owner_bans/vc_owner_mods above for why vc_banned/vc_mods
+        # alone aren't enough (both are scoped to the old, now-deleted
+        # channel ID).
         persisted_bans = vc_owner_bans.get(guild.id, {}).get(member.id, set())
+        persisted_mods = vc_owner_mods.get(guild.id, {}).get(member.id, set())
+        state_changed = False
+
         if persisted_bans:
             vc_banned[new_vc.id] = set()
             for banned_id in persisted_bans:
@@ -5244,8 +5260,24 @@ async def on_voice_state_update(member, before, after):
                 try:
                     await new_vc.set_permissions(banned_member, connect=False, view_channel=False)
                     vc_banned[new_vc.id].add(banned_id)
+                    state_changed = True
                 except discord.HTTPException:
                     pass
+
+        if persisted_mods:
+            vc_mods[new_vc.id] = set()
+            for mod_id in persisted_mods:
+                mod_member = guild.get_member(mod_id)
+                if mod_member is None:
+                    continue
+                try:
+                    await new_vc.set_permissions(mod_member, move_members=True, mute_members=True, deafen_members=True, manage_channels=True)
+                    vc_mods[new_vc.id].add(mod_id)
+                    state_changed = True
+                except discord.HTTPException:
+                    pass
+
+        if state_changed:
             _save_temp_vcs()
 
         await member.move_to(new_vc)
@@ -6218,6 +6250,14 @@ async def vcpermit(ctx, member: discord.Member):
         await ctx.send("❌ You must be in a VC you own or moderate.")
         return
     await ch.set_permissions(member, connect=True, view_channel=True)
+    # A permit should also lift any standing ban — otherwise it looks
+    # like it worked, but the ban's overwrite quietly reasserts itself
+    # (or comes back) the next time this owner's VC gets recreated.
+    vc_banned.get(ch.id, set()).discard(member.id)
+    owner_id = temp_vc_owners.get(ch.id)
+    if owner_id is not None:
+        vc_owner_bans.get(ctx.guild.id, {}).get(owner_id, set()).discard(member.id)
+    _save_temp_vcs()
     await ctx.send(embed=_vc_embed("✅ Access Granted", f"{member.mention} can now join **{ch.name}**.", discord.Color.green()))
     await _vc_announce(ctx.guild, ch, f"✅ **{ctx.author.display_name}** permitted **{member.display_name}** to join.")
 
@@ -6286,6 +6326,7 @@ async def vctransfer(ctx, member: discord.Member):
     old_owner = ctx.guild.get_member(old_owner_id) if old_owner_id else None
 
     temp_vc_owners[ch.id] = member.id
+    _save_temp_vcs()
     await ch.set_permissions(member, manage_channels=True, manage_permissions=True, move_members=True, connect=True, speak=True)
     # Revoke the previous owner's channel-admin overwrite — see VCTransferModal
     # for why this matters (otherwise they keep native Discord control).
@@ -6329,6 +6370,7 @@ async def vcclaim(ctx):
         return
 
     temp_vc_owners[ch.id] = ctx.author.id
+    _save_temp_vcs()
     await ch.set_permissions(ctx.author, manage_channels=True, manage_permissions=True, move_members=True, connect=True, speak=True)
     # Revoke the old owner's channel-admin overwrite — see VCTransferModal
     # for why this matters (otherwise they keep native Discord control).
@@ -6369,6 +6411,8 @@ async def vcmod(ctx, member: discord.Member):
         await ctx.send("❌ That user must be in your VC.")
         return
     vc_mods.setdefault(ch.id, set()).add(member.id)
+    vc_owner_mods.setdefault(ctx.guild.id, {}).setdefault(ctx.author.id, set()).add(member.id)
+    _save_temp_vcs()
     await ch.set_permissions(member, move_members=True, mute_members=True, deafen_members=True, manage_channels=True)
     await ctx.send(embed=_vc_embed("🛡 VC Mod Granted", f"{member.mention} is now a VC moderator in **{ch.name}**.", discord.Color.blurple()))
     await _vc_announce(ctx.guild, ch, f"🛡 **{ctx.author.display_name}** made **{member.display_name}** a VC moderator.")
@@ -6381,6 +6425,8 @@ async def vcremovemod(ctx, member: discord.Member):
         await ctx.send("❌ You must be the **owner** of a temporary VC.")
         return
     vc_mods.get(ch.id, set()).discard(member.id)
+    vc_owner_mods.get(ctx.guild.id, {}).get(ctx.author.id, set()).discard(member.id)
+    _save_temp_vcs()
     await ch.set_permissions(member, overwrite=None)
     await ctx.send(embed=_vc_embed("🗑️ VC Mod Removed", f"{member.mention} is no longer a VC moderator in **{ch.name}**.", discord.Color.orange()))
     await _vc_announce(ctx.guild, ch, f"🗑️ **{ctx.author.display_name}** removed **{member.display_name}** as VC moderator.")
