@@ -967,6 +967,13 @@ vc_mods = {int(k): set(v) for k, v in _load_data("vc_mods", {}).items()}
 # NOT owner-scoped/persisted across VC recreation like vc_owner_bans — a
 # kick is only meant to last for the current session, not forever.
 vc_kicked = {int(k): set(v) for k, v in _load_data("vc_kicked", {}).items()}
+# vc_locked = {vc_id, ...}  — VCs currently locked via ,vclock. Tracked
+# separately from the connect=False overwrite on @everyone because that
+# overwrite alone doesn't actually stop anyone with guild-level
+# Administrator (or the server owner, who bypasses all permission checks
+# entirely) from walking in anyway — see the active-enforcement check in
+# on_voice_state_update.
+vc_locked = set(_load_data("vc_locked", []))
 # vc_owner_bans[guild_id][owner_id] = {user_id, ...}  — persists across the
 # owner's temp VC being deleted and recreated. vc_banned above is scoped to
 # one specific channel ID, which gets wiped when that (empty) temp VC is
@@ -990,6 +997,7 @@ def _save_temp_vcs():
     _save_data("temp_vc_text_channels", _dump_depth(temp_vc_text_channels, 1))
     _save_data("vc_banned", {str(vid): list(users) for vid, users in vc_banned.items()})
     _save_data("vc_kicked", {str(vid): list(users) for vid, users in vc_kicked.items()})
+    _save_data("vc_locked", list(vc_locked))
     _save_data("vc_owner_bans", {
         str(gid): {str(uid): list(banned) for uid, banned in owners.items()}
         for gid, owners in vc_owner_bans.items()
@@ -3302,6 +3310,7 @@ async def _sweep_temp_vcs():
             vc_banned.pop(vc_id, None)
             vc_mods.pop(vc_id, None)
             vc_kicked.pop(vc_id, None)
+            vc_locked.discard(vc_id)
     _save_temp_vcs()
 
 
@@ -5040,6 +5049,33 @@ async def on_voice_state_update(member, before, after):
     now = time.time()
     guild = member.guild
 
+    # ── Active enforcement for ,vcban / ,vckick / ,vclock ─────────────
+    # A channel overwrite of connect=False can be bypassed by anyone with
+    # guild-level Administrator, a staff role with Move Members/Manage
+    # Channels, or the server owner (who bypasses every permission check
+    # Discord has, always) — so the overwrite alone isn't a real ban or
+    # lock for any of them. Actively watch for someone landing in the
+    # channel anyway and immediately disconnect them again — no
+    # exceptions, regardless of who they are.
+    if after.channel:
+        vc_id = after.channel.id
+        if member.id in vc_banned.get(vc_id, set()) or member.id in vc_kicked.get(vc_id, set()):
+            try:
+                await member.move_to(None, reason="Still banned/kicked from this VC")
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+            return
+        if vc_id in vc_locked:
+            is_owner = member.id == temp_vc_owners.get(vc_id)
+            is_mod = member.id in vc_mods.get(vc_id, set())
+            is_permitted = after.channel.overwrites_for(member).connect is True
+            if not (is_owner or is_mod or is_permitted):
+                try:
+                    await member.move_to(None, reason="This VC is locked")
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+                return
+
     # ── Self-service unmute: joining a registered unmute VC instantly
     # clears their VC server mute AND server deafen, no staff needed, then
     # bounces them back out so the channel/slot is free for the next person.
@@ -5341,6 +5377,7 @@ async def on_voice_state_update(member, before, after):
             vc_banned.pop(before.channel.id, None)
             vc_mods.pop(before.channel.id, None)
             vc_kicked.pop(before.channel.id, None)
+            vc_locked.discard(before.channel.id)
 
 
 @bot.event
@@ -6124,7 +6161,9 @@ async def vclock(ctx):
         await ctx.send("❌ You must be in a VC you own or moderate.")
         return
     await ch.set_permissions(ctx.guild.default_role, connect=False)
-    await ctx.send(embed=_vc_embed("🔒 VC Locked", f"Only permitted users can now join **{ch.name}**."))
+    vc_locked.add(ch.id)
+    _save_temp_vcs()
+    await ctx.send(embed=_vc_embed("🔒 VC Locked", f"Only permitted users can now join **{ch.name}** — enforced for everyone, staff and the server owner included."))
     await _vc_announce(ctx.guild, ch, f"🔒 **{ctx.author.display_name}** locked the VC.")
 
 
@@ -6135,6 +6174,8 @@ async def vcunlock(ctx):
         await ctx.send("❌ You must be in a VC you own or moderate.")
         return
     await ch.set_permissions(ctx.guild.default_role, connect=True)
+    vc_locked.discard(ch.id)
+    _save_temp_vcs()
     await ctx.send(embed=_vc_embed("🔓 VC Unlocked", f"**{ch.name}** is now open to everyone.", discord.Color.green()))
     await _vc_announce(ctx.guild, ch, f"🔓 **{ctx.author.display_name}** unlocked the VC.")
 
@@ -6224,6 +6265,12 @@ async def vckick(ctx, member: discord.Member):
     ch = get_owned_temp_vc(ctx.author)
     if not ch:
         await ctx.send("❌ You must be in a VC you own or moderate.")
+        return
+    if member == ctx.author:
+        await ctx.send("❌ You can't VC kick yourself.")
+        return
+    if _is_vc_owner(member, ch):
+        await ctx.send("❌ You can't kick the VC owner.")
         return
     if not member.voice or member.voice.channel != ch:
         await ctx.send("❌ That user is not in your VC.")
