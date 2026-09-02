@@ -462,6 +462,7 @@ async def _autosave_loop():
     while not bot.is_closed():
         await asyncio.sleep(30)
         _save_all_state()
+        await _sweep_expired_staff_warnings()
 
 
 # Maps each log key → the default text-channel name the bot will search for.
@@ -627,6 +628,8 @@ STAFF_DISCIPLINE_ROLE = "os"
 # Reaching exactly this many strikes auto-terminates a staff member (all
 # removable roles stripped, same exemptions as ,strip) — see ,staffstrike.
 STAFF_TERMINATION_STRIKES = 3
+# ,staffwarn entries older than this auto-expire — see _sweep_expired_staff_warnings().
+STAFF_WARNING_EXPIRY_DAYS = 14
 
 # ── Self-service unmute VC(s) ─────────────────────────────────
 # UNMUTE_VC_CHANNELS[guild_id] = [channel_id, ...] — voice channels a member
@@ -9891,6 +9894,35 @@ async def clearwarnings(ctx, member: discord.Member):
 # specifically for disciplining STAFF (not members), and issuing one is
 # restricted to whoever holds the "os" role (see STAFF_DISCIPLINE_ROLE /
 # _os_only_check).
+
+async def _sweep_expired_staff_warnings():
+    """Drop ,staffwarn entries older than STAFF_WARNING_EXPIRY_DAYS. Called
+    periodically from the autosave loop, same as the jail/temp-VC sweeps.
+    Logs a summary per guild when anything actually expires."""
+    cutoff = discord.utils.utcnow() - timedelta(days=STAFF_WARNING_EXPIRY_DAYS)
+    changed = False
+    for guild_id, guild_warns in list(STAFF_WARNINGS.items()):
+        expired_for = {}
+        for member_id, entries in list(guild_warns.items()):
+            kept = [e for e in entries if e.get("time") and e["time"] >= cutoff]
+            removed = len(entries) - len(kept)
+            if removed:
+                guild_warns[member_id] = kept
+                expired_for[member_id] = removed
+                changed = True
+        if expired_for:
+            guild = bot.get_guild(guild_id)
+            if guild:
+                lines = [f"• <@{uid}> — {n} warning(s)" for uid, n in expired_for.items()]
+                await log(guild, "staff", "Staff Warnings Auto-Expired", None, discord.Color.dark_grey(),
+                          fields=[
+                              ("🗓️ Expired After", f"{STAFF_WARNING_EXPIRY_DAYS} days", True),
+                              ("🔢 Total Expired", str(sum(expired_for.values())), True),
+                              ("👤 Affected", "\n".join(lines)[:1024], False),
+                          ])
+    if changed:
+        _save_staff_warnings()
+
 
 @bot.command()
 @_os_only_check()
