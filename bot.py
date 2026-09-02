@@ -4491,6 +4491,9 @@ async def on_member_update(before, after):
                 pass
             continue  # Skip normal role-add log for this role
 
+        if added_roles or removed_roles:
+            mod, mod_reason = await _find_recent_mod(after.guild, discord.AuditLogAction.member_role_update, member=after)
+
         for role in added_roles:
             if role.id in protected:
                 continue  # Already handled above
@@ -4501,11 +4504,13 @@ async def on_member_update(before, after):
                 None,
                 discord.Color.green(),
                 fields=[
-                    ("👤 Member",  f"{after.mention} (`{after.id}`)", True),
-                    ("🏷️ Role",    f"{role.mention} (`{role.id}`)",   True),
-                    ("📌 Position", str(role.position),                True),
+                    ("👤 Member",    f"{after.mention} (`{after.id}`)",     True),
+                    ("🏷️ Role",      f"{role.mention} (`{role.id}`)",       True),
+                    ("👑 Added By",  mod.mention if mod else "*Unknown*", True),
+                    ("📌 Position",  str(role.position),                   True),
+                    ("📝 Reason",    mod_reason or "*No reason provided*", False),
                 ],
-                target=after
+                actor=mod, target=after
             )
 
         for role in removed_roles:
@@ -4516,14 +4521,20 @@ async def on_member_update(before, after):
                 None,
                 discord.Color.red(),
                 fields=[
-                    ("👤 Member",  f"{after.mention} (`{after.id}`)", True),
-                    ("🏷️ Role",    f"{role.mention} (`{role.id}`)",   True),
-                    ("📌 Position", str(role.position),                True),
+                    ("👤 Member",     f"{after.mention} (`{after.id}`)",     True),
+                    ("🏷️ Role",       f"{role.mention} (`{role.id}`)",       True),
+                    ("👑 Removed By", mod.mention if mod else "*Unknown*", True),
+                    ("📌 Position",   str(role.position),                   True),
+                    ("📝 Reason",     mod_reason or "*No reason provided*", False),
                 ],
-                target=after
+                actor=mod, target=after
             )
 
     if before.nick != after.nick:
+        nick_mod, nick_reason = await _find_recent_mod(
+            after.guild, discord.AuditLogAction.member_update, member=after,
+            attr="nick", expected=after.nick
+        )
         await log(
             after.guild,
             "nicknames",
@@ -4531,16 +4542,19 @@ async def on_member_update(before, after):
             None,
             discord.Color.blurple(),
             fields=[
-                ("👤 Member",    f"{after.mention} (`{after.id}`)",  True),
-                ("📝 Old Nick",  before.nick or before.name,          True),
-                ("📝 New Nick",  after.nick  or after.name,           True),
+                ("👤 Member",    f"{after.mention} (`{after.id}`)",         True),
+                ("👑 Changed By", nick_mod.mention if nick_mod else "*Unknown*", True),
+                ("📝 Old Nick",  before.nick or before.name,                  True),
+                ("📝 New Nick",  after.nick  or after.name,                   True),
+                ("📝 Reason",    nick_reason or "*No reason provided*",       False),
             ],
-            target=after
+            actor=nick_mod, target=after
         )
 
 
 @bot.event
 async def on_guild_role_create(role):
+    mod, reason = await _find_recent_mod(role.guild, discord.AuditLogAction.role_create)
     await log(
         role.guild,
         "role_create",
@@ -4548,16 +4562,19 @@ async def on_guild_role_create(role):
         None,
         discord.Color.green(),
         fields=[
-            ("✨ Role",       f"{role.mention} (`{role.id}`)", True),
-            ("🎨 Color",      str(role.color),                 True),
-            ("📌 Hoisted",    str(role.hoist),                 True),
-            ("💬 Mentionable", str(role.mentionable),          True),
-        ]
+            ("✨ Role",        f"{role.mention} (`{role.id}`)",       True),
+            ("👑 Created By",  mod.mention if mod else "*Unknown*", True),
+            ("🎨 Color",       str(role.color),                       True),
+            ("📌 Hoisted",     str(role.hoist),                       True),
+            ("💬 Mentionable", str(role.mentionable),                 True),
+        ],
+        actor=mod
     )
 
 
 @bot.event
 async def on_guild_role_delete(role):
+    mod, reason = await _find_recent_mod(role.guild, discord.AuditLogAction.role_delete)
     await log(
         role.guild,
         "role_delete",
@@ -4565,11 +4582,13 @@ async def on_guild_role_delete(role):
         None,
         discord.Color.red(),
         fields=[
-            ("🗑️ Role Name", f"`{role.name}`",  True),
-            ("🆔 Role ID",   str(role.id),       True),
-            ("🎨 Color",     str(role.color),    True),
-            ("👥 Had Members", str(len(role.members)), True),
-        ]
+            ("🗑️ Role Name",  f"`{role.name}`",                     True),
+            ("🆔 Role ID",     str(role.id),                          True),
+            ("👑 Deleted By",  mod.mention if mod else "*Unknown*", True),
+            ("🎨 Color",       str(role.color),                       True),
+            ("👥 Had Members", str(len(role.members)),                True),
+        ],
+        actor=mod
     )
 
     # ── Anti-nuke: track rapid role deletions ─────────────────
@@ -5144,14 +5163,16 @@ async def _vanity_sweep_loop():
         await asyncio.sleep(900)
 
 
-async def _find_voice_mod(guild, action, *, member=None, channel=None, attr=None, expected=None, window=6):
+async def _find_recent_mod(guild, action, *, member=None, channel=None, attr=None, expected=None, window=6):
     """
-    Best-effort audit-log lookup for who performed a recent voice action
-    (disconnect, move, server mute/deafen) affecting `member`. Discord's audit
-    log doesn't always link move/disconnect entries to a specific member, so
-    this matches on recency (+ channel/attribute where possible) and returns
-    (None, None) when nothing plausible is found within `window` seconds —
-    meaning the member most likely triggered it themselves.
+    Best-effort audit-log lookup for who performed a recent action
+    (voice disconnect/move/mute/deafen, role add/remove/create/delete,
+    nickname change, ...) affecting `member`. Discord's audit log doesn't
+    always link entries to a specific member, so this matches on recency
+    (+ channel/attribute where possible) and returns (None, None) when
+    nothing plausible is found within `window` seconds — meaning the
+    member most likely triggered it themselves, or the audit log entry
+    just isn't resolvable.
     """
     me = guild.me
     if not me or not me.guild_permissions.view_audit_log:
@@ -5261,7 +5282,7 @@ async def on_voice_state_update(member, before, after):
             guild_vc_stats = VC_STATS.setdefault(guild.id, {})
             guild_vc_stats[member.id] = guild_vc_stats.get(member.id, 0) + int(now - joined)
 
-        mod, reason = await _find_voice_mod(guild, discord.AuditLogAction.member_disconnect, member=member)
+        mod, reason = await _find_recent_mod(guild, discord.AuditLogAction.member_disconnect, member=member)
         if mod:
             await log(guild, "vc", "VC Disconnected (by Staff)",
                       f"**{member.display_name}** was disconnected from {before.channel.mention} by {mod.mention}.",
@@ -5294,7 +5315,7 @@ async def on_voice_state_update(member, before, after):
         if not member.bot:
             vc_join_time[(guild.id, member.id)] = now
 
-        mod, reason = await _find_voice_mod(guild, discord.AuditLogAction.member_move, member=member, channel=after.channel)
+        mod, reason = await _find_recent_mod(guild, discord.AuditLogAction.member_move, member=member, channel=after.channel)
         if mod:
             await log(guild, "vc", "VC Moved (by Staff)",
                       f"**{member.display_name}** was moved from {before.channel.mention} to {after.channel.mention} by {mod.mention}.",
@@ -5320,7 +5341,7 @@ async def on_voice_state_update(member, before, after):
 
     # ── Server mute / unmute (staff-imposed only; only while still connected) ──
     if before.channel is not None and after.channel is not None and before.mute != after.mute:
-        mod, reason = await _find_voice_mod(
+        mod, reason = await _find_recent_mod(
             guild, discord.AuditLogAction.member_update, member=member,
             attr="mute", expected=after.mute
         )
@@ -5346,7 +5367,7 @@ async def on_voice_state_update(member, before, after):
 
     # ── Server deafen / undeafen (staff-imposed only; only while still connected) ──
     if before.channel is not None and after.channel is not None and before.deaf != after.deaf:
-        mod, reason = await _find_voice_mod(
+        mod, reason = await _find_recent_mod(
             guild, discord.AuditLogAction.member_update, member=member,
             attr="deaf", expected=after.deaf
         )
@@ -9277,9 +9298,13 @@ async def role_add(ctx, member: discord.Member, role: discord.Role):
     )
     embed.set_footer(text=f"By {ctx.author}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
-    await log(ctx.guild, "roles", "Role Manually Added",
-              f"**Staff:** {ctx.author.mention}\n**User:** {member.mention}\n**Role:** {role.mention}",
-              discord.Color.green())
+    await log(ctx.guild, "roles", "Role Manually Added", None, discord.Color.green(),
+              fields=[
+                  ("👑 Staff", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
+                  ("👤 User",  f"{member.mention} (`{member.id}`)",         True),
+                  ("🏷️ Role",  f"{role.mention} (`{role.id}`)",             True),
+              ],
+              actor=ctx.author, target=member)
 
 
 @role_group.command(name="remove")
@@ -9301,9 +9326,13 @@ async def role_remove(ctx, member: discord.Member, role: discord.Role):
     )
     embed.set_footer(text=f"By {ctx.author}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
-    await log(ctx.guild, "roles", "Role Manually Removed",
-              f"**Staff:** {ctx.author.mention}\n**User:** {member.mention}\n**Role:** {role.mention}",
-              discord.Color.orange())
+    await log(ctx.guild, "roles", "Role Manually Removed", None, discord.Color.orange(),
+              fields=[
+                  ("👑 Staff", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
+                  ("👤 User",  f"{member.mention} (`{member.id}`)",         True),
+                  ("🏷️ Role",  f"{role.mention} (`{role.id}`)",             True),
+              ],
+              actor=ctx.author, target=member)
 
 
 @role_group.command(name="create")
@@ -9353,9 +9382,14 @@ async def role_create(ctx, *, rest: str):
     embed.add_field(name="Hoist", value=str(hoist),     inline=True)
     embed.set_footer(text=f"By {ctx.author}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
-    await log(ctx.guild, "role_create", "Role Created (cmd)",
-              f"**Staff:** {ctx.author.mention}\n**Role:** {new_role.mention}\n**Color:** {new_role.color}\n**Hoist:** {hoist}",
-              discord.Color.green())
+    await log(ctx.guild, "role_create", "Role Created (cmd)", None, discord.Color.green(),
+              fields=[
+                  ("👑 Staff", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
+                  ("✨ Role",  f"{new_role.mention} (`{new_role.id}`)",     True),
+                  ("🎨 Color", str(new_role.color),                        True),
+                  ("📌 Hoist", str(hoist),                                 True),
+              ],
+              actor=ctx.author)
 
 
 @role_group.command(name="delete")
@@ -9378,9 +9412,12 @@ async def role_delete(ctx, role: discord.Role):
     )
     embed.set_footer(text=f"By {ctx.author}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
-    await log(ctx.guild, "role_delete", "Role Deleted (cmd)",
-              f"**Staff:** {ctx.author.mention}\n**Role Name:** `{name}`",
-              discord.Color.red())
+    await log(ctx.guild, "role_delete", "Role Deleted (cmd)", None, discord.Color.red(),
+              fields=[
+                  ("👑 Staff",     f"{ctx.author.mention} (`{ctx.author.id}`)", True),
+                  ("🗑️ Role Name", f"`{name}`",                                 True),
+              ],
+              actor=ctx.author)
 
 
 @role_group.command(name="info")
@@ -9514,9 +9551,14 @@ async def role_color(ctx, role: discord.Role, hex_color: str):
     )
     embed.set_footer(text=f"By {ctx.author}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
-    await log(ctx.guild, "roles", "Role Color Changed",
-              f"**Staff:** {ctx.author.mention}\n**Role:** {role.mention}\n**Old:** `{old_color}`\n**New:** `{new_color}`",
-              discord.Color.blurple())
+    await log(ctx.guild, "roles", "Role Color Changed", None, discord.Color.blurple(),
+              fields=[
+                  ("👑 Staff", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
+                  ("🏷️ Role",  f"{role.mention} (`{role.id}`)",             True),
+                  ("🎨 Old",   f"`{old_color}`",                            True),
+                  ("🎨 New",   f"`{new_color}`",                            True),
+              ],
+              actor=ctx.author)
 
 
 @role_group.command(name="hoist")
@@ -9526,6 +9568,7 @@ async def role_hoist(ctx, role: discord.Role):
     if role >= ctx.guild.me.top_role:
         await ctx.send("❌ I can't edit a role higher than or equal to my own top role.")
         return
+    old_val = role.hoist
     new_val = not role.hoist
     await role.edit(hoist=new_val, reason=f"Hoist toggled by {ctx.author}")
     state = "now **hoisted** (shown separately)" if new_val else "no longer hoisted"
@@ -9537,6 +9580,14 @@ async def role_hoist(ctx, role: discord.Role):
     )
     embed.set_footer(text=f"By {ctx.author}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
+    await log(ctx.guild, "roles", "Role Hoist Changed", None, discord.Color.blurple(),
+              fields=[
+                  ("👑 Staff", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
+                  ("🏷️ Role",  f"{role.mention} (`{role.id}`)",             True),
+                  ("📌 Old",   str(old_val),                                True),
+                  ("📌 New",   str(new_val),                                True),
+              ],
+              actor=ctx.author)
 
 
 @role_group.command(name="members")
@@ -10245,6 +10296,7 @@ async def nickname(ctx, member: discord.Member, *, new_nick: str = None):
     if member.top_role >= ctx.guild.me.top_role:
         await ctx.send("❌ I can't change that user's nickname because their role is higher than mine.")
         return
+    old_nick = member.nick or member.name
     try:
         await member.edit(nick=new_nick, reason=f"Nickname changed by {ctx.author}")
         embed = discord.Embed(
@@ -10255,6 +10307,14 @@ async def nickname(ctx, member: discord.Member, *, new_nick: str = None):
         )
         embed.set_footer(text=f"Changed by {ctx.author}", icon_url=ctx.author.display_avatar.url)
         await ctx.send(embed=embed)
+        await log(ctx.guild, "nicknames", "Nickname Changed (cmd)", None, discord.Color.blurple(),
+                  fields=[
+                      ("👑 Staff",     f"{ctx.author.mention} (`{ctx.author.id}`)", True),
+                      ("👤 Member",    f"{member.mention} (`{member.id}`)",         True),
+                      ("📝 Old Nick",  old_nick,                                    True),
+                      ("📝 New Nick",  new_nick or member.name,                     True),
+                  ],
+                  actor=ctx.author, target=member)
     except discord.Forbidden:
         await ctx.send("❌ I don't have permission to change that member's nickname.")
 
@@ -11223,6 +11283,12 @@ async def setgifrole(ctx, role: discord.Role = None):
         )
     embed.set_footer(text=f"Set by {ctx.author} • TrapAI", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
+    await log(guild, "roles", "GIF-Exempt Role Changed", None, discord.Color.blurple(),
+              fields=[
+                  ("👑 Staff", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
+                  ("🏷️ Role",  role.mention if role else "*Reset to default*", True),
+              ],
+              actor=ctx.author)
 
 
 # ============================================================
