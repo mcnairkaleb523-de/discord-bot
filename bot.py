@@ -856,7 +856,7 @@ WHOLE_BOT_PREMIUM_ONLY_COMMANDS = {
     "vclock", "vcunlock", "vchide", "vcshow", "vcname", "vclimit", "vcbitrate",
     "vcregion", "vckick", "vcban", "vcunban", "vcpermit", "vcmute", "vcunmute",
     "vcdeafen", "vcundeafen", "vctransfer", "vcclaim", "vcmod", "vcremovemod",
-    "vcstats", "setupvc", "setunmutevc",
+    "vcstats", "setupvc", "setunmutevc", "d",
     # Vouch / trust system (whole category)
     "vouch", "unvouch", "cancelvouch", "pendingvouches", "vouches",
     "vouchleaderboard", "vouchstats", "vouchconfig",
@@ -3341,7 +3341,7 @@ HELP_CATEGORIES = [
     ('🔒', 'Jail & Anti-Raid', ['jail', 'unjail', 'setupjail', 'antiraid', 'raidwhitelist', 'wl']),
     ('🤖', 'Verification', ['verify', 'unverify', 'denyverify', 'sendverify', 'setverifybackup']),
     ('🏷️', 'Roles', ['role', 'roleall', 'massrole', 'massunrole', 'restoreallroles', 'autorole', 'setgifrole', 'protectedrole', 'br', 'roles']),
-    ('🎤', 'Voice Channels', ['vclock', 'vcunlock', 'vchide', 'vcshow', 'vcname', 'vclimit', 'vcbitrate', 'vcregion', 'vckick', 'vcban', 'vcunban', 'vcpermit', 'vcmute', 'vcunmute', 'vcdeafen', 'vcundeafen', 'vctransfer', 'vcclaim', 'vcmod', 'vcremovemod', 'vcstats', 'setupvc', 'setunmutevc']),
+    ('🎤', 'Voice Channels', ['vclock', 'vcunlock', 'vchide', 'vcshow', 'vcname', 'vclimit', 'vcbitrate', 'vcregion', 'vckick', 'vcban', 'vcunban', 'vcpermit', 'vcmute', 'vcunmute', 'vcdeafen', 'vcundeafen', 'vctransfer', 'vcclaim', 'vcmod', 'vcremovemod', 'vcstats', 'setupvc', 'setunmutevc', 'd']),
     ('🎫', 'Tickets', ['sendtickets', 'addticketcategory', 'removeticketcategory', 'ticketcategories', 'setticketformat', 'claimticket', 'closeticket']),
     ('💳', 'Billing', ['subscribe', 'managesubscription', 'subscriptionstatus']),
     ('📊', 'Stats & Info', ['whois', 'chatstats', 'serverstats', 'invites', 'invitelogs', 'inviteleaderboard', 'setinvite', 'milestones', 'setmilestone', 'testmilestone', 'ping', 'exitsurveys']),
@@ -6636,6 +6636,56 @@ async def vcremovemod(ctx, member: discord.Member):
     await ch.set_permissions(member, overwrite=None)
     await ctx.send(embed=_vc_embed("🗑️ VC Mod Removed", f"{member.mention} is no longer a VC moderator in **{ch.name}**.", discord.Color.orange()))
     await _vc_announce(ctx.guild, ch, f"🗑️ **{ctx.author.display_name}** removed **{member.display_name}** as VC moderator.")
+
+
+@bot.command(name="d", aliases=["drag"])
+@_permitted_check(move_members=True)
+async def drag_member(ctx, member: discord.Member, channel: discord.VoiceChannel = None):
+    """
+    Drag a member out of voice, or move them straight into a specific VC —
+    a quick staff shortcut for Discord's native drag-and-drop move,
+    without opening the member list. Requires the Move Members
+    permission (or a role granted it via ,setpermittedrole) — works on
+    ANY voice channel in the server, not just temp/owned VCs.
+    Usage:
+      ,d @user              — disconnect them from voice entirely
+      ,d @user #voice-chan  — move them into that voice channel
+    """
+    if not member.voice or not member.voice.channel:
+        await ctx.send(f"❌ {member.mention} is not in a voice channel.")
+        return
+
+    from_channel = member.voice.channel
+    try:
+        await member.move_to(channel, reason=f"Dragged by {ctx.author}")
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have permission to move that member.")
+        return
+    except discord.HTTPException:
+        await ctx.send("❌ Something went wrong moving that member.")
+        return
+
+    if channel:
+        await ctx.send(embed=_vc_embed(
+            "🖐️ Member Dragged",
+            f"{member.mention} was dragged from **{from_channel.name}** to **{channel.name}**.",
+            discord.Color.blurple()
+        ))
+    else:
+        await ctx.send(embed=_vc_embed(
+            "🖐️ Member Disconnected",
+            f"{member.mention} was dragged out of **{from_channel.name}**.",
+            discord.Color.orange()
+        ))
+
+    await log(ctx.guild, "vc", "Member Dragged", None, discord.Color.blurple(),
+              fields=[
+                  ("🛡 Staff",  f"{ctx.author.mention} (`{ctx.author.id}`)",     True),
+                  ("👤 Member", f"{member.mention} (`{member.id}`)",             True),
+                  ("📤 From",   from_channel.mention,                            True),
+                  ("📥 To",     channel.mention if channel else "*Disconnected*", True),
+              ],
+              actor=ctx.author, target=member)
 
 
 # ============================================================
