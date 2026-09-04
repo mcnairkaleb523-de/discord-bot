@@ -4712,6 +4712,18 @@ async def on_member_update(before, after):
                 actor=mod, target=after
             )
 
+        if removed_roles:
+            # "Screenshot" every role they held right before losing any of
+            # them — persisted so ,restoreallroles can bring back their
+            # WHOLE prior role set (not just whatever this one action
+            # removed), and shown in the log so staff can see their full
+            # role picture at the moment it happened, not just the one
+            # role that's gone.
+            snapshot_ids = [r.id for r in before.roles if r.name != "@everyone"]
+            ROLE_SNAPSHOTS.setdefault(after.guild.id, {})[after.id] = snapshot_ids
+            _save_role_snapshots()
+            snapshot_str = ", ".join(r.name for r in before.roles if r.name != "@everyone") or "*None*"
+
         for role in removed_roles:
             await log(
                 after.guild,
@@ -4725,6 +4737,7 @@ async def on_member_update(before, after):
                     ("👑 Removed By", mod.mention if mod else "*Unknown*", True),
                     ("📌 Position",   str(role.position),                   True),
                     ("📝 Reason",     mod_reason or "*No reason provided*", False),
+                    ("📸 Role Snapshot (before)", snapshot_str[:1024], False),
                 ],
                 actor=mod, target=after
             )
