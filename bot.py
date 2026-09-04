@@ -439,6 +439,8 @@ def _save_all_state() -> None:
     _save_unmute_vc_channels()
     _save_welcome_config()
     _save_boost_channel()
+    _save_update_channel_overrides()
+    _save_last_announced_version()
     _save_booster_roles()
     _save_exit_survey()
     _save_economy()
@@ -532,6 +534,103 @@ def _resolve_boost_channel(guild: discord.Guild):
         if ch:
             return ch
     return discord.utils.get(guild.text_channels, name=BOOST_CHANNEL)
+
+
+# ── Bot update announcements ────────────────────────────────────
+# CHANGELOG is bumped by hand with each shipped update — append a new
+# entry (version + what's new/fixed) whenever a change goes out. The bot
+# posts the latest untold entry to each guild the next time it actually
+# comes back online (see _announce_updates(), called once per real
+# process start from on_ready — never on a bare gateway reconnect).
+CHANGELOG = [
+    {
+        "version": "1.0",
+        "new": [
+            "Automatic update announcements — the bot now posts what's new/fixed here every time it comes back online after an update.",
+        ],
+        "fixed": [],
+    },
+]
+
+# UPDATE_CHANNEL_OVERRIDES[guild_id] = channel_id — set via ,setupdatechannel.
+# Falls back to a fuzzy name match (any channel with "announce"/"update"/
+# "news"/"patch" in its name — doesn't have to be literally "announcements"),
+# then the server's system channel, then the first channel the bot can post in.
+UPDATE_CHANNEL_OVERRIDES: dict[int, int] = _load_depth(_load_data("update_channel", {}), 1)
+
+# LAST_ANNOUNCED_VERSION[guild_id] = version string already posted there —
+# prevents re-announcing the same update on every reconnect/restart.
+LAST_ANNOUNCED_VERSION: dict[int, str] = {
+    int(gid): v for gid, v in _load_data("last_announced_version", {}).items()
+}
+
+
+def _save_update_channel_overrides():
+    _save_data("update_channel", _dump_depth(UPDATE_CHANNEL_OVERRIDES, 1))
+
+
+def _save_last_announced_version():
+    _save_data("last_announced_version", {str(gid): v for gid, v in LAST_ANNOUNCED_VERSION.items()})
+
+
+def _resolve_update_channel(guild: discord.Guild):
+    channel_id = UPDATE_CHANNEL_OVERRIDES.get(guild.id)
+    if channel_id:
+        ch = guild.get_channel(channel_id)
+        if ch:
+            return ch
+    for ch in guild.text_channels:
+        name = ch.name.lower()
+        if any(kw in name for kw in ("announce", "update", "news", "patch")):
+            if ch.permissions_for(guild.me).send_messages:
+                return ch
+    if guild.system_channel and guild.system_channel.permissions_for(guild.me).send_messages:
+        return guild.system_channel
+    for ch in guild.text_channels:
+        if ch.permissions_for(guild.me).send_messages:
+            return ch
+    return None
+
+
+def _build_update_embed(entry: dict) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"🔧 TrapAI Updated — v{entry['version']}",
+        color=discord.Color.blurple(),
+        timestamp=discord.utils.utcnow()
+    )
+    if entry.get("new"):
+        embed.add_field(name="✨ What's New", value="\n".join(f"• {x}" for x in entry["new"])[:1024], inline=False)
+    if entry.get("fixed"):
+        embed.add_field(name="🛠️ What Was Fixed", value="\n".join(f"• {x}" for x in entry["fixed"])[:1024], inline=False)
+    embed.set_footer(text="TrapAI • Automatic update notice")
+    return embed
+
+
+async def _announce_updates():
+    """Post the latest CHANGELOG entry to every guild that hasn't seen it
+    yet — called once per real process start (on_ready, _startup_resumed
+    guard), not on ordinary gateway reconnects."""
+    if not CHANGELOG:
+        return
+    latest = CHANGELOG[-1]
+    version = latest["version"]
+    changed = False
+    for guild in bot.guilds:
+        if _is_ticket_only_guild(guild):
+            continue  # ticket-only customer guilds don't need TrapAI's own devlog
+        if LAST_ANNOUNCED_VERSION.get(guild.id) == version:
+            continue
+        channel = _resolve_update_channel(guild)
+        if not channel:
+            continue
+        try:
+            await channel.send(embed=_build_update_embed(latest))
+        except (discord.Forbidden, discord.HTTPException):
+            continue
+        LAST_ANNOUNCED_VERSION[guild.id] = version
+        changed = True
+    if changed:
+        _save_last_announced_version()
 
 
 # BOOSTER_ROLES[guild_id][user_id] = role_id — a booster's own custom
@@ -856,7 +955,7 @@ WHOLE_BOT_PREMIUM_ONLY_COMMANDS = {
     "vclock", "vcunlock", "vchide", "vcshow", "vcname", "vclimit", "vcbitrate",
     "vcregion", "vckick", "vcban", "vcunban", "vcpermit", "vcmute", "vcunmute",
     "vcdeafen", "vcundeafen", "vctransfer", "vcclaim", "vcmod", "vcremovemod",
-    "vcstats", "setupvc", "setunmutevc",
+    "vcstats", "setupvc", "setunmutevc", "d",
     # Vouch / trust system (whole category)
     "vouch", "unvouch", "cancelvouch", "pendingvouches", "vouches",
     "vouchleaderboard", "vouchstats", "vouchconfig",
@@ -871,7 +970,7 @@ WHOLE_BOT_PREMIUM_ONLY_COMMANDS = {
     "birthday", "removebirthday", "setbirthday", "setbirthdaychannel",
     "birthdaylist", "settimezone",
     # Boosts & Vanity, incl. custom booster roles (whole category)
-    "setboostchannel", "setvanitycode", "setvanityrole", "vanityconfig", "br",
+    "setboostchannel", "setvanitycode", "setvanityrole", "vanityconfig", "br", "setupdatechannel",
     # Staff Tools (whole category)
     "staffpsa", "task", "tasklist", "acceptstaff", "denystaff", "setstaffrules", "staffleaderboard", "staffstats",
     "staffwarn", "staffstrike", "staffwarnings", "staffstrikes", "clearstaffwarnings", "clearstaffstrikes",
@@ -1277,6 +1376,32 @@ def _save_antinuke_whitelist():
     _save_data("antinuke_whitelist", _dump_depth(
         {gid: list(uids) for gid, uids in ANTINUKE_WHITELIST.items()}, 1
     ))
+
+
+async def _antinuke_punish(guild: discord.Guild, actor, reason: str):
+    """Shared punishment for any anti-nuke trigger (rapid role deletes,
+    channel deletes, or mass bans): strip every removable role, then
+    hardban the offender — persisted so they're instantly re-banned if
+    they somehow rejoin. Returns the list of stripped role names for the
+    triggering handler's log embed."""
+    actor_member = guild.get_member(actor.id)
+    roles_to_remove = []
+    if actor_member:
+        roles_to_remove = [r for r in actor_member.roles if not r.is_default() and r < guild.me.top_role]
+        if roles_to_remove:
+            try:
+                await actor_member.remove_roles(*roles_to_remove, reason=reason)
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+
+    HARD_BANNED.setdefault(guild.id, {})[actor.id] = reason
+    _save_hard_banned()
+    try:
+        await guild.ban(actor, reason=reason, delete_message_days=1)
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
+    return roles_to_remove
 
 # ── GIF automod exemption ─────────────────────────────────────
 # GIF_EXEMPT_ROLE[guild_id] = role_id — which role is exempt from automod's
@@ -2409,6 +2534,16 @@ async def _create_ticket_channel(guild, member, ticket_key: str):
         app_embed.set_footer(text=f"TrapAI Ticket System • {label}")
         await ticket_channel.send(embed=app_embed)
 
+        # Plain-text copy of the same template in a code block — embed text
+        # is fiddly to select cleanly (especially on mobile), so this gives
+        # everyone a one-tap "select all" block to copy, paste as a normal
+        # message, and fill in the blanks (the ** markers render as real
+        # bold again once pasted outside the code block).
+        intro = "📋 **Copy the block below, paste it as your reply, then fill in your answers:**\n"
+        budget = 2000 - len(intro) - 8  # 8 = the ``` fences + newlines
+        copy_text = ticket_format if len(ticket_format) <= budget else ticket_format[:budget - 1] + "…"
+        await ticket_channel.send(f"{intro}```\n{copy_text}\n```")
+
     await ticket_channel.send(member.mention, delete_after=3)
 
     await log(
@@ -3305,7 +3440,7 @@ HELP_CATEGORIES = [
     ('🔒', 'Jail & Anti-Raid', ['jail', 'unjail', 'setupjail', 'antiraid', 'raidwhitelist', 'wl']),
     ('🤖', 'Verification', ['verify', 'unverify', 'denyverify', 'sendverify', 'setverifybackup']),
     ('🏷️', 'Roles', ['role', 'roleall', 'massrole', 'massunrole', 'restoreallroles', 'autorole', 'setgifrole', 'protectedrole', 'br', 'roles']),
-    ('🎤', 'Voice Channels', ['vclock', 'vcunlock', 'vchide', 'vcshow', 'vcname', 'vclimit', 'vcbitrate', 'vcregion', 'vckick', 'vcban', 'vcunban', 'vcpermit', 'vcmute', 'vcunmute', 'vcdeafen', 'vcundeafen', 'vctransfer', 'vcclaim', 'vcmod', 'vcremovemod', 'vcstats', 'setupvc', 'setunmutevc']),
+    ('🎤', 'Voice Channels', ['vclock', 'vcunlock', 'vchide', 'vcshow', 'vcname', 'vclimit', 'vcbitrate', 'vcregion', 'vckick', 'vcban', 'vcunban', 'vcpermit', 'vcmute', 'vcunmute', 'vcdeafen', 'vcundeafen', 'vctransfer', 'vcclaim', 'vcmod', 'vcremovemod', 'vcstats', 'setupvc', 'setunmutevc', 'd']),
     ('🎫', 'Tickets', ['sendtickets', 'addticketcategory', 'removeticketcategory', 'ticketcategories', 'setticketformat', 'claimticket', 'closeticket']),
     ('💳', 'Billing', ['subscribe', 'managesubscription', 'subscriptionstatus']),
     ('📊', 'Stats & Info', ['whois', 'chatstats', 'serverstats', 'invites', 'invitelogs', 'inviteleaderboard', 'setinvite', 'milestones', 'setmilestone', 'testmilestone', 'ping', 'exitsurveys']),
@@ -3315,7 +3450,7 @@ HELP_CATEGORIES = [
     ('🎂', 'Birthdays', ['birthday', 'removebirthday', 'setbirthday', 'setbirthdaychannel', 'birthdaylist', 'settimezone']),
     ('🚀', 'Boosts & Vanity', ['setboostchannel', 'setvanitycode', 'setvanityrole', 'vanityconfig']),
     ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist', 'acceptstaff', 'denystaff', 'setstaffrules', 'staffleaderboard', 'staffstats', 'staffwarn', 'staffstrike', 'staffwarnings', 'staffstrikes', 'clearstaffwarnings', 'clearstaffstrikes']),
-    ('⚙️', 'Admin & Setup', ['setup', 'backup', 'restore', 'listbackups', 'deletebackup', 'exportconfig', 'setlogchannel', 'setwelcome', 'disablewelcome', 'sendwelcome', 'welcome', 'sendinvite', 'announce', 'setpermittedrole', 'setbotbio']),
+    ('⚙️', 'Admin & Setup', ['setup', 'backup', 'restore', 'listbackups', 'deletebackup', 'exportconfig', 'setlogchannel', 'setwelcome', 'disablewelcome', 'sendwelcome', 'welcome', 'sendinvite', 'announce', 'setpermittedrole', 'setbotbio', 'setupdatechannel']),
     ('🎲', 'Fun & Utility', ['snipe', 'clearsnipe', 'editsnipe', 'quote', 'rules', 'cmds', 'help']),
 ]
 
@@ -4076,6 +4211,11 @@ async def on_ready():
         asyncio.create_task(_birthday_loop())
         asyncio.create_task(_vanity_sweep_loop())
 
+        # Post the latest changelog entry to any guild that hasn't seen it
+        # yet — covers every kind of restart (Railway redeploy after a
+        # code push, manual ,restart, a crash recovery), not just ,restart.
+        asyncio.create_task(_announce_updates())
+
         # ,restart back-online confirmation — only fires once, right after
         # a real restart, never on an ordinary gateway reconnect.
         if _RESTART_NOTIFY_CHANNEL_ID:
@@ -4330,6 +4470,30 @@ async def on_member_join(member):
                 await inv_log_ch.send(embed=embed)
             except discord.HTTPException:
                 pass
+
+
+@bot.event
+async def on_member_unban(guild, user):
+    """Anti-tamper for hard-bans: if a hard-banned user gets unbanned
+    manually through Discord's native UI (not via ,unhardban — which
+    already removes them from HARD_BANNED *before* calling guild.unban,
+    so this correctly no-ops for that path), instantly re-ban them. A
+    hard-ban can only actually be lifted through ,unhardban."""
+    hb_guild = HARD_BANNED.get(guild.id, {})
+    reason = hb_guild.get(user.id)
+    if reason is None:
+        return
+    try:
+        await guild.ban(user, reason=f"Hard-ban re-applied — manual unban reverted (was: {reason})", delete_message_days=0)
+    except (discord.Forbidden, discord.HTTPException):
+        return
+    await log(guild, "bans", "🔴 Hard-Ban Re-Applied — Manual Unban Reverted", None, discord.Color.dark_red(),
+              fields=[
+                  ("🔴 User",            f"{user} (`{user.id}`)", True),
+                  ("📝 Original Reason", reason,                    False),
+                  ("ℹ️ Note",            "Someone tried to manually unban a hard-banned user through Discord — reverted. Use `,unhardban` to actually lift a hard-ban.", False),
+              ],
+              target=user)
 
 
 @bot.event
@@ -4614,17 +4778,15 @@ async def on_guild_role_delete(role):
         NUKE_TRACKER[guild.id][actor.id] = [t for t in tracker if now - t <= NUKE_WINDOW]
         if len(NUKE_TRACKER[guild.id][actor.id]) >= NUKE_ROLE_LIMIT:
             NUKE_TRACKER[guild.id][actor.id].clear()
-            # Strip all non-default roles
-            roles_to_remove = [r for r in actor.roles if not r.is_default() and r < guild.me.top_role]
-            if roles_to_remove:
-                await actor.remove_roles(*roles_to_remove, reason="🚨 Anti-nuke: rapid role deletion detected")
+            roles_to_remove = await _antinuke_punish(guild, actor, "🚨 Anti-nuke: rapid role deletion detected")
             await log(guild, "mod", "🚨 Anti-Nuke Triggered — Role Deletions", None,
-                      discord.Color.red(),
+                      discord.Color.dark_red(),
                       fields=[
                           ("⚠️ Action",       "Rapid Role Deletes Detected",                          True),
                           ("👤 Suspect",       f"{actor.mention} (`{actor.id}`)",                      True),
                           ("🔢 Deletes",       f"{NUKE_ROLE_LIMIT}+ roles deleted in {NUKE_WINDOW}s", True),
                           ("⚔️ Roles Stripped", ", ".join(r.name for r in roles_to_remove)[:512] or "None", False),
+                          ("🔴 Hard-Banned",   "✅ Yes — will be instantly re-banned if they rejoin", False),
                       ],
                       actor=actor)
     except (discord.Forbidden, discord.HTTPException):
@@ -4684,16 +4846,15 @@ async def on_guild_channel_delete(channel):
         NUKE_TRACKER[guild.id][actor.id + 1_000_000_000] = [t for t in tracker if now - t <= NUKE_WINDOW]
         if len(NUKE_TRACKER[guild.id][actor.id + 1_000_000_000]) >= NUKE_CHAN_LIMIT:
             NUKE_TRACKER[guild.id][actor.id + 1_000_000_000].clear()
-            roles_to_remove = [r for r in actor.roles if not r.is_default() and r < guild.me.top_role]
-            if roles_to_remove:
-                await actor.remove_roles(*roles_to_remove, reason="🚨 Anti-nuke: rapid channel deletion detected")
+            roles_to_remove = await _antinuke_punish(guild, actor, "🚨 Anti-nuke: rapid channel deletion detected")
             await log(guild, "mod", "🚨 Anti-Nuke Triggered — Channel Deletions", None,
-                      discord.Color.red(),
+                      discord.Color.dark_red(),
                       fields=[
                           ("⚠️ Action",       "Rapid Channel Deletes Detected",                          True),
                           ("👤 Suspect",       f"{actor.mention} (`{actor.id}`)",                         True),
                           ("🔢 Deletes",       f"{NUKE_CHAN_LIMIT}+ channels deleted in {NUKE_WINDOW}s",  True),
                           ("⚔️ Roles Stripped", ", ".join(r.name for r in roles_to_remove)[:512] or "None", False),
+                          ("🔴 Hard-Banned",   "✅ Yes — will be instantly re-banned if they rejoin", False),
                       ],
                       actor=actor)
     except (discord.Forbidden, discord.HTTPException):
@@ -4751,24 +4912,7 @@ async def on_member_ban(guild, user):
         if len(NUKE_TRACKER[guild.id][key]) >= NUKE_BAN_LIMIT:
             NUKE_TRACKER[guild.id][key].clear()
 
-            actor_member = guild.get_member(actor.id)
-            roles_to_remove = []
-            if actor_member:
-                roles_to_remove = [r for r in actor_member.roles if not r.is_default() and r < guild.me.top_role]
-                if roles_to_remove:
-                    try:
-                        await actor_member.remove_roles(*roles_to_remove, reason="🚨 Anti-nuke: rapid mass-ban detected")
-                    except (discord.Forbidden, discord.HTTPException):
-                        pass
-
-            # Hardban them too, same as ,hardban — persisted so they're
-            # instantly re-banned if they somehow rejoin.
-            HARD_BANNED.setdefault(guild.id, {})[actor.id] = "🚨 Anti-nuke: rapid mass-ban detected"
-            _save_hard_banned()
-            try:
-                await guild.ban(actor, reason="🚨 Anti-nuke: rapid mass-ban detected", delete_message_days=1)
-            except (discord.Forbidden, discord.HTTPException):
-                pass
+            roles_to_remove = await _antinuke_punish(guild, actor, "🚨 Anti-nuke: rapid mass-ban detected")
 
             await log(guild, "mod", "🚨 Anti-Nuke Triggered — Mass Ban Detected", None,
                       discord.Color.dark_red(),
@@ -6100,6 +6244,64 @@ async def setboostchannel(ctx, channel: discord.TextChannel = None):
     await ctx.send(embed=embed)
 
 
+@bot.command()
+@_permitted_check(manage_guild=True)
+async def setupdatechannel(ctx, channel: discord.TextChannel = None):
+    """
+    Configure where the automatic "what's new / what was fixed" message
+    posts after the bot comes back online from an update. Without an
+    override, it auto-picks any channel with "announce"/"update"/"news"/
+    "patch" in its name (doesn't have to be named exactly "announcements"),
+    falling back to the server's system channel.
+    Usage:
+      ,setupdatechannel #channel — pin the update-announcement channel
+      ,setupdatechannel reset    — clear override, fall back to auto-detection
+      ,setupdatechannel          — show current configuration
+    """
+    if channel is None:
+        arg = ctx.message.content.split(maxsplit=1)
+        opt = arg[1].strip().lower() if len(arg) > 1 else None
+        if opt == "reset":
+            UPDATE_CHANNEL_OVERRIDES.pop(ctx.guild.id, None)
+            _save_update_channel_overrides()
+            await ctx.send("✅ Update-announcement channel override cleared. Falling back to auto-detection.")
+            return
+
+        ch = _resolve_update_channel(ctx.guild)
+        embed = discord.Embed(
+            title="🔧 Update Announcement Config",
+            color=discord.Color.blurple(),
+            timestamp=discord.utils.utcnow()
+        )
+        embed.add_field(
+            name="📢 Channel",
+            value=ch.mention if ch else "*Not found — set one with `,setupdatechannel #channel`*",
+            inline=True
+        )
+        embed.add_field(
+            name="📖 Commands",
+            value=(
+                "`,setupdatechannel #channel` — pin channel\n"
+                "`,setupdatechannel reset` — clear override"
+            ),
+            inline=False
+        )
+        embed.set_footer(text=f"Requested by {ctx.author}", icon_url=ctx.author.display_avatar.url)
+        await ctx.send(embed=embed)
+        return
+
+    UPDATE_CHANNEL_OVERRIDES[ctx.guild.id] = channel.id
+    _save_update_channel_overrides()
+    embed = discord.Embed(
+        title="✅ Update Channel Configured",
+        description=f"\"What's new / what was fixed\" messages will now post in {channel.mention} after every update.",
+        color=discord.Color.green(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_footer(text=f"Set by {ctx.author}", icon_url=ctx.author.display_avatar.url)
+    await ctx.send(embed=embed)
+
+
 def _br_embed(title, description, color):
     embed = discord.Embed(title=title, description=description, color=color, timestamp=discord.utils.utcnow())
     embed.set_footer(text="TrapAI Booster Roles")
@@ -6620,6 +6822,46 @@ async def vcremovemod(ctx, member: discord.Member):
     await ch.set_permissions(member, overwrite=None)
     await ctx.send(embed=_vc_embed("🗑️ VC Mod Removed", f"{member.mention} is no longer a VC moderator in **{ch.name}**.", discord.Color.orange()))
     await _vc_announce(ctx.guild, ch, f"🗑️ **{ctx.author.display_name}** removed **{member.display_name}** as VC moderator.")
+
+
+@bot.command(name="d", aliases=["drag"])
+@_permitted_check(move_members=True)
+async def drag_member(ctx, member: discord.Member):
+    """
+    Drag a member out of voice — a quick staff shortcut for Discord's
+    native drag-and-disconnect move, without opening the member list.
+    Requires the Move Members permission (or a role granted it via
+    ,setpermittedrole) — works on ANY voice channel in the server, not
+    just temp/owned VCs.
+    Usage: ,d @user
+    """
+    if not member.voice or not member.voice.channel:
+        await ctx.send(f"❌ {member.mention} is not in a voice channel.")
+        return
+
+    from_channel = member.voice.channel
+    try:
+        await member.move_to(None, reason=f"Dragged by {ctx.author}")
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have permission to move that member.")
+        return
+    except discord.HTTPException:
+        await ctx.send("❌ Something went wrong moving that member.")
+        return
+
+    await ctx.send(embed=_vc_embed(
+        "🖐️ Member Disconnected",
+        f"{member.mention} was dragged out of **{from_channel.name}**.",
+        discord.Color.orange()
+    ))
+
+    await log(ctx.guild, "vc", "Member Dragged", None, discord.Color.orange(),
+              fields=[
+                  ("🛡 Staff",  f"{ctx.author.mention} (`{ctx.author.id}`)", True),
+                  ("👤 Member", f"{member.mention} (`{member.id}`)",         True),
+                  ("📤 From",   from_channel.mention,                        True),
+              ],
+              actor=ctx.author, target=member)
 
 
 # ============================================================
@@ -7593,6 +7835,10 @@ async def rules(ctx):
     embed.add_field(name="8️⃣ Staff Decisions", value="Arguing with moderation actions in public may lead to more punishment. Contact staff calmly.", inline=False)
     embed.add_field(name="9️⃣ Respect The Server", value="No disrespecting, trash-talking, or badmouthing this server — including telling others to leave or spreading negativity about it.", inline=False)
     embed.add_field(name="🔟 Respect The Staff", value="Disrespecting staff, their decisions, or the team as a whole will not be tolerated. Take issues to the proper channels calmly.", inline=False)
+    embed.add_field(name="🗣️ No Spreading Rumors", value="Do not spread rumors, gossip, or false information about members or staff. Rumors damage people's reputations, start unnecessary drama, and break down trust in this community — if you have a real concern, bring it to staff privately instead of spreading it around.", inline=False)
+    embed.add_field(name="🔞 Age Requirement", value="You must be at least 13 years old to be in this server, per Discord's own Terms of Service.", inline=False)
+    embed.add_field(name="👤 No Alts / Ban Evasion", value="Using an alt account to get around a ban, mute, timeout, or jail is not allowed. **Punishment: Alt + main account both hardbanned.**", inline=False)
+    embed.add_field(name="🙏 No Begging", value="Do not beg staff or members for roles, ranks, boosts, Nitro, or anything else.", inline=False)
     embed.add_field(name="⛔ No NSFW / Nudity", value="No NSFW, nudity, or explicit content of any kind. **Punishment: Instant Ban.**", inline=False)
     embed.add_field(name="⛔ No Gore", value="No gore, graphic violence, or disturbing content of any kind. **Punishment: Instant Ban.**", inline=False)
     embed.add_field(name="⛔ No Staff/Admin Abuse", value="Abusing admin or staff permissions in any way will not be tolerated. **Punishment: Instant Strip + Jail.**", inline=False)
