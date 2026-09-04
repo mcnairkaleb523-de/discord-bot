@@ -2409,6 +2409,16 @@ async def _create_ticket_channel(guild, member, ticket_key: str):
         app_embed.set_footer(text=f"TrapAI Ticket System • {label}")
         await ticket_channel.send(embed=app_embed)
 
+        # Plain-text copy of the same template in a code block — embed text
+        # is fiddly to select cleanly (especially on mobile), so this gives
+        # everyone a one-tap "select all" block to copy, paste as a normal
+        # message, and fill in the blanks (the ** markers render as real
+        # bold again once pasted outside the code block).
+        intro = "📋 **Copy the block below, paste it as your reply, then fill in your answers:**\n"
+        budget = 2000 - len(intro) - 8  # 8 = the ``` fences + newlines
+        copy_text = ticket_format if len(ticket_format) <= budget else ticket_format[:budget - 1] + "…"
+        await ticket_channel.send(f"{intro}```\n{copy_text}\n```")
+
     await ticket_channel.send(member.mention, delete_after=3)
 
     await log(
@@ -7593,6 +7603,10 @@ async def rules(ctx):
     embed.add_field(name="8️⃣ Staff Decisions", value="Arguing with moderation actions in public may lead to more punishment. Contact staff calmly.", inline=False)
     embed.add_field(name="9️⃣ Respect The Server", value="No disrespecting, trash-talking, or badmouthing this server — including telling others to leave or spreading negativity about it.", inline=False)
     embed.add_field(name="🔟 Respect The Staff", value="Disrespecting staff, their decisions, or the team as a whole will not be tolerated. Take issues to the proper channels calmly.", inline=False)
+    embed.add_field(name="🗣️ No Spreading Rumors", value="Do not spread rumors, gossip, or false information about members or staff. Rumors damage people's reputations, start unnecessary drama, and break down trust in this community — if you have a real concern, bring it to staff privately instead of spreading it around.", inline=False)
+    embed.add_field(name="🔞 Age Requirement", value="You must be at least 13 years old to be in this server, per Discord's own Terms of Service.", inline=False)
+    embed.add_field(name="👤 No Alts / Ban Evasion", value="Using an alt account to get around a ban, mute, timeout, or jail is not allowed. **Punishment: Alt + main account both hardbanned.**", inline=False)
+    embed.add_field(name="🙏 No Begging", value="Do not beg staff or members for roles, ranks, boosts, Nitro, or anything else.", inline=False)
     embed.add_field(name="⛔ No NSFW / Nudity", value="No NSFW, nudity, or explicit content of any kind. **Punishment: Instant Ban.**", inline=False)
     embed.add_field(name="⛔ No Gore", value="No gore, graphic violence, or disturbing content of any kind. **Punishment: Instant Ban.**", inline=False)
     embed.add_field(name="⛔ No Staff/Admin Abuse", value="Abusing admin or staff permissions in any way will not be tolerated. **Punishment: Instant Strip + Jail.**", inline=False)
