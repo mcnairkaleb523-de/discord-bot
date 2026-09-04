@@ -1278,6 +1278,32 @@ def _save_antinuke_whitelist():
         {gid: list(uids) for gid, uids in ANTINUKE_WHITELIST.items()}, 1
     ))
 
+
+async def _antinuke_punish(guild: discord.Guild, actor, reason: str):
+    """Shared punishment for any anti-nuke trigger (rapid role deletes,
+    channel deletes, or mass bans): strip every removable role, then
+    hardban the offender — persisted so they're instantly re-banned if
+    they somehow rejoin. Returns the list of stripped role names for the
+    triggering handler's log embed."""
+    actor_member = guild.get_member(actor.id)
+    roles_to_remove = []
+    if actor_member:
+        roles_to_remove = [r for r in actor_member.roles if not r.is_default() and r < guild.me.top_role]
+        if roles_to_remove:
+            try:
+                await actor_member.remove_roles(*roles_to_remove, reason=reason)
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+
+    HARD_BANNED.setdefault(guild.id, {})[actor.id] = reason
+    _save_hard_banned()
+    try:
+        await guild.ban(actor, reason=reason, delete_message_days=1)
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
+    return roles_to_remove
+
 # ── GIF automod exemption ─────────────────────────────────────
 # GIF_EXEMPT_ROLE[guild_id] = role_id — which role is exempt from automod's
 # link filter for GIFs, set independently per server via ,setgifrole since
@@ -4624,17 +4650,15 @@ async def on_guild_role_delete(role):
         NUKE_TRACKER[guild.id][actor.id] = [t for t in tracker if now - t <= NUKE_WINDOW]
         if len(NUKE_TRACKER[guild.id][actor.id]) >= NUKE_ROLE_LIMIT:
             NUKE_TRACKER[guild.id][actor.id].clear()
-            # Strip all non-default roles
-            roles_to_remove = [r for r in actor.roles if not r.is_default() and r < guild.me.top_role]
-            if roles_to_remove:
-                await actor.remove_roles(*roles_to_remove, reason="🚨 Anti-nuke: rapid role deletion detected")
+            roles_to_remove = await _antinuke_punish(guild, actor, "🚨 Anti-nuke: rapid role deletion detected")
             await log(guild, "mod", "🚨 Anti-Nuke Triggered — Role Deletions", None,
-                      discord.Color.red(),
+                      discord.Color.dark_red(),
                       fields=[
                           ("⚠️ Action",       "Rapid Role Deletes Detected",                          True),
                           ("👤 Suspect",       f"{actor.mention} (`{actor.id}`)",                      True),
                           ("🔢 Deletes",       f"{NUKE_ROLE_LIMIT}+ roles deleted in {NUKE_WINDOW}s", True),
                           ("⚔️ Roles Stripped", ", ".join(r.name for r in roles_to_remove)[:512] or "None", False),
+                          ("🔴 Hard-Banned",   "✅ Yes — will be instantly re-banned if they rejoin", False),
                       ],
                       actor=actor)
     except (discord.Forbidden, discord.HTTPException):
@@ -4694,16 +4718,15 @@ async def on_guild_channel_delete(channel):
         NUKE_TRACKER[guild.id][actor.id + 1_000_000_000] = [t for t in tracker if now - t <= NUKE_WINDOW]
         if len(NUKE_TRACKER[guild.id][actor.id + 1_000_000_000]) >= NUKE_CHAN_LIMIT:
             NUKE_TRACKER[guild.id][actor.id + 1_000_000_000].clear()
-            roles_to_remove = [r for r in actor.roles if not r.is_default() and r < guild.me.top_role]
-            if roles_to_remove:
-                await actor.remove_roles(*roles_to_remove, reason="🚨 Anti-nuke: rapid channel deletion detected")
+            roles_to_remove = await _antinuke_punish(guild, actor, "🚨 Anti-nuke: rapid channel deletion detected")
             await log(guild, "mod", "🚨 Anti-Nuke Triggered — Channel Deletions", None,
-                      discord.Color.red(),
+                      discord.Color.dark_red(),
                       fields=[
                           ("⚠️ Action",       "Rapid Channel Deletes Detected",                          True),
                           ("👤 Suspect",       f"{actor.mention} (`{actor.id}`)",                         True),
                           ("🔢 Deletes",       f"{NUKE_CHAN_LIMIT}+ channels deleted in {NUKE_WINDOW}s",  True),
                           ("⚔️ Roles Stripped", ", ".join(r.name for r in roles_to_remove)[:512] or "None", False),
+                          ("🔴 Hard-Banned",   "✅ Yes — will be instantly re-banned if they rejoin", False),
                       ],
                       actor=actor)
     except (discord.Forbidden, discord.HTTPException):
@@ -4761,24 +4784,7 @@ async def on_member_ban(guild, user):
         if len(NUKE_TRACKER[guild.id][key]) >= NUKE_BAN_LIMIT:
             NUKE_TRACKER[guild.id][key].clear()
 
-            actor_member = guild.get_member(actor.id)
-            roles_to_remove = []
-            if actor_member:
-                roles_to_remove = [r for r in actor_member.roles if not r.is_default() and r < guild.me.top_role]
-                if roles_to_remove:
-                    try:
-                        await actor_member.remove_roles(*roles_to_remove, reason="🚨 Anti-nuke: rapid mass-ban detected")
-                    except (discord.Forbidden, discord.HTTPException):
-                        pass
-
-            # Hardban them too, same as ,hardban — persisted so they're
-            # instantly re-banned if they somehow rejoin.
-            HARD_BANNED.setdefault(guild.id, {})[actor.id] = "🚨 Anti-nuke: rapid mass-ban detected"
-            _save_hard_banned()
-            try:
-                await guild.ban(actor, reason="🚨 Anti-nuke: rapid mass-ban detected", delete_message_days=1)
-            except (discord.Forbidden, discord.HTTPException):
-                pass
+            roles_to_remove = await _antinuke_punish(guild, actor, "🚨 Anti-nuke: rapid mass-ban detected")
 
             await log(guild, "mod", "🚨 Anti-Nuke Triggered — Mass Ban Detected", None,
                       discord.Color.dark_red(),
