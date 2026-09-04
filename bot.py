@@ -4763,6 +4763,47 @@ async def on_member_update(before, after):
             actor=nick_mod, target=after
         )
 
+    # ── Timeouts applied/removed outside ,timeout ────────────────────
+    # ,timeout already logs itself when the bot performs the action. This
+    # only catches everything else that changes timed_out_until: the
+    # native Discord "Time Out"/"Remove Timeout" UI, another bot or
+    # integration — none of which ever showed up in #timeout-logs before,
+    # same gap ,ban's native-ban logging had until on_member_ban closed it.
+    if before.timed_out_until != after.timed_out_until:
+        now = discord.utils.utcnow()
+        was_active = bool(before.timed_out_until and before.timed_out_until > now)
+        is_active = bool(after.timed_out_until and after.timed_out_until > now)
+
+        if is_active and not was_active:
+            to_mod, to_reason = await _find_recent_mod(
+                after.guild, discord.AuditLogAction.member_update, member=after,
+                attr="timed_out_until", expected=after.timed_out_until
+            )
+            if not (to_mod and to_mod.bot):
+                await log(after.guild, "timeouts", "Member Timed Out (Discord)", None, discord.Color.gold(),
+                          fields=[
+                              ("🛡 Moderator", f"{to_mod.mention} (`{to_mod.id}`)" if to_mod else "*Unknown*", True),
+                              ("⏳ User",      f"{after.mention} (`{after.id}`)",                              True),
+                              ("🗓️ Expires",   discord.utils.format_dt(after.timed_out_until, "F"),            False),
+                              ("📝 Reason",    to_reason or "*No reason provided*",                             False),
+                          ],
+                          actor=to_mod, target=after)
+        elif was_active and not is_active:
+            to_mod, to_reason = await _find_recent_mod(
+                after.guild, discord.AuditLogAction.member_update, member=after,
+                attr="timed_out_until", expected=after.timed_out_until
+            )
+            # No resolvable actor almost always means it just expired
+            # naturally rather than someone removing it — not worth logging.
+            if to_mod and not to_mod.bot:
+                await log(after.guild, "timeouts", "Timeout Removed", None, discord.Color.green(),
+                          fields=[
+                              ("🛡 Moderator", f"{to_mod.mention} (`{to_mod.id}`)", True),
+                              ("⏳ User",      f"{after.mention} (`{after.id}`)",    True),
+                              ("📝 Reason",    to_reason or "*No reason provided*", False),
+                          ],
+                          actor=to_mod, target=after)
+
 
 @bot.event
 async def on_guild_role_create(role):
