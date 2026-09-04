@@ -439,6 +439,8 @@ def _save_all_state() -> None:
     _save_unmute_vc_channels()
     _save_welcome_config()
     _save_boost_channel()
+    _save_update_channel_overrides()
+    _save_last_announced_version()
     _save_booster_roles()
     _save_exit_survey()
     _save_economy()
@@ -532,6 +534,103 @@ def _resolve_boost_channel(guild: discord.Guild):
         if ch:
             return ch
     return discord.utils.get(guild.text_channels, name=BOOST_CHANNEL)
+
+
+# ── Bot update announcements ────────────────────────────────────
+# CHANGELOG is bumped by hand with each shipped update — append a new
+# entry (version + what's new/fixed) whenever a change goes out. The bot
+# posts the latest untold entry to each guild the next time it actually
+# comes back online (see _announce_updates(), called once per real
+# process start from on_ready — never on a bare gateway reconnect).
+CHANGELOG = [
+    {
+        "version": "1.0",
+        "new": [
+            "Automatic update announcements — the bot now posts what's new/fixed here every time it comes back online after an update.",
+        ],
+        "fixed": [],
+    },
+]
+
+# UPDATE_CHANNEL_OVERRIDES[guild_id] = channel_id — set via ,setupdatechannel.
+# Falls back to a fuzzy name match (any channel with "announce"/"update"/
+# "news"/"patch" in its name — doesn't have to be literally "announcements"),
+# then the server's system channel, then the first channel the bot can post in.
+UPDATE_CHANNEL_OVERRIDES: dict[int, int] = _load_depth(_load_data("update_channel", {}), 1)
+
+# LAST_ANNOUNCED_VERSION[guild_id] = version string already posted there —
+# prevents re-announcing the same update on every reconnect/restart.
+LAST_ANNOUNCED_VERSION: dict[int, str] = {
+    int(gid): v for gid, v in _load_data("last_announced_version", {}).items()
+}
+
+
+def _save_update_channel_overrides():
+    _save_data("update_channel", _dump_depth(UPDATE_CHANNEL_OVERRIDES, 1))
+
+
+def _save_last_announced_version():
+    _save_data("last_announced_version", {str(gid): v for gid, v in LAST_ANNOUNCED_VERSION.items()})
+
+
+def _resolve_update_channel(guild: discord.Guild):
+    channel_id = UPDATE_CHANNEL_OVERRIDES.get(guild.id)
+    if channel_id:
+        ch = guild.get_channel(channel_id)
+        if ch:
+            return ch
+    for ch in guild.text_channels:
+        name = ch.name.lower()
+        if any(kw in name for kw in ("announce", "update", "news", "patch")):
+            if ch.permissions_for(guild.me).send_messages:
+                return ch
+    if guild.system_channel and guild.system_channel.permissions_for(guild.me).send_messages:
+        return guild.system_channel
+    for ch in guild.text_channels:
+        if ch.permissions_for(guild.me).send_messages:
+            return ch
+    return None
+
+
+def _build_update_embed(entry: dict) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"🔧 TrapAI Updated — v{entry['version']}",
+        color=discord.Color.blurple(),
+        timestamp=discord.utils.utcnow()
+    )
+    if entry.get("new"):
+        embed.add_field(name="✨ What's New", value="\n".join(f"• {x}" for x in entry["new"])[:1024], inline=False)
+    if entry.get("fixed"):
+        embed.add_field(name="🛠️ What Was Fixed", value="\n".join(f"• {x}" for x in entry["fixed"])[:1024], inline=False)
+    embed.set_footer(text="TrapAI • Automatic update notice")
+    return embed
+
+
+async def _announce_updates():
+    """Post the latest CHANGELOG entry to every guild that hasn't seen it
+    yet — called once per real process start (on_ready, _startup_resumed
+    guard), not on ordinary gateway reconnects."""
+    if not CHANGELOG:
+        return
+    latest = CHANGELOG[-1]
+    version = latest["version"]
+    changed = False
+    for guild in bot.guilds:
+        if _is_ticket_only_guild(guild):
+            continue  # ticket-only customer guilds don't need TrapAI's own devlog
+        if LAST_ANNOUNCED_VERSION.get(guild.id) == version:
+            continue
+        channel = _resolve_update_channel(guild)
+        if not channel:
+            continue
+        try:
+            await channel.send(embed=_build_update_embed(latest))
+        except (discord.Forbidden, discord.HTTPException):
+            continue
+        LAST_ANNOUNCED_VERSION[guild.id] = version
+        changed = True
+    if changed:
+        _save_last_announced_version()
 
 
 # BOOSTER_ROLES[guild_id][user_id] = role_id — a booster's own custom
@@ -871,7 +970,7 @@ WHOLE_BOT_PREMIUM_ONLY_COMMANDS = {
     "birthday", "removebirthday", "setbirthday", "setbirthdaychannel",
     "birthdaylist", "settimezone",
     # Boosts & Vanity, incl. custom booster roles (whole category)
-    "setboostchannel", "setvanitycode", "setvanityrole", "vanityconfig", "br",
+    "setboostchannel", "setvanitycode", "setvanityrole", "vanityconfig", "br", "setupdatechannel",
     # Staff Tools (whole category)
     "staffpsa", "task", "tasklist", "acceptstaff", "denystaff", "setstaffrules", "staffleaderboard", "staffstats",
     "staffwarn", "staffstrike", "staffwarnings", "staffstrikes", "clearstaffwarnings", "clearstaffstrikes",
@@ -3351,7 +3450,7 @@ HELP_CATEGORIES = [
     ('🎂', 'Birthdays', ['birthday', 'removebirthday', 'setbirthday', 'setbirthdaychannel', 'birthdaylist', 'settimezone']),
     ('🚀', 'Boosts & Vanity', ['setboostchannel', 'setvanitycode', 'setvanityrole', 'vanityconfig']),
     ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist', 'acceptstaff', 'denystaff', 'setstaffrules', 'staffleaderboard', 'staffstats', 'staffwarn', 'staffstrike', 'staffwarnings', 'staffstrikes', 'clearstaffwarnings', 'clearstaffstrikes']),
-    ('⚙️', 'Admin & Setup', ['setup', 'backup', 'restore', 'listbackups', 'deletebackup', 'exportconfig', 'setlogchannel', 'setwelcome', 'disablewelcome', 'sendwelcome', 'welcome', 'sendinvite', 'announce', 'setpermittedrole', 'setbotbio']),
+    ('⚙️', 'Admin & Setup', ['setup', 'backup', 'restore', 'listbackups', 'deletebackup', 'exportconfig', 'setlogchannel', 'setwelcome', 'disablewelcome', 'sendwelcome', 'welcome', 'sendinvite', 'announce', 'setpermittedrole', 'setbotbio', 'setupdatechannel']),
     ('🎲', 'Fun & Utility', ['snipe', 'clearsnipe', 'editsnipe', 'quote', 'rules', 'cmds', 'help']),
 ]
 
@@ -4111,6 +4210,11 @@ async def on_ready():
         asyncio.create_task(_autosave_loop())
         asyncio.create_task(_birthday_loop())
         asyncio.create_task(_vanity_sweep_loop())
+
+        # Post the latest changelog entry to any guild that hasn't seen it
+        # yet — covers every kind of restart (Railway redeploy after a
+        # code push, manual ,restart, a crash recovery), not just ,restart.
+        asyncio.create_task(_announce_updates())
 
         # ,restart back-online confirmation — only fires once, right after
         # a real restart, never on an ordinary gateway reconnect.
@@ -6109,6 +6213,64 @@ async def setboostchannel(ctx, channel: discord.TextChannel = None):
     embed = discord.Embed(
         title="✅ Boost Channel Configured",
         description=f"Server boost thank-you messages will now post in {channel.mention}.",
+        color=discord.Color.green(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_footer(text=f"Set by {ctx.author}", icon_url=ctx.author.display_avatar.url)
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+@_permitted_check(manage_guild=True)
+async def setupdatechannel(ctx, channel: discord.TextChannel = None):
+    """
+    Configure where the automatic "what's new / what was fixed" message
+    posts after the bot comes back online from an update. Without an
+    override, it auto-picks any channel with "announce"/"update"/"news"/
+    "patch" in its name (doesn't have to be named exactly "announcements"),
+    falling back to the server's system channel.
+    Usage:
+      ,setupdatechannel #channel — pin the update-announcement channel
+      ,setupdatechannel reset    — clear override, fall back to auto-detection
+      ,setupdatechannel          — show current configuration
+    """
+    if channel is None:
+        arg = ctx.message.content.split(maxsplit=1)
+        opt = arg[1].strip().lower() if len(arg) > 1 else None
+        if opt == "reset":
+            UPDATE_CHANNEL_OVERRIDES.pop(ctx.guild.id, None)
+            _save_update_channel_overrides()
+            await ctx.send("✅ Update-announcement channel override cleared. Falling back to auto-detection.")
+            return
+
+        ch = _resolve_update_channel(ctx.guild)
+        embed = discord.Embed(
+            title="🔧 Update Announcement Config",
+            color=discord.Color.blurple(),
+            timestamp=discord.utils.utcnow()
+        )
+        embed.add_field(
+            name="📢 Channel",
+            value=ch.mention if ch else "*Not found — set one with `,setupdatechannel #channel`*",
+            inline=True
+        )
+        embed.add_field(
+            name="📖 Commands",
+            value=(
+                "`,setupdatechannel #channel` — pin channel\n"
+                "`,setupdatechannel reset` — clear override"
+            ),
+            inline=False
+        )
+        embed.set_footer(text=f"Requested by {ctx.author}", icon_url=ctx.author.display_avatar.url)
+        await ctx.send(embed=embed)
+        return
+
+    UPDATE_CHANNEL_OVERRIDES[ctx.guild.id] = channel.id
+    _save_update_channel_overrides()
+    embed = discord.Embed(
+        title="✅ Update Channel Configured",
+        description=f"\"What's new / what was fixed\" messages will now post in {channel.mention} after every update.",
         color=discord.Color.green(),
         timestamp=discord.utils.utcnow()
     )
