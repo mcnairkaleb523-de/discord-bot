@@ -1179,6 +1179,10 @@ async def handle_health(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
+async def handle_landing_page(request: web.Request) -> web.Response:
+    return web.Response(text=_landing_page(), content_type="text/html", status=200)
+
+
 def build_authorize_url(guild_id: int, backup_guild_id: int | None = None) -> str:
     """Helper mirrored in bot.py — kept here too so this file is a complete,
     standalone reference for the exact URL shape the callback expects."""
@@ -1704,6 +1708,26 @@ document.addEventListener('DOMContentLoaded', function () {{
     return _billing_page_shell("TrapAI Pricing", body)
 
 
+def _landing_page() -> str:
+    """The site's front door — a real, shareable "get started" link that
+    works with zero Discord/bot context: no server ID, no bot invite, no
+    guild.get_member() lookup. Just pricing, checkout, and where the bot
+    itself lives once someone's ready to add it. This is what should be
+    linked from anywhere OUTSIDE Discord (a website, socials, another
+    server's #resources channel) instead of telling people to run
+    ,subscribe, which only works once the bot is already present."""
+    body = """
+<div class="result-page">
+  <h1>🛡️ TrapAI</h1>
+  <p>Server protection, tickets, moderation, and more — done right.</p>
+  <p>Get started without adding the bot first: pick a plan, pay securely, then invite TrapAI straight to your server.</p>
+  <a class="btn" href="/checkout" style="opacity:1;animation:none;">Get Started — See Pricing →</a>
+  <p style="margin-top:2rem;"><a href="/commands">Browse every command</a> &nbsp;•&nbsp; <a href="/terms">Terms of Service</a></p>
+</div>
+"""
+    return _billing_page_shell("TrapAI — Server Protection, Done Right", body)
+
+
 def _billing_not_configured_page() -> str:
     body = """
 <div class="result-page">
@@ -1969,7 +1993,7 @@ def create_app() -> web.Application:
     app.router.add_get("/internal/subscription/{guild_id}", handle_internal_get_subscription)
     app.router.add_post("/internal/checkout-link", handle_internal_checkout_link)
     app.router.add_post("/internal/portal-link", handle_internal_portal_link)
-    app.router.add_get("/", handle_health)
+    app.router.add_get("/", handle_landing_page)
     app.router.add_get("/health", handle_health)
     app.on_startup.append(_on_startup)
     return app

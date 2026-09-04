@@ -7647,12 +7647,19 @@ _WHOLE_BOT_TIER_NOTES = {
 
 
 def _pricing_embed() -> discord.Embed:
+    web_note = (
+        f"\n\n🌐 **[Subscribe on the web]({BILLING_API_URL}/checkout)** — no need to have "
+        "the bot in your server first. Pick a plan, pay, then invite TrapAI. Share that "
+        "link with anyone who doesn't have the bot yet."
+        if BILLING_API_URL else ""
+    )
     embed = discord.Embed(
         title="💳 TrapAI Pricing",
         description=(
             "Choose **Ticket Bot** (just the ticket/support system) or **Whole Bot** "
             "(one-time purchase, no subscription — Regular covers everyday commands, Premium unlocks everything else).\n"
             "Then run `,subscribe <product> <tier>` (e.g. `,subscribe ticketbot pro` or `,subscribe wholebot premium`)."
+            f"{web_note}"
         ),
         color=discord.Color.gold(),
         timestamp=discord.utils.utcnow()
@@ -7682,6 +7689,8 @@ async def subscribe(ctx, product: str = None, tier: str = None):
                                        products: ticketbot, wholebot
                                        ticketbot tiers: starter/pro/premium/lifetime
                                        wholebot tiers: regular/premium
+    Don't have the bot in your server yet? ,subscribe shows a direct web
+    checkout link too — no bot required until after you've paid.
     """
     if product is None:
         await ctx.send(embed=_pricing_embed())
