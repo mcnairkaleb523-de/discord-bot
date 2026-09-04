@@ -550,6 +550,21 @@ CHANGELOG = [
         ],
         "fixed": [],
     },
+    {
+        "version": "1.1",
+        "new": [
+            "Staff warnings/strikes system (,staffwarn, ,staffstrike) with auto-termination at 3 strikes and 2-week warning expiry.",
+            "New ,d command — staff shortcut to drag a member out of voice.",
+            "A public web page to subscribe/get pricing without needing the bot in your server first.",
+        ],
+        "fixed": [
+            "Hard-bans can no longer be undone by manually unbanning in Discord — only ,unhardban actually lifts one.",
+            "Anti-nuke now instantly bans on rapid role/channel deletion, not just strips roles (mass-ban already did this).",
+            "VC ban/kick/lock could be bypassed by Administrator permissions or the server owner — now enforced for everyone.",
+            "Role/nickname/channel logs now show who made the change, not just what changed.",
+            "This update-announcement system itself wasn't posting reliably — one guild's error could silently block it for every other server; now isolated and logged per guild.",
+        ],
+    },
 ]
 
 # UPDATE_CHANNEL_OVERRIDES[guild_id] = channel_id — set via ,setupdatechannel.
@@ -609,26 +624,43 @@ def _build_update_embed(entry: dict) -> discord.Embed:
 async def _announce_updates():
     """Post the latest CHANGELOG entry to every guild that hasn't seen it
     yet — called once per real process start (on_ready, _startup_resumed
-    guard), not on ordinary gateway reconnects."""
+    guard), not on ordinary gateway reconnects. Runs as a fire-and-forget
+    background task (asyncio.create_task, nothing awaits it), so an
+    unhandled exception anywhere in here would otherwise vanish into an
+    "exception was never retrieved" warning with no visible effect —
+    every guild is isolated in its own try/except and every skip/failure
+    is printed so a stuck deployment is actually debuggable from the
+    Railway logs instead of just silently not posting."""
     if not CHANGELOG:
         return
     latest = CHANGELOG[-1]
     version = latest["version"]
     changed = False
+    print(f"[update-announce] checking {len(bot.guilds)} guild(s) for changelog v{version}")
     for guild in bot.guilds:
-        if _is_ticket_only_guild(guild):
-            continue  # ticket-only customer guilds don't need TrapAI's own devlog
-        if LAST_ANNOUNCED_VERSION.get(guild.id) == version:
-            continue
-        channel = _resolve_update_channel(guild)
-        if not channel:
-            continue
         try:
-            await channel.send(embed=_build_update_embed(latest))
-        except (discord.Forbidden, discord.HTTPException):
+            if _is_ticket_only_guild(guild):
+                print(f"[update-announce] {guild.id} ({guild.name}): skipped — ticket-only guild")
+                continue
+            if LAST_ANNOUNCED_VERSION.get(guild.id) == version:
+                print(f"[update-announce] {guild.id} ({guild.name}): already announced v{version}")
+                continue
+            channel = _resolve_update_channel(guild)
+            if not channel:
+                print(f"[update-announce] {guild.id} ({guild.name}): no channel found — "
+                      "set one with ,setupdatechannel #channel")
+                continue
+            try:
+                await channel.send(embed=_build_update_embed(latest))
+            except (discord.Forbidden, discord.HTTPException) as e:
+                print(f"[update-announce] {guild.id} ({guild.name}): send to #{channel.name} failed — {e}")
+                continue
+            LAST_ANNOUNCED_VERSION[guild.id] = version
+            changed = True
+            print(f"[update-announce] {guild.id} ({guild.name}): posted to #{channel.name}")
+        except Exception as e:
+            print(f"[update-announce] {guild.id} ({guild.name}): unexpected error — {e!r}")
             continue
-        LAST_ANNOUNCED_VERSION[guild.id] = version
-        changed = True
     if changed:
         _save_last_announced_version()
 
