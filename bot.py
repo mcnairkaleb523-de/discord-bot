@@ -4473,6 +4473,30 @@ async def on_member_join(member):
 
 
 @bot.event
+async def on_member_unban(guild, user):
+    """Anti-tamper for hard-bans: if a hard-banned user gets unbanned
+    manually through Discord's native UI (not via ,unhardban — which
+    already removes them from HARD_BANNED *before* calling guild.unban,
+    so this correctly no-ops for that path), instantly re-ban them. A
+    hard-ban can only actually be lifted through ,unhardban."""
+    hb_guild = HARD_BANNED.get(guild.id, {})
+    reason = hb_guild.get(user.id)
+    if reason is None:
+        return
+    try:
+        await guild.ban(user, reason=f"Hard-ban re-applied — manual unban reverted (was: {reason})", delete_message_days=0)
+    except (discord.Forbidden, discord.HTTPException):
+        return
+    await log(guild, "bans", "🔴 Hard-Ban Re-Applied — Manual Unban Reverted", None, discord.Color.dark_red(),
+              fields=[
+                  ("🔴 User",            f"{user} (`{user.id}`)", True),
+                  ("📝 Original Reason", reason,                    False),
+                  ("ℹ️ Note",            "Someone tried to manually unban a hard-banned user through Discord — reverted. Use `,unhardban` to actually lift a hard-ban.", False),
+              ],
+              target=user)
+
+
+@bot.event
 async def on_invite_create(invite):
     """Keep the invite cache up to date when a new invite is created."""
     guild = invite.guild
