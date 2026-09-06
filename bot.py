@@ -6914,20 +6914,28 @@ async def vcremovemod(ctx, member: discord.Member):
 @_permitted_check(move_members=True)
 async def drag_member(ctx, member: discord.Member):
     """
-    Drag a member out of voice — a quick staff shortcut for Discord's
-    native drag-and-disconnect move, without opening the member list.
-    Requires the Move Members permission (or a role granted it via
-    ,setpermittedrole) — works on ANY voice channel in the server, not
-    just temp/owned VCs.
+    Drag a member into the voice channel YOU'RE currently in — a quick
+    staff shortcut for Discord's native drag move, without opening the
+    member list. Requires the Move Members permission (or a role granted
+    it via ,setpermittedrole) — works on ANY voice channel in the
+    server, not just temp/owned VCs.
     Usage: ,d @user
     """
+    if not ctx.author.voice or not ctx.author.voice.channel:
+        await ctx.send("❌ You need to be in a voice channel to drag someone into it.")
+        return
     if not member.voice or not member.voice.channel:
         await ctx.send(f"❌ {member.mention} is not in a voice channel.")
         return
 
+    destination = ctx.author.voice.channel
     from_channel = member.voice.channel
+    if from_channel == destination:
+        await ctx.send(f"❌ {member.mention} is already in {destination.mention}.")
+        return
+
     try:
-        await member.move_to(None, reason=f"Dragged by {ctx.author}")
+        await member.move_to(destination, reason=f"Dragged by {ctx.author}")
     except discord.Forbidden:
         await ctx.send("❌ I don't have permission to move that member.")
         return
@@ -6936,16 +6944,17 @@ async def drag_member(ctx, member: discord.Member):
         return
 
     await ctx.send(embed=_vc_embed(
-        "🖐️ Member Disconnected",
-        f"{member.mention} was dragged out of **{from_channel.name}**.",
-        discord.Color.orange()
+        "🖐️ Member Dragged",
+        f"{member.mention} was dragged from **{from_channel.name}** to **{destination.name}**.",
+        discord.Color.blurple()
     ))
 
-    await log(ctx.guild, "vc", "Member Dragged", None, discord.Color.orange(),
+    await log(ctx.guild, "vc", "Member Dragged", None, discord.Color.blurple(),
               fields=[
                   ("🛡 Staff",  f"{ctx.author.mention} (`{ctx.author.id}`)", True),
                   ("👤 Member", f"{member.mention} (`{member.id}`)",         True),
                   ("📤 From",   from_channel.mention,                        True),
+                  ("📥 To",     destination.mention,                         True),
               ],
               actor=ctx.author, target=member)
 
