@@ -5490,25 +5490,40 @@ async def on_voice_state_update(member, before, after):
                 return
 
     # ── Self-service unmute: joining a registered unmute VC instantly
-    # clears their VC server mute AND server deafen, no staff needed, then
-    # bounces them back out so the channel/slot is free for the next person.
+    # clears their VC server mute/deafen AND the ,mute role-based mute (two
+    # completely separate Discord mechanisms — this used to only clear the
+    # native voice mute/deafen despite the feature claiming to lift the
+    # Muted role too), no staff needed, then bounces them back out so the
+    # channel/slot is free for the next person.
     if after.channel and after.channel.id in UNMUTE_VC_CHANNELS.get(guild.id, []):
+        muted_role = discord.utils.get(guild.roles, name=MUTED_ROLE)
+        has_muted_role = muted_role is not None and muted_role in member.roles
+        cleared = []
         if after.mute or after.deaf:
             try:
                 await member.edit(mute=False, deafen=False, reason="Self-unmute via unmute VC")
+                cleared.append("VC server mute/deafen")
             except (discord.Forbidden, discord.HTTPException):
                 pass
-            else:
-                _log_mod_action(guild.id, member.id, "unmute", "Self-service (unmute VC)", f"Joined {after.channel.name}")
-                await log(guild, "vc", "Member Self-Unmuted/Undeafened", None, discord.Color.green(),
-                          fields=[
-                              ("🔊 User", f"{member.mention} (`{member.id}`)", True),
-                              ("🎤 Via",  after.channel.mention,               True),
-                          ], target=member)
-                try:
-                    await member.move_to(None, reason="Unmute VC — bounced back out after self-unmute")
-                except (discord.Forbidden, discord.HTTPException):
-                    pass
+        if has_muted_role:
+            try:
+                await member.remove_roles(muted_role, reason="Self-unmute via unmute VC")
+                cleared.append("Muted role")
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+        if cleared:
+            _log_mod_action(guild.id, member.id, "unmute", "Self-service (unmute VC)",
+                             f"Joined {after.channel.name} — cleared: {', '.join(cleared)}")
+            await log(guild, "vc", "Member Self-Unmuted/Undeafened", None, discord.Color.green(),
+                      fields=[
+                          ("🔊 User",    f"{member.mention} (`{member.id}`)", True),
+                          ("🎤 Via",     after.channel.mention,               True),
+                          ("🧹 Cleared", ", ".join(cleared),                   False),
+                      ], target=member)
+            try:
+                await member.move_to(None, reason="Unmute VC — bounced back out after self-unmute")
+            except (discord.Forbidden, discord.HTTPException):
+                pass
 
     # ── Joined a channel ──────────────────────────────────────
     if before.channel is None and after.channel is not None:
@@ -10646,12 +10661,13 @@ async def unmute(ctx, member: discord.Member, *, reason="No reason provided"):
 @_permitted_check(administrator=True)
 async def setunmutevc(ctx, action: str = None, channel: discord.VoiceChannel = None):
     """
-    Manage self-service unmute voice channels — a member who's currently
-    VC server-muted and/or server-deafened and joins one instantly gets
-    both cleared, no staff needed, then gets bounced back out so the
-    channel's free for the next person. Register the actual VC(s) you've
-    already created for this (create as many as you want — e.g. two
-    duplicate "unmute me" VCs for capacity).
+    Manage self-service unmute voice channels — a member who joins one
+    instantly gets cleared of whichever of these apply, no staff needed:
+    VC server-mute, server-deafen, AND the ,mute role (three separate
+    things, all handled). They're then bounced back out so the channel's
+    free for the next person. Register the actual VC(s) you've already
+    created for this (create as many as you want — e.g. two duplicate
+    "unmute me" VCs for capacity).
 
     Usage:
       ,setunmutevc list             — see registered unmute VCs
@@ -10687,7 +10703,7 @@ async def setunmutevc(ctx, action: str = None, channel: discord.VoiceChannel = N
             return
         channels.append(channel.id)
         _save_unmute_vc_channels()
-        await ctx.send(f"✅ {channel.mention} is now a self-service unmute VC — joining it removes the Muted role instantly.")
+        await ctx.send(f"✅ {channel.mention} is now a self-service unmute VC — joining it instantly clears VC server-mute/deafen and the Muted role.")
     elif action.lower() == "remove":
         if channel.id not in channels:
             await ctx.send(f"❌ {channel.mention} isn't registered.", delete_after=6)
