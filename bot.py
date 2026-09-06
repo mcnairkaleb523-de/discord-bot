@@ -8368,8 +8368,17 @@ async def jail(ctx, member: discord.Member, duration: str, *, reason="No reason 
             JAIL_ROLE_SNAPSHOTS.setdefault(ctx.guild.id, {})[member.id] = [r.id for r in other_roles]
             _save_jail_role_snapshots()
 
-            if other_roles:
-                await member.remove_roles(*other_roles, reason=f"Jailed by {ctx.author} — roles stripped")
+            # Managed roles (Server Booster, bot roles, linked integrations —
+            # Twitch/YouTube subs, etc.) can NEVER be manually added or
+            # removed via the API, regardless of hierarchy or permissions —
+            # Discord always 403s on that, independent of everything else.
+            # Excluded here so a boosted/otherwise-integrated member doesn't
+            # crash the whole jail with a Forbidden that has nothing to do
+            # with role position or the Manage Roles permission. They keep
+            # that one role; everything else still gets stripped.
+            removable_roles = [r for r in other_roles if not r.managed]
+            if removable_roles:
+                await member.remove_roles(*removable_roles, reason=f"Jailed by {ctx.author} — roles stripped")
             await member.add_roles(jail_role, reason=f"Jailed by {ctx.author} | {reason}")
 
         await _apply_jail_overwrites(member)
@@ -8658,15 +8667,20 @@ async def _strip_member_roles(guild: discord.Guild, member: discord.Member, acto
     verified_role = discord.utils.get(guild.roles, name=VERIFIED_ROLE)
     booster_role_id = BOOSTER_ROLES.get(guild.id, {}).get(member.id)
 
+    # Managed roles (Server Booster, bot roles, linked Twitch/YouTube
+    # integrations, etc.) can never be manually added or removed via the
+    # API no matter the hierarchy or permissions — Discord always 403s on
+    # that. Treated as "kept" alongside verified/booster-custom, since
+    # there's no way to strip them anyway.
     kept_names = [
         role.name for role in member.roles
         if role.name != "@everyone" and role < guild.me.top_role
-        and (role == verified_role or role.id == booster_role_id)
+        and (role == verified_role or role.id == booster_role_id or role.managed)
     ]
     removable = [
         role for role in member.roles
         if role.name != "@everyone" and role < guild.me.top_role
-        and role != verified_role and role.id != booster_role_id
+        and role != verified_role and role.id != booster_role_id and not role.managed
     ]
     if not removable:
         return [], kept_names, 0
