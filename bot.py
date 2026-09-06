@@ -4763,6 +4763,47 @@ async def on_member_update(before, after):
             actor=nick_mod, target=after
         )
 
+    # ── Timeouts applied/removed outside ,timeout ────────────────────
+    # ,timeout already logs itself when the bot performs the action. This
+    # only catches everything else that changes timed_out_until: the
+    # native Discord "Time Out"/"Remove Timeout" UI, another bot or
+    # integration — none of which ever showed up in #timeout-logs before,
+    # same gap ,ban's native-ban logging had until on_member_ban closed it.
+    if before.timed_out_until != after.timed_out_until:
+        now = discord.utils.utcnow()
+        was_active = bool(before.timed_out_until and before.timed_out_until > now)
+        is_active = bool(after.timed_out_until and after.timed_out_until > now)
+
+        if is_active and not was_active:
+            to_mod, to_reason = await _find_recent_mod(
+                after.guild, discord.AuditLogAction.member_update, member=after,
+                attr="timed_out_until", expected=after.timed_out_until
+            )
+            if not (to_mod and to_mod.bot):
+                await log(after.guild, "timeouts", "Member Timed Out (Discord)", None, discord.Color.gold(),
+                          fields=[
+                              ("🛡 Moderator", f"{to_mod.mention} (`{to_mod.id}`)" if to_mod else "*Unknown*", True),
+                              ("⏳ User",      f"{after.mention} (`{after.id}`)",                              True),
+                              ("🗓️ Expires",   discord.utils.format_dt(after.timed_out_until, "F"),            False),
+                              ("📝 Reason",    to_reason or "*No reason provided*",                             False),
+                          ],
+                          actor=to_mod, target=after)
+        elif was_active and not is_active:
+            to_mod, to_reason = await _find_recent_mod(
+                after.guild, discord.AuditLogAction.member_update, member=after,
+                attr="timed_out_until", expected=after.timed_out_until
+            )
+            # No resolvable actor almost always means it just expired
+            # naturally rather than someone removing it — not worth logging.
+            if to_mod and not to_mod.bot:
+                await log(after.guild, "timeouts", "Timeout Removed", None, discord.Color.green(),
+                          fields=[
+                              ("🛡 Moderator", f"{to_mod.mention} (`{to_mod.id}`)", True),
+                              ("⏳ User",      f"{after.mention} (`{after.id}`)",    True),
+                              ("📝 Reason",    to_reason or "*No reason provided*", False),
+                          ],
+                          actor=to_mod, target=after)
+
 
 @bot.event
 async def on_guild_role_create(role):
@@ -6873,20 +6914,28 @@ async def vcremovemod(ctx, member: discord.Member):
 @_permitted_check(move_members=True)
 async def drag_member(ctx, member: discord.Member):
     """
-    Drag a member out of voice — a quick staff shortcut for Discord's
-    native drag-and-disconnect move, without opening the member list.
-    Requires the Move Members permission (or a role granted it via
-    ,setpermittedrole) — works on ANY voice channel in the server, not
-    just temp/owned VCs.
+    Drag a member into the voice channel YOU'RE currently in — a quick
+    staff shortcut for Discord's native drag move, without opening the
+    member list. Requires the Move Members permission (or a role granted
+    it via ,setpermittedrole) — works on ANY voice channel in the
+    server, not just temp/owned VCs.
     Usage: ,d @user
     """
+    if not ctx.author.voice or not ctx.author.voice.channel:
+        await ctx.send("❌ You need to be in a voice channel to drag someone into it.")
+        return
     if not member.voice or not member.voice.channel:
         await ctx.send(f"❌ {member.mention} is not in a voice channel.")
         return
 
+    destination = ctx.author.voice.channel
     from_channel = member.voice.channel
+    if from_channel == destination:
+        await ctx.send(f"❌ {member.mention} is already in {destination.mention}.")
+        return
+
     try:
-        await member.move_to(None, reason=f"Dragged by {ctx.author}")
+        await member.move_to(destination, reason=f"Dragged by {ctx.author}")
     except discord.Forbidden:
         await ctx.send("❌ I don't have permission to move that member.")
         return
@@ -6895,16 +6944,17 @@ async def drag_member(ctx, member: discord.Member):
         return
 
     await ctx.send(embed=_vc_embed(
-        "🖐️ Member Disconnected",
-        f"{member.mention} was dragged out of **{from_channel.name}**.",
-        discord.Color.orange()
+        "🖐️ Member Dragged",
+        f"{member.mention} was dragged from **{from_channel.name}** to **{destination.name}**.",
+        discord.Color.blurple()
     ))
 
-    await log(ctx.guild, "vc", "Member Dragged", None, discord.Color.orange(),
+    await log(ctx.guild, "vc", "Member Dragged", None, discord.Color.blurple(),
               fields=[
                   ("🛡 Staff",  f"{ctx.author.mention} (`{ctx.author.id}`)", True),
                   ("👤 Member", f"{member.mention} (`{member.id}`)",         True),
                   ("📤 From",   from_channel.mention,                        True),
+                  ("📥 To",     destination.mention,                         True),
               ],
               actor=ctx.author, target=member)
 
