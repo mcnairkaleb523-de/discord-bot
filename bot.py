@@ -3534,6 +3534,22 @@ def _build_help_embed(guild: discord.Guild) -> discord.Embed:
 # ============================================================
 # HELPERS
 # ============================================================
+def _role_forbidden_reason(guild: discord.Guild) -> str:
+    """Diagnose a discord.Forbidden raised while adding/removing a role.
+    Role *position* being at the top of the list is NOT the same thing as
+    actually having the Manage Roles permission granted to that role —
+    a very common real setup mistake — so check which one it actually is
+    instead of always blaming hierarchy/position."""
+    if not guild.me.guild_permissions.manage_roles:
+        return (
+            "❌ I don't have the **Manage Roles** permission — go to Server "
+            "Settings → Roles → my role and turn it on. (Being positioned at "
+            "the top of the role list isn't the same thing as having the "
+            "permission — both are required.)"
+        )
+    return "❌ I can't manage that member's roles. Make sure my role is positioned **above** theirs in Server Settings → Roles."
+
+
 def parse_jail_duration(duration: str):
     duration = duration.lower().strip()
     time_units = {
@@ -8016,7 +8032,7 @@ async def verify(ctx, member: discord.Member):
                   actor=ctx.author, target=member)
 
     except discord.Forbidden:
-        await ctx.send("❌ I can't manage that member's roles. Move my bot role higher.")
+        await ctx.send(_role_forbidden_reason(ctx.guild))
     except discord.HTTPException:
         await ctx.send("❌ Something went wrong while verifying that member.")
 
@@ -8050,7 +8066,7 @@ async def unverify(ctx, member: discord.Member):
                   actor=ctx.author, target=member)
 
     except discord.Forbidden:
-        await ctx.send("❌ I can't manage that member's roles. Move my bot role higher.")
+        await ctx.send(_role_forbidden_reason(ctx.guild))
     except discord.HTTPException:
         await ctx.send("❌ Something went wrong while unverifying that member.")
 
@@ -8080,7 +8096,7 @@ async def denyverify(ctx, member: discord.Member, *, reason="Verification denied
                   actor=ctx.author, target=member)
 
     except discord.Forbidden:
-        await ctx.send("❌ I can't manage that member's roles.")
+        await ctx.send(_role_forbidden_reason(ctx.guild))
     except discord.HTTPException:
         await ctx.send("❌ Something went wrong while denying verification.")
 
@@ -8409,7 +8425,7 @@ async def jail(ctx, member: discord.Member, duration: str, *, reason="No reason 
                   actor=ctx.author, target=member)
 
     except discord.Forbidden:
-        await ctx.send("❌ I can't manage that member's roles. Move my bot role higher.")
+        await ctx.send(_role_forbidden_reason(ctx.guild))
     except discord.HTTPException:
         await ctx.send("❌ Something went wrong while jailing that member.")
 
@@ -8464,7 +8480,7 @@ async def unjail(ctx, member: discord.Member, *, reason="No reason provided"):
                   actor=ctx.author, target=member)
 
     except discord.Forbidden:
-        await ctx.send("❌ I can't manage that member's roles. Move my bot role higher.")
+        await ctx.send(_role_forbidden_reason(ctx.guild))
     except discord.HTTPException:
         await ctx.send("❌ Something went wrong while unjailing that member.")
 
@@ -10582,7 +10598,7 @@ async def mute(ctx, member: discord.Member, *, reason="No reason provided"):
                   actor=ctx.author, target=member)
 
     except discord.Forbidden:
-        await ctx.send("❌ I can't manage that member's roles. Move my bot role higher.")
+        await ctx.send(_role_forbidden_reason(ctx.guild))
 
 
 @bot.command()
@@ -10609,7 +10625,7 @@ async def unmute(ctx, member: discord.Member, *, reason="No reason provided"):
                   actor=ctx.author, target=member)
 
     except discord.Forbidden:
-        await ctx.send("❌ I can't manage that member's roles. Move my bot role higher.")
+        await ctx.send(_role_forbidden_reason(ctx.guild))
 
 
 @bot.command()
