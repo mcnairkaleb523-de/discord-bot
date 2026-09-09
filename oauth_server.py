@@ -1279,6 +1279,34 @@ def _create_checkout_session_sync(product: str, tier: str, guild_id: str, discor
     )
 
 
+def _create_role_checkout_session_sync(guild_id: str, role_id: str, role_name: str, price_cents: int, discord_user_id: str, base_url: str):
+    """Dynamic per-purchase price (unlike the fixed PRODUCTS catalog above) —
+    a guild's role listings come from bot.py's ,setroleshop, not a
+    pre-created Stripe Price, so this uses inline price_data instead of a
+    cached Price ID. Always mode='payment': a role purchase is a one-time
+    charge, never a subscription."""
+    metadata = {
+        "kind": "role_purchase",
+        "guild_id": str(guild_id), "role_id": str(role_id),
+        "discord_user_id": str(discord_user_id),
+    }
+    return stripe.checkout.Session.create(
+        mode="payment",
+        line_items=[{
+            "price_data": {
+                "currency": "usd",
+                "product_data": {"name": f"{role_name} role"},
+                "unit_amount": price_cents,
+            },
+            "quantity": 1,
+        }],
+        success_url=f"{base_url}/checkout/success?session_id={{CHECKOUT_SESSION_ID}}",
+        cancel_url=f"{base_url}/checkout/cancel",
+        metadata=metadata,
+        client_reference_id=str(guild_id),
+    )
+
+
 def _product_tier_for_price_id(price_id: str):
     for key, pid in STRIPE_PRICE_IDS.items():
         if pid == price_id:
@@ -1326,8 +1354,35 @@ async def _send_dm(session: ClientSession, user_id: str, content: str):
 # are what actually provision/maintain access — never the client-side
 # success page, which only ever shows a friendly confirmation.
 
+async def _handle_role_purchase_completed(obj: dict, session: ClientSession):
+    """Fulfillment for the real-money role shop (bot.py's ,buyrole) — grants
+    the role straight over Discord's REST API via the bot token, no live
+    gateway connection or shared filesystem with bot.py needed. Runs off
+    checkout.session.completed only, per Stripe's own guidance, never the
+    client-side success page."""
+    metadata = obj.get("metadata") or {}
+    guild_id = metadata.get("guild_id")
+    role_id = metadata.get("role_id")
+    discord_user_id = metadata.get("discord_user_id")
+    if not (guild_id and role_id and discord_user_id):
+        log.warning("role_purchase checkout.session.completed missing metadata on session %s", obj.get("id"))
+        return
+
+    await _set_role(session, guild_id, discord_user_id, role_id, add=True)
+
+    amount = obj.get("amount_total")
+    amount_str = f"${amount / 100:,.2f}" if isinstance(amount, int) else "your payment"
+    await _send_dm(session, discord_user_id, (
+        f"✅ **Payment received — thank you!**\n\n"
+        f"Your role purchase ({amount_str}) is complete — the role has been added to your account in that server."
+    ))
+
+
 async def _handle_checkout_completed(obj: dict, session: ClientSession):
     metadata = obj.get("metadata") or {}
+    if metadata.get("kind") == "role_purchase":
+        await _handle_role_purchase_completed(obj, session)
+        return
     guild_id = metadata.get("guild_id")
     discord_user_id = metadata.get("discord_user_id")
     product = metadata.get("product")
@@ -1955,6 +2010,36 @@ async def handle_internal_checkout_link(request: web.Request) -> web.Response:
     return web.json_response({"url": session_obj.url})
 
 
+async def handle_internal_role_checkout_link(request: web.Request) -> web.Response:
+    if not _check_internal_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if not STRIPE_SECRET_KEY:
+        return web.json_response({"error": "billing not configured"}, status=503)
+
+    body = await request.json()
+    guild_id = str(body.get("guild_id", ""))
+    role_id = str(body.get("role_id", ""))
+    role_name = str(body.get("role_name") or "Role")[:100]
+    discord_user_id = str(body.get("discord_user_id", ""))
+    try:
+        price_cents = int(body.get("price_cents", 0))
+    except (TypeError, ValueError):
+        price_cents = 0
+
+    if not guild_id.isdigit() or not role_id.isdigit() or not discord_user_id.isdigit() or price_cents < 50:
+        return web.json_response({"error": "guild_id, role_id, discord_user_id, and price_cents (min 50) are required"}, status=400)
+
+    base_url = _resolve_base_url(request)
+    try:
+        session_obj = await asyncio.to_thread(
+            _create_role_checkout_session_sync, guild_id, role_id, role_name, price_cents, discord_user_id, base_url,
+        )
+    except Exception as e:
+        log.error("Failed to create role checkout session via internal API: %s", e)
+        return web.json_response({"error": "failed to create checkout session"}, status=502)
+    return web.json_response({"url": session_obj.url})
+
+
 async def handle_internal_portal_link(request: web.Request) -> web.Response:
     if not _check_internal_auth(request):
         return web.json_response({"error": "unauthorized"}, status=401)
@@ -1992,6 +2077,7 @@ def create_app() -> web.Application:
     app.router.add_post("/stripe/webhook", handle_stripe_webhook)
     app.router.add_get("/internal/subscription/{guild_id}", handle_internal_get_subscription)
     app.router.add_post("/internal/checkout-link", handle_internal_checkout_link)
+    app.router.add_post("/internal/roleshop/checkout-link", handle_internal_role_checkout_link)
     app.router.add_post("/internal/portal-link", handle_internal_portal_link)
     app.router.add_get("/", handle_landing_page)
     app.router.add_get("/health", handle_health)

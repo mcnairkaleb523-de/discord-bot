@@ -15008,9 +15008,13 @@ COOLDOWNS: dict[int, dict[int, dict]] = _load_depth(_load_data("cooldowns", {}),
 # GAMBLE_WINS[guild_id][user_id] = net_winnings (for leaderboard)
 GAMBLE_WINS: dict[int, dict[int, int]] = _load_depth(_load_data("gamble_wins", {}), 2)
 
-# ROLE_SHOP[guild_id][role_id] = price (in economy coins) — a role for sale
-# via ,buyrole, managed with ,setroleshop. Purely cosmetic/perk roles are
-# the intended use case; nothing here grants moderation power.
+# ROLE_SHOP[guild_id][role_id] = price_cents (real-money price via Stripe,
+# in US cents) — a role for sale via ,buyrole, managed with ,setroleshop.
+# Purchases are fulfilled by oauth_server.py's Stripe checkout + webhook
+# (see that file's BILLING section) — it grants the role directly over the
+# Discord REST API once payment confirms, so this never touches the
+# economy wallet. Purely cosmetic/perk roles are the intended use case;
+# nothing here grants moderation power.
 ROLE_SHOP: dict[int, dict[int, int]] = _load_depth(_load_data("role_shop", {}), 2)
 
 
@@ -15214,40 +15218,45 @@ async def rob(ctx, member: discord.Member = None):
         await ctx.send(f"🚔 You got caught! You paid a **{fine:,} coin** fine.")
 
 
-# ── Role Shop ────────────────────────────────────────────────
+# ── Role Shop (real money, via Stripe) ──────────────────────
 @bot.command()
 async def shop(ctx):
     """View roles for sale — buy one with ,buyrole @role. Usage: ,shop"""
     listings = ROLE_SHOP.get(ctx.guild.id, {})
     lines = []
-    for role_id, price in sorted(listings.items(), key=lambda kv: kv[1]):
+    for role_id, price_cents in sorted(listings.items(), key=lambda kv: kv[1]):
         role = ctx.guild.get_role(role_id)
         if role:
-            lines.append(f"➡️ {role.mention} — **{price:,} coins**")
+            lines.append(f"➡️ {role.mention} — **${price_cents / 100:,.2f}**")
 
     embed = discord.Embed(
         title="🛒 Role Shop",
         description=(
-            "Check your balance with `,balance`, then buy with `,buyrole @role`.\n\n"
+            "Buy a role with real money — secure checkout via Stripe, `,buyrole @role`.\n\n"
             + ("\n".join(lines) if lines else "*Nothing for sale yet.*")
         ),
         color=discord.Color.gold(),
         timestamp=discord.utils.utcnow()
     )
     if not lines:
-        embed.add_field(name="ℹ️ For Staff", value="Add roles with `,setroleshop add @role <price>`.", inline=False)
+        embed.add_field(name="ℹ️ For Staff", value="Add roles with `,setroleshop add @role <price>` (e.g. `,setroleshop add @role 4.99`).", inline=False)
     embed.set_footer(text=f"TrapAI Shop • {ctx.guild.name}")
     await ctx.send(embed=embed)
 
 
 @bot.command()
 async def buyrole(ctx, role: discord.Role = None):
-    """Buy a role from ,shop with your coins. Usage: ,buyrole @role"""
+    """
+    Buy a role from ,shop with real money — DMs you a secure Stripe
+    checkout link. The role is granted automatically within moments of
+    payment confirming (you don't need to run any command afterward).
+    Usage: ,buyrole @role
+    """
     if role is None:
         await ctx.send("❌ Usage: `,buyrole @role` — see what's for sale with `,shop`.", delete_after=8)
         return
-    price = ROLE_SHOP.get(ctx.guild.id, {}).get(role.id)
-    if price is None:
+    price_cents = ROLE_SHOP.get(ctx.guild.id, {}).get(role.id)
+    if price_cents is None:
         await ctx.send(f"❌ {role.mention} isn't for sale. See `,shop` for what's available.", delete_after=8)
         return
     if role in ctx.author.roles:
@@ -15259,47 +15268,54 @@ async def buyrole(ctx, role: discord.Role = None):
     if role >= ctx.guild.me.top_role:
         await ctx.send(_role_forbidden_reason(ctx.guild))
         return
-
-    data = _eco(ctx.guild.id, ctx.author.id)
-    if data["wallet"] < price:
-        await ctx.send(f"❌ You need **{price:,} coins** but only have **{data['wallet']:,}**.", delete_after=8)
+    if not BILLING_CONFIGURED:
+        await ctx.send("❌ Billing isn't configured on this bot yet — ask whoever runs it to finish setting up Stripe.", delete_after=12)
         return
 
-    try:
-        await ctx.author.add_roles(role, reason=f"Purchased from role shop for {price:,} coins")
-    except discord.Forbidden:
-        await ctx.send(_role_forbidden_reason(ctx.guild))
-        return
-    except discord.HTTPException:
-        await ctx.send("❌ Something went wrong granting that role.", delete_after=8)
+    data, error = await _billing_api_post("/internal/roleshop/checkout-link", {
+        "guild_id": ctx.guild.id, "role_id": role.id, "role_name": role.name,
+        "discord_user_id": ctx.author.id, "price_cents": price_cents,
+    })
+    if error:
+        await ctx.send(f"❌ Couldn't start checkout: {error}", delete_after=12)
         return
 
-    data["wallet"] -= price
+    checkout_url = data["url"]
     embed = discord.Embed(
-        title="🛒 Role Purchased",
-        description=f"You bought {role.mention} for **{price:,} coins**!",
-        color=discord.Color.green(),
+        title=f"🛒 Checkout — {role.name}",
+        description=(
+            f"Click below to buy {role.mention} for **${price_cents / 100:,.2f}** securely via Stripe.\n\n"
+            f"[Complete Checkout]({checkout_url})\n\n"
+            "The role is granted automatically the moment payment confirms."
+        ),
+        color=discord.Color.gold(),
         timestamp=discord.utils.utcnow()
     )
-    embed.set_footer(text=f"Remaining balance: {data['wallet']:,} coins")
-    await ctx.send(embed=embed)
-    await log(ctx.guild, "roles", "Role Purchased", None, discord.Color.gold(),
+    embed.set_footer(text="TrapAI never sees your card details — Stripe handles all payment info.")
+
+    try:
+        await ctx.author.send(embed=embed)
+        await ctx.send(f"📨 {ctx.author.mention} Check your DMs for your secure checkout link.")
+    except (discord.Forbidden, discord.HTTPException):
+        await ctx.send(embed=embed)  # DMs closed — post it here instead
+
+    await log(ctx.guild, "roles", "Role Shop Checkout Started", None, discord.Color.gold(),
               fields=[
                   ("👤 Member", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
                   ("🏷️ Role",   f"{role.mention} (`{role.id}`)",             True),
-                  ("💰 Price",  f"{price:,} coins",                          True),
+                  ("💰 Price",  f"${price_cents / 100:,.2f}",                True),
               ],
               actor=ctx.author, target=ctx.author)
 
 
 @bot.command()
 @_permitted_check(administrator=True)
-async def setroleshop(ctx, action: str = None, role: discord.Role = None, price: int = None):
+async def setroleshop(ctx, action: str = None, role: discord.Role = None, price: float = None):
     """
-    Manage which roles are for sale in ,shop.
+    Manage which roles are for sale in ,shop for real money (Stripe).
     Usage:
       ,setroleshop list                — view current listings
-      ,setroleshop add @role <price>   — list a role for sale
+      ,setroleshop add @role <price>   — list a role for sale, e.g. `,setroleshop add @role 4.99`
       ,setroleshop remove @role        — take a role off sale
     """
     guild = ctx.guild
@@ -15310,9 +15326,9 @@ async def setroleshop(ctx, action: str = None, role: discord.Role = None, price:
             await ctx.send("📭 No roles for sale yet. Use `,setroleshop add @role <price>`.")
             return
         lines = []
-        for role_id, p in sorted(listings.items(), key=lambda kv: kv[1]):
+        for role_id, price_cents in sorted(listings.items(), key=lambda kv: kv[1]):
             r = guild.get_role(role_id)
-            lines.append(f"➡️ {r.mention if r else f'*deleted role* (`{role_id}`)'} — **{p:,} coins**")
+            lines.append(f"➡️ {r.mention if r else f'*deleted role* (`{role_id}`)'} — **${price_cents / 100:,.2f}**")
         embed = discord.Embed(
             title="🛒 Role Shop Listings",
             description="\n".join(lines),
@@ -15324,8 +15340,8 @@ async def setroleshop(ctx, action: str = None, role: discord.Role = None, price:
         return
 
     if action.lower() == "add":
-        if role is None or price is None or price <= 0:
-            await ctx.send("❌ Usage: `,setroleshop add @role <price>`", delete_after=8)
+        if role is None or price is None or price < 0.50:
+            await ctx.send("❌ Usage: `,setroleshop add @role <price>` — price must be at least `$0.50` (e.g. `,setroleshop add @role 4.99`).", delete_after=10)
             return
         if role.managed:
             await ctx.send(f"❌ {role.mention} is a managed role (Server Booster, bot, or integration role) and can never be granted manually — it can't be sold.", delete_after=8)
@@ -15333,9 +15349,12 @@ async def setroleshop(ctx, action: str = None, role: discord.Role = None, price:
         if role >= guild.me.top_role:
             await ctx.send(_role_forbidden_reason(guild))
             return
-        listings[role.id] = price
+        if not BILLING_CONFIGURED:
+            await ctx.send("❌ Billing isn't configured on this bot yet — ask whoever runs it to finish setting up Stripe before listing real-money roles.", delete_after=12)
+            return
+        listings[role.id] = round(price * 100)
         _save_role_shop()
-        await ctx.send(f"✅ {role.mention} is now for sale for **{price:,} coins**.")
+        await ctx.send(f"✅ {role.mention} is now for sale for **${price:,.2f}**.")
     elif action.lower() == "remove":
         if role is None:
             await ctx.send("❌ Usage: `,setroleshop remove @role`", delete_after=8)
