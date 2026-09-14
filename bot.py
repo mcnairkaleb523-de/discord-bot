@@ -3468,7 +3468,7 @@ class VCAddModModal(discord.ui.Modal, title="🛡 Add VC Moderator"):
 # manually with COMMAND_CATALOG in oauth_server.py (that file has no
 # import relationship with this one — see its docstring).
 HELP_CATEGORIES = [
-    ('🛡️', 'Moderation', ['kick', 'ban', 'mute', 'unmute', 'timeout', 'warn', 'warnings', 'clearwarnings', 'modhistory', 'hardban', 'unhardban', 'hardbans', 'clear', 'purge', 'lock', 'unlock', 'hide', 'unhide', 'slowmode', 'nuke', 'lockdown', 'unlockdown', 'raidmode', 'nickname', 'strip', 'trapwarn', 'trapscan', 'restart']),
+    ('🛡️', 'Moderation', ['kick', 'ban', 'massban', 'massunban', 'mute', 'unmute', 'timeout', 'warn', 'warnings', 'clearwarnings', 'modhistory', 'hardban', 'unhardban', 'hardbans', 'clear', 'purge', 'lock', 'unlock', 'hide', 'unhide', 'slowmode', 'nuke', 'lockdown', 'unlockdown', 'raidmode', 'nickname', 'strip', 'trapwarn', 'trapscan', 'restart']),
     ('🔒', 'Jail & Anti-Raid', ['jail', 'unjail', 'setupjail', 'antiraid', 'raidwhitelist', 'wl']),
     ('🤖', 'Verification', ['verify', 'unverify', 'denyverify', 'sendverify', 'setverifybackup']),
     ('🏷️', 'Roles', ['role', 'roleall', 'massrole', 'massunrole', 'restoreallroles', 'autorole', 'setgifrole', 'protectedrole', 'br', 'roles']),
@@ -3478,7 +3478,7 @@ HELP_CATEGORIES = [
     ('📊', 'Stats & Info', ['whois', 'chatstats', 'serverstats', 'invites', 'invitelogs', 'inviteleaderboard', 'setinvite', 'milestones', 'setmilestone', 'testmilestone', 'ping', 'exitsurveys']),
     ('✅', 'Vouch', ['vouch', 'unvouch', 'cancelvouch', 'pendingvouches', 'vouches', 'vouchleaderboard', 'vouchstats', 'vouchconfig']),
     ('🎉', 'Giveaways & Polls', ['giveaway', 'giveawayend', 'giveaways', 'poll', 'pollend']),
-    ('💰', 'Economy & Games', ['balance', 'daily', 'weekly', 'work', 'rob', 'give', 'deposit', 'withdraw', 'leaderboard', 'gamblers', 'slots', 'blackjack', 'coinflip', 'dice', '8ball', 'trivia', 'hangman', 'tictactoe', 'numguess', 'rockpaperscissors', 'highlow', 'crash', 'games']),
+    ('💰', 'Economy & Games', ['balance', 'daily', 'weekly', 'work', 'rob', 'give', 'deposit', 'withdraw', 'leaderboard', 'gamblers', 'slots', 'blackjack', 'coinflip', 'dice', '8ball', 'trivia', 'hangman', 'tictactoe', 'numguess', 'rockpaperscissors', 'highlow', 'crash', 'games', 'shop', 'buyrole', 'setroleshop']),
     ('🎂', 'Birthdays', ['birthday', 'removebirthday', 'setbirthday', 'setbirthdaychannel', 'birthdaylist', 'settimezone']),
     ('🚀', 'Boosts & Vanity', ['setboostchannel', 'setvanitycode', 'setvanityrole', 'vanityconfig']),
     ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist', 'acceptstaff', 'denystaff', 'setstaffrules', 'staffleaderboard', 'staffstats', 'staffwarn', 'staffstrike', 'staffwarnings', 'staffstrikes', 'clearstaffwarnings', 'clearstaffstrikes']),
@@ -14453,6 +14453,227 @@ async def unhardban(ctx, user_id: int, *, reason: str = "No reason provided"):
               actor=ctx.author)
 
 
+# ── Mass Ban / Mass Unban ────────────────────────────────────
+_MENTION_ID_RE = re.compile(r"^<@!?(\d{15,20})>$")
+
+
+def _parse_user_id_tokens(tokens) -> tuple[list[int], list[str]]:
+    """Parse raw command tokens (bare snowflake IDs or <@id>/<@!id> mentions)
+    into (unique valid user ids in order, tokens that didn't parse)."""
+    valid, invalid, seen = [], [], set()
+    for tok in tokens:
+        m = _MENTION_ID_RE.match(tok)
+        raw = m.group(1) if m else tok
+        if raw.isdigit() and 15 <= len(raw) <= 20:
+            uid = int(raw)
+            if uid not in seen:
+                seen.add(uid)
+                valid.append(uid)
+        else:
+            invalid.append(tok)
+    return valid, invalid
+
+
+class _MassActionConfirmView(discord.ui.View):
+    """Shared yes/no confirmation for ,massban / ,massunban — these can
+    affect hundreds of accounts in one command, so nothing runs without an
+    explicit click from whoever ran it."""
+    def __init__(self, author_id: int):
+        super().__init__(timeout=30)
+        self.author_id = author_id
+        self.confirmed = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ Only the person who ran the command can confirm.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="✅ Confirm", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.confirmed = True
+        self.stop()
+        await interaction.response.edit_message(content="⏳ Processing...", embed=None, view=None)
+
+    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(content="❌ Cancelled.", embed=None, view=None)
+
+
+@bot.command(aliases=["massb"])
+@_permitted_check(ban_members=True)
+async def massban(ctx, *targets: str):
+    """
+    Ban multiple users at once by ID or mention — for quickly removing a
+    wave of raid/nuke accounts. Usage:
+      ,massban <id/mention> <id/mention> ...
+    Asks for confirmation before banning anyone. Max 100 per run.
+    """
+    guild = ctx.guild
+    if not targets:
+        await ctx.send("❌ Usage: `,massban <id/mention> <id/mention> ...`", delete_after=10)
+        return
+
+    ids, invalid = _parse_user_id_tokens(targets)
+    protected = {ctx.author.id, bot.user.id, guild.owner_id}
+    skipped_protected = [uid for uid in ids if uid in protected]
+    ids = [uid for uid in ids if uid not in protected]
+
+    if not ids:
+        await ctx.send("❌ No valid user IDs/mentions to ban (or everything given was a protected account).", delete_after=10)
+        return
+    if len(ids) > 100:
+        await ctx.send(f"❌ That's {len(ids)} targets — max 100 per run. Split into batches.", delete_after=12)
+        return
+
+    warn_lines = []
+    if invalid:
+        warn_lines.append(f"⚠️ Skipped {len(invalid)} unrecognized token(s).")
+    if skipped_protected:
+        warn_lines.append(f"⚠️ Skipped {len(skipped_protected)} protected account(s) (you, the bot, or the server owner).")
+
+    preview = ", ".join(f"`{uid}`" for uid in ids[:20])
+    if len(ids) > 20:
+        preview += f", … +{len(ids) - 20} more"
+
+    embed = discord.Embed(
+        title="⚠️ Confirm Mass Ban",
+        description=(
+            f"You're about to ban **{len(ids)}** user(s) from **{guild.name}**.\n\n{preview}"
+            + ("\n\n" + "\n".join(warn_lines) if warn_lines else "")
+        ),
+        color=discord.Color.red(),
+    )
+    view = _MassActionConfirmView(ctx.author.id)
+    await ctx.send(embed=embed, view=view)
+    await view.wait()
+    if not view.confirmed:
+        return
+
+    banned = 0
+    failed = 0
+    for uid in ids:
+        try:
+            await guild.ban(discord.Object(id=uid), reason=f"Mass ban by {ctx.author}", delete_message_days=0)
+            banned += 1
+            _log_mod_action(guild.id, uid, "massban", ctx.author, f"Mass ban by {ctx.author}")
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            failed += 1
+
+    embed2 = discord.Embed(
+        title="🔨 Mass Ban Complete",
+        description=f"Banned **{banned}**/{len(ids)} user(s) from **{guild.name}**.",
+        color=discord.Color.dark_red(),
+        timestamp=discord.utils.utcnow()
+    )
+    if failed:
+        embed2.add_field(name="⚠️ Failed", value=str(failed), inline=True)
+    await ctx.send(embed=embed2)
+    await log(guild, "bans", "Mass Ban Executed", None, discord.Color.dark_red(),
+              fields=[
+                  ("🛡 Moderator", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
+                  ("🔨 Banned",    f"{banned}/{len(ids)}",                       True),
+                  ("👤 IDs",       ", ".join(str(u) for u in ids[:25])[:1024],  False),
+              ],
+              actor=ctx.author)
+
+
+@bot.command(aliases=["massunb"])
+@_permitted_check(ban_members=True)
+async def massunban(ctx, *targets: str):
+    """
+    Unban multiple users at once — for recovering from a mass-ban
+    attack/nuke attempt. Usage:
+      ,massunban <id/mention> <id/mention> ...   — unban specific users
+      ,massunban all                              — unban EVERY currently banned member
+    Skips anyone on the ,hardban list — unban those with ,unhardban
+    specifically, since a plain unban would just get them instantly
+    re-banned (see the hard-ban rejoin protection).
+    """
+    guild = ctx.guild
+    if not targets:
+        await ctx.send("❌ Usage: `,massunban <id/mention> <id/mention> ...` or `,massunban all`", delete_after=10)
+        return
+
+    hard_banned_ids = set(HARD_BANNED.get(guild.id, {}).keys())
+    invalid = []
+
+    if len(targets) == 1 and targets[0].lower() == "all":
+        try:
+            ids = [entry.user.id async for entry in guild.bans(limit=None)]
+        except discord.Forbidden:
+            await ctx.send("❌ I don't have permission to view this server's ban list.", delete_after=8)
+            return
+    else:
+        ids, invalid = _parse_user_id_tokens(targets)
+
+    skipped_hardbanned = [uid for uid in ids if uid in hard_banned_ids]
+    ids = [uid for uid in ids if uid not in hard_banned_ids]
+
+    if not ids:
+        msg = "❌ Nothing to unban."
+        if skipped_hardbanned:
+            msg += f" ({len(skipped_hardbanned)} skipped — hard-banned, use `,unhardban` instead.)"
+        await ctx.send(msg, delete_after=10)
+        return
+    if len(ids) > 1000:
+        await ctx.send(f"❌ That's {len(ids)} users — narrow it down or run this in batches.", delete_after=12)
+        return
+
+    warn_lines = []
+    if invalid:
+        warn_lines.append(f"⚠️ Skipped {len(invalid)} unrecognized token(s).")
+    if skipped_hardbanned:
+        warn_lines.append(f"⚠️ Skipped {len(skipped_hardbanned)} hard-banned user(s) — use `,unhardban` for those.")
+
+    preview = ", ".join(f"`{uid}`" for uid in ids[:20])
+    if len(ids) > 20:
+        preview += f", … +{len(ids) - 20} more"
+
+    embed = discord.Embed(
+        title="⚠️ Confirm Mass Unban",
+        description=(
+            f"You're about to unban **{len(ids)}** user(s) from **{guild.name}**.\n\n{preview}"
+            + ("\n\n" + "\n".join(warn_lines) if warn_lines else "")
+        ),
+        color=discord.Color.green(),
+    )
+    view = _MassActionConfirmView(ctx.author.id)
+    await ctx.send(embed=embed, view=view)
+    await view.wait()
+    if not view.confirmed:
+        return
+
+    unbanned = 0
+    failed = 0
+    for uid in ids:
+        try:
+            await guild.unban(discord.Object(id=uid), reason=f"Mass unban by {ctx.author}")
+            unbanned += 1
+            _log_mod_action(guild.id, uid, "massunban", ctx.author, f"Mass unban by {ctx.author}")
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            failed += 1
+
+    embed2 = discord.Embed(
+        title="✅ Mass Unban Complete",
+        description=f"Unbanned **{unbanned}**/{len(ids)} user(s) from **{guild.name}**.",
+        color=discord.Color.green(),
+        timestamp=discord.utils.utcnow()
+    )
+    if failed:
+        embed2.add_field(name="⚠️ Failed", value=str(failed), inline=True)
+    if skipped_hardbanned:
+        embed2.add_field(name="🔴 Skipped (hard-banned)", value=str(len(skipped_hardbanned)), inline=True)
+    await ctx.send(embed=embed2)
+    await log(guild, "bans", "Mass Unban Executed", None, discord.Color.green(),
+              fields=[
+                  ("🛡 Moderator", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
+                  ("✅ Unbanned",  f"{unbanned}/{len(ids)}",                     True),
+              ],
+              actor=ctx.author)
+
+
 @bot.command()
 @_permitted_check(ban_members=True)
 async def hardbans(ctx):
@@ -15008,6 +15229,19 @@ COOLDOWNS: dict[int, dict[int, dict]] = _load_depth(_load_data("cooldowns", {}),
 # GAMBLE_WINS[guild_id][user_id] = net_winnings (for leaderboard)
 GAMBLE_WINS: dict[int, dict[int, int]] = _load_depth(_load_data("gamble_wins", {}), 2)
 
+# ROLE_SHOP[guild_id][role_id] = price_cents (real-money price via Stripe,
+# in US cents) — a role for sale via ,buyrole, managed with ,setroleshop.
+# Purchases are fulfilled by oauth_server.py's Stripe checkout + webhook
+# (see that file's BILLING section) — it grants the role directly over the
+# Discord REST API once payment confirms, so this never touches the
+# economy wallet. Purely cosmetic/perk roles are the intended use case;
+# nothing here grants moderation power.
+ROLE_SHOP: dict[int, dict[int, int]] = _load_depth(_load_data("role_shop", {}), 2)
+
+
+def _save_role_shop():
+    _save_data("role_shop", _dump_depth(ROLE_SHOP, 2))
+
 def _eco(guild_id: int, user_id: int) -> dict:
     return ECONOMY.setdefault(guild_id, {}).setdefault(user_id, {"wallet": 0, "bank": 0})
 
@@ -15203,6 +15437,157 @@ async def rob(ctx, member: discord.Member = None):
         fine = random.randint(50, 200)
         robber["wallet"] = max(0, robber["wallet"] - fine)
         await ctx.send(f"🚔 You got caught! You paid a **{fine:,} coin** fine.")
+
+
+# ── Role Shop (real money, via Stripe) ──────────────────────
+@bot.command()
+async def shop(ctx):
+    """View roles for sale — buy one with ,buyrole @role. Usage: ,shop"""
+    listings = ROLE_SHOP.get(ctx.guild.id, {})
+    lines = []
+    for role_id, price_cents in sorted(listings.items(), key=lambda kv: kv[1]):
+        role = ctx.guild.get_role(role_id)
+        if role:
+            lines.append(f"➡️ {role.mention} — **${price_cents / 100:,.2f}**")
+
+    embed = discord.Embed(
+        title="🛒 Role Shop",
+        description=(
+            "Buy a role with real money — secure checkout via Stripe, `,buyrole @role`.\n\n"
+            + ("\n".join(lines) if lines else "*Nothing for sale yet.*")
+        ),
+        color=discord.Color.gold(),
+        timestamp=discord.utils.utcnow()
+    )
+    if not lines:
+        embed.add_field(name="ℹ️ For Staff", value="Add roles with `,setroleshop add @role <price>` (e.g. `,setroleshop add @role 4.99`).", inline=False)
+    embed.set_footer(text=f"TrapAI Shop • {ctx.guild.name}")
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+async def buyrole(ctx, role: discord.Role = None):
+    """
+    Buy a role from ,shop with real money — DMs you a secure Stripe
+    checkout link. The role is granted automatically within moments of
+    payment confirming (you don't need to run any command afterward).
+    Usage: ,buyrole @role
+    """
+    if role is None:
+        await ctx.send("❌ Usage: `,buyrole @role` — see what's for sale with `,shop`.", delete_after=8)
+        return
+    price_cents = ROLE_SHOP.get(ctx.guild.id, {}).get(role.id)
+    if price_cents is None:
+        await ctx.send(f"❌ {role.mention} isn't for sale. See `,shop` for what's available.", delete_after=8)
+        return
+    if role in ctx.author.roles:
+        await ctx.send(f"❌ You already have {role.mention}.", delete_after=6)
+        return
+    if role.managed:
+        await ctx.send(f"❌ {role.mention} is a managed role and can't be granted manually — ask staff to remove it from `,shop`.", delete_after=8)
+        return
+    if role >= ctx.guild.me.top_role:
+        await ctx.send(_role_forbidden_reason(ctx.guild))
+        return
+    if not BILLING_CONFIGURED:
+        await ctx.send("❌ Billing isn't configured on this bot yet — ask whoever runs it to finish setting up Stripe.", delete_after=12)
+        return
+
+    data, error = await _billing_api_post("/internal/roleshop/checkout-link", {
+        "guild_id": ctx.guild.id, "role_id": role.id, "role_name": role.name,
+        "discord_user_id": ctx.author.id, "price_cents": price_cents,
+    })
+    if error:
+        await ctx.send(f"❌ Couldn't start checkout: {error}", delete_after=12)
+        return
+
+    checkout_url = data["url"]
+    embed = discord.Embed(
+        title=f"🛒 Checkout — {role.name}",
+        description=(
+            f"Click below to buy {role.mention} for **${price_cents / 100:,.2f}** securely via Stripe.\n\n"
+            f"[Complete Checkout]({checkout_url})\n\n"
+            "The role is granted automatically the moment payment confirms."
+        ),
+        color=discord.Color.gold(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_footer(text="TrapAI never sees your card details — Stripe handles all payment info.")
+
+    try:
+        await ctx.author.send(embed=embed)
+        await ctx.send(f"📨 {ctx.author.mention} Check your DMs for your secure checkout link.")
+    except (discord.Forbidden, discord.HTTPException):
+        await ctx.send(embed=embed)  # DMs closed — post it here instead
+
+    await log(ctx.guild, "roles", "Role Shop Checkout Started", None, discord.Color.gold(),
+              fields=[
+                  ("👤 Member", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
+                  ("🏷️ Role",   f"{role.mention} (`{role.id}`)",             True),
+                  ("💰 Price",  f"${price_cents / 100:,.2f}",                True),
+              ],
+              actor=ctx.author, target=ctx.author)
+
+
+@bot.command()
+@_permitted_check(administrator=True)
+async def setroleshop(ctx, action: str = None, role: discord.Role = None, price: float = None):
+    """
+    Manage which roles are for sale in ,shop for real money (Stripe).
+    Usage:
+      ,setroleshop list                — view current listings
+      ,setroleshop add @role <price>   — list a role for sale, e.g. `,setroleshop add @role 4.99`
+      ,setroleshop remove @role        — take a role off sale
+    """
+    guild = ctx.guild
+    listings = ROLE_SHOP.setdefault(guild.id, {})
+
+    if action is None or action.lower() == "list":
+        if not listings:
+            await ctx.send("📭 No roles for sale yet. Use `,setroleshop add @role <price>`.")
+            return
+        lines = []
+        for role_id, price_cents in sorted(listings.items(), key=lambda kv: kv[1]):
+            r = guild.get_role(role_id)
+            lines.append(f"➡️ {r.mention if r else f'*deleted role* (`{role_id}`)'} — **${price_cents / 100:,.2f}**")
+        embed = discord.Embed(
+            title="🛒 Role Shop Listings",
+            description="\n".join(lines),
+            color=discord.Color.blurple(),
+            timestamp=discord.utils.utcnow()
+        )
+        embed.set_footer(text=f"TrapAI • {guild.name}")
+        await ctx.send(embed=embed)
+        return
+
+    if action.lower() == "add":
+        if role is None or price is None or price < 0.50:
+            await ctx.send("❌ Usage: `,setroleshop add @role <price>` — price must be at least `$0.50` (e.g. `,setroleshop add @role 4.99`).", delete_after=10)
+            return
+        if role.managed:
+            await ctx.send(f"❌ {role.mention} is a managed role (Server Booster, bot, or integration role) and can never be granted manually — it can't be sold.", delete_after=8)
+            return
+        if role >= guild.me.top_role:
+            await ctx.send(_role_forbidden_reason(guild))
+            return
+        if not BILLING_CONFIGURED:
+            await ctx.send("❌ Billing isn't configured on this bot yet — ask whoever runs it to finish setting up Stripe before listing real-money roles.", delete_after=12)
+            return
+        listings[role.id] = round(price * 100)
+        _save_role_shop()
+        await ctx.send(f"✅ {role.mention} is now for sale for **${price:,.2f}**.")
+    elif action.lower() == "remove":
+        if role is None:
+            await ctx.send("❌ Usage: `,setroleshop remove @role`", delete_after=8)
+            return
+        if role.id not in listings:
+            await ctx.send(f"❌ {role.mention} isn't currently for sale.", delete_after=6)
+            return
+        listings.pop(role.id)
+        _save_role_shop()
+        await ctx.send(f"✅ {role.mention} removed from the shop.")
+    else:
+        await ctx.send("❌ Unknown action. Use `add`, `remove`, or `list`.", delete_after=8)
 
 
 # ── Economy Leaderboard ──────────────────────────────────────
