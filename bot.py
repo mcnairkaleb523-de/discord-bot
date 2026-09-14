@@ -14666,14 +14666,12 @@ async def massunban(ctx, *targets: str):
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             failed += 1
 
-    LAST_MASSUNBAN[guild.id] = list(ids)
-
     embed2 = discord.Embed(
         title="✅ Mass Unban Complete",
         description=(
             f"Unbanned **{unbanned}**/{len(ids)} user(s) from **{guild.name}**.\n"
-            "Unbanning doesn't put them back in the server by itself — run `,pullback recent` "
-            "to DM them an invite link."
+            "Unbanning doesn't put them back in the server by itself — use `,pullback <id/mention> ...` "
+            "to bring them back."
         ),
         color=discord.Color.green(),
         timestamp=discord.utils.utcnow()
@@ -14691,13 +14689,6 @@ async def massunban(ctx, *targets: str):
               actor=ctx.author)
 
 
-# LAST_MASSUNBAN[guild_id] = [user_id, ...] — the target list from the most
-# recent ,massunban, so ,pullback recent can DM them an invite without
-# staff re-pasting the same ID list. In-memory only (not persisted) — a
-# short-lived operational cache, not durable state.
-LAST_MASSUNBAN: dict[int, list[int]] = {}
-
-
 @bot.command(aliases=["pull"])
 @_permitted_check(ban_members=True)
 async def pullback(ctx, *targets: str):
@@ -14711,21 +14702,13 @@ async def pullback(ctx, *targets: str):
     allow ANY app to add a user to a server without a token like that, so
     they'll show up as skipped and still need a regular invite. Usage:
       ,pullback <id/mention> <id/mention> ...
-      ,pullback recent   — targets whoever your last ,massunban unbanned
     """
     guild = ctx.guild
     if not targets:
-        await ctx.send("❌ Usage: `,pullback <id/mention> <id/mention> ...` or `,pullback recent`", delete_after=10)
+        await ctx.send("❌ Usage: `,pullback <id/mention> <id/mention> ...`", delete_after=10)
         return
 
-    invalid = []
-    if len(targets) == 1 and targets[0].lower() == "recent":
-        ids = LAST_MASSUNBAN.get(guild.id, [])
-        if not ids:
-            await ctx.send("❌ No recent `,massunban` to pull from — run that first, or pass IDs/mentions directly.", delete_after=10)
-            return
-    else:
-        ids, invalid = _parse_user_id_tokens(targets)
+    ids, invalid = _parse_user_id_tokens(targets)
 
     if not ids:
         await ctx.send("❌ No valid user IDs/mentions to pull back.", delete_after=10)
