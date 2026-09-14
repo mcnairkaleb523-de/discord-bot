@@ -14698,39 +14698,18 @@ async def massunban(ctx, *targets: str):
 LAST_MASSUNBAN: dict[int, list[int]] = {}
 
 
-async def _get_or_create_invite_link(guild: discord.Guild) -> str | None:
-    """Vanity link if this server has one (never expires); otherwise reuses
-    an existing long-lived invite this bot already created, or creates a
-    fresh 7-day/unlimited-use one in the first channel it can. Returns None
-    if the bot has no channel it can create an invite in."""
-    vanity = _resolve_invite_link(guild)
-    if vanity:
-        return vanity
-    try:
-        for invite in await guild.invites():
-            if invite.inviter and invite.inviter.id == bot.user.id and (invite.max_age == 0 or invite.max_age >= 604800):
-                return invite.url
-    except (discord.Forbidden, discord.HTTPException):
-        pass
-    for channel in guild.text_channels:
-        if channel.permissions_for(guild.me).create_instant_invite:
-            try:
-                invite = await channel.create_invite(max_age=604800, max_uses=0, reason="Pull-back invite link")
-                return invite.url
-            except (discord.Forbidden, discord.HTTPException):
-                continue
-    return None
-
-
 @bot.command(aliases=["pull"])
 @_permitted_check(ban_members=True)
 async def pullback(ctx, *targets: str):
     """
-    DM an invite link to a list of former members so they can rejoin — e.g.
-    after ,massunban-ing everyone from a nuke/raid. Unbanning alone doesn't
-    put anyone back in the server: Discord never lets a bot add someone
-    without them clicking an invite themselves, so this is the closest
-    thing to "pulling them back in." Usage:
+    Re-add former members straight back into the server — no invite link,
+    no DM. This only works for members who've previously clicked the
+    "Authenticate via Discord" verify button: that's the moment they grant
+    the guilds.join permission this uses, and oauth_server.py keeps that
+    token on file specifically so it can be reused here later. Anyone who
+    never verified that way can't be added this way — Discord doesn't
+    allow ANY app to add a user to a server without a token like that, so
+    they'll show up as skipped and still need a regular invite. Usage:
       ,pullback <id/mention> <id/mention> ...
       ,pullback recent   — targets whoever your last ,massunban unbanned
     """
@@ -14754,10 +14733,8 @@ async def pullback(ctx, *targets: str):
     if len(ids) > 1000:
         await ctx.send(f"❌ That's {len(ids)} users — narrow it down or run this in batches.", delete_after=12)
         return
-
-    invite_url = await _get_or_create_invite_link(guild)
-    if not invite_url:
-        await ctx.send("❌ I couldn't find or create an invite link — I need **Create Invite** permission in at least one channel.", delete_after=12)
+    if not BILLING_CONFIGURED:
+        await ctx.send("❌ This needs the OAuth service configured (BILLING_API_URL + INTERNAL_API_SECRET) — ask whoever runs this bot to finish setting that up.", delete_after=12)
         return
 
     warn_lines = []
@@ -14771,7 +14748,9 @@ async def pullback(ctx, *targets: str):
     embed = discord.Embed(
         title="⚠️ Confirm Pull-Back",
         description=(
-            f"You're about to DM an invite link to **{len(ids)}** user(s) for **{guild.name}**.\n\n{preview}"
+            f"You're about to try re-adding **{len(ids)}** user(s) directly into **{guild.name}** — "
+            "no invite link, no DM. Only works for anyone who's previously verified via the OAuth "
+            "button; everyone else will be skipped.\n\n" + preview
             + ("\n\n" + "\n".join(warn_lines) if warn_lines else "")
         ),
         color=discord.Color.blurple(),
@@ -14782,31 +14761,33 @@ async def pullback(ctx, *targets: str):
     if not view.confirmed:
         return
 
-    sent = 0
-    failed = 0
-    for uid in ids:
-        try:
-            user = await bot.fetch_user(uid)
-            await user.send(f"👋 You're invited back to **{guild.name}**!\n\nJoin here: {invite_url}")
-            sent += 1
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            failed += 1
+    data, error = await _billing_api_post("/internal/pullback", {
+        "guild_id": ctx.guild.id, "user_ids": ids,
+    })
+    if error:
+        await ctx.send(f"❌ Couldn't pull anyone back: {error}", delete_after=12)
+        return
+
+    rejoined = data.get("rejoined", [])
+    no_token = data.get("no_token", [])
+    failed = data.get("failed", [])
 
     embed2 = discord.Embed(
-        title="📨 Pull-Back Complete",
-        description=f"DMed an invite link to **{sent}**/{len(ids)} user(s).",
+        title="📥 Pull-Back Complete",
+        description=f"Re-added **{len(rejoined)}**/{len(ids)} user(s) directly to **{guild.name}**.",
         color=discord.Color.blurple(),
         timestamp=discord.utils.utcnow()
     )
+    if no_token:
+        embed2.add_field(name="🚫 Never Verified", value=f"{len(no_token)} (no OAuth token on file — needs a regular invite instead)", inline=False)
     if failed:
-        embed2.add_field(name="⚠️ Couldn't DM", value=str(failed), inline=True)
-    embed2.set_footer(text="Failures are usually closed DMs or deleted accounts — nothing you can fix from here.")
+        embed2.add_field(name="⚠️ Failed", value=str(len(failed)), inline=True)
     await ctx.send(embed=embed2)
     await log(guild, "mod", "Pull-Back Executed", None, discord.Color.blurple(),
               fields=[
-                  ("🛡 Moderator", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
-                  ("📨 DMed",      f"{sent}/{len(ids)}",                         True),
-                  ("🔗 Invite",    invite_url,                                    False),
+                  ("🛡 Moderator",     f"{ctx.author.mention} (`{ctx.author.id}`)", True),
+                  ("📥 Re-added",      f"{len(rejoined)}/{len(ids)}",                True),
+                  ("🚫 Never Verified", str(len(no_token)),                          True),
               ],
               actor=ctx.author)
 
