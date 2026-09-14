@@ -1393,7 +1393,12 @@ JAIL_ROLE_SNAPSHOTS: dict[int, dict[int, list]] = _load_depth(_load_data("jail_r
 NUKE_TRACKER: dict[int, dict[int, list]] = {}
 NUKE_ROLE_LIMIT   = 3   # max role deletes within window
 NUKE_CHAN_LIMIT   = 3   # max channel deletes within window
-NUKE_BAN_LIMIT    = 3   # max member bans within window
+NUKE_BAN_LIMIT    = 2   # max member bans within window — deliberately tighter
+                         # than the role/channel limits above: unlike those,
+                         # the ban tracker below does NOT exempt admins, so
+                         # this is the only thing standing between a mass-ban
+                         # spree (compromised staff account, malicious admin)
+                         # and the whole member list.
 NUKE_WINDOW       = 10  # seconds
 
 # ANTINUKE_WHITELIST[guild_id] = {user_id, ...} — exempt from anti-nuke
@@ -4998,10 +5003,16 @@ async def on_member_ban(guild, user):
     # banning the member list. Uses a separate NUKE_TRACKER key
     # (actor.id + 2_000_000_000) so it doesn't collide with the role/channel
     # delete counters, which already use +0 and +1_000_000_000.
+    #
+    # Deliberately NOT exempting Administrator here, unlike the role/channel
+    # delete trackers above — a mass-ban is the fastest way to gut a server's
+    # member list, and "has Administrator" is exactly the profile of a
+    # compromised staff account or a malicious admin. Trusted staff who
+    # legitimately need to ban several people fast should be added to the
+    # anti-nuke whitelist via ,wl (opt-in, per-user) instead of getting a
+    # blanket permission-based pass.
     try:
         if not actor or actor.bot:
-            return
-        if actor.guild_permissions.administrator:
             return
         if actor.id in ANTINUKE_WHITELIST.get(guild.id, set()):
             return
