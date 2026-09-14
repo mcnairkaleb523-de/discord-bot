@@ -3473,7 +3473,7 @@ class VCAddModModal(discord.ui.Modal, title="🛡 Add VC Moderator"):
 # manually with COMMAND_CATALOG in oauth_server.py (that file has no
 # import relationship with this one — see its docstring).
 HELP_CATEGORIES = [
-    ('🛡️', 'Moderation', ['kick', 'ban', 'massban', 'massunban', 'mute', 'unmute', 'timeout', 'warn', 'warnings', 'clearwarnings', 'modhistory', 'hardban', 'unhardban', 'hardbans', 'clear', 'purge', 'lock', 'unlock', 'hide', 'unhide', 'slowmode', 'nuke', 'lockdown', 'unlockdown', 'raidmode', 'nickname', 'strip', 'trapwarn', 'trapscan', 'restart']),
+    ('🛡️', 'Moderation', ['kick', 'ban', 'massban', 'massunban', 'pullback', 'mute', 'unmute', 'timeout', 'warn', 'warnings', 'clearwarnings', 'modhistory', 'hardban', 'unhardban', 'hardbans', 'clear', 'purge', 'lock', 'unlock', 'hide', 'unhide', 'slowmode', 'nuke', 'lockdown', 'unlockdown', 'raidmode', 'nickname', 'strip', 'trapwarn', 'trapscan', 'restart']),
     ('🔒', 'Jail & Anti-Raid', ['jail', 'unjail', 'setupjail', 'antiraid', 'raidwhitelist', 'wl']),
     ('🤖', 'Verification', ['verify', 'unverify', 'denyverify', 'sendverify', 'setverifybackup']),
     ('🏷️', 'Roles', ['role', 'roleall', 'massrole', 'massunrole', 'restoreallroles', 'autorole', 'setgifrole', 'protectedrole', 'br', 'roles']),
@@ -14666,9 +14666,15 @@ async def massunban(ctx, *targets: str):
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             failed += 1
 
+    LAST_MASSUNBAN[guild.id] = list(ids)
+
     embed2 = discord.Embed(
         title="✅ Mass Unban Complete",
-        description=f"Unbanned **{unbanned}**/{len(ids)} user(s) from **{guild.name}**.",
+        description=(
+            f"Unbanned **{unbanned}**/{len(ids)} user(s) from **{guild.name}**.\n"
+            "Unbanning doesn't put them back in the server by itself — run `,pullback recent` "
+            "to DM them an invite link."
+        ),
         color=discord.Color.green(),
         timestamp=discord.utils.utcnow()
     )
@@ -14681,6 +14687,126 @@ async def massunban(ctx, *targets: str):
               fields=[
                   ("🛡 Moderator", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
                   ("✅ Unbanned",  f"{unbanned}/{len(ids)}",                     True),
+              ],
+              actor=ctx.author)
+
+
+# LAST_MASSUNBAN[guild_id] = [user_id, ...] — the target list from the most
+# recent ,massunban, so ,pullback recent can DM them an invite without
+# staff re-pasting the same ID list. In-memory only (not persisted) — a
+# short-lived operational cache, not durable state.
+LAST_MASSUNBAN: dict[int, list[int]] = {}
+
+
+async def _get_or_create_invite_link(guild: discord.Guild) -> str | None:
+    """Vanity link if this server has one (never expires); otherwise reuses
+    an existing long-lived invite this bot already created, or creates a
+    fresh 7-day/unlimited-use one in the first channel it can. Returns None
+    if the bot has no channel it can create an invite in."""
+    vanity = _resolve_invite_link(guild)
+    if vanity:
+        return vanity
+    try:
+        for invite in await guild.invites():
+            if invite.inviter and invite.inviter.id == bot.user.id and (invite.max_age == 0 or invite.max_age >= 604800):
+                return invite.url
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+    for channel in guild.text_channels:
+        if channel.permissions_for(guild.me).create_instant_invite:
+            try:
+                invite = await channel.create_invite(max_age=604800, max_uses=0, reason="Pull-back invite link")
+                return invite.url
+            except (discord.Forbidden, discord.HTTPException):
+                continue
+    return None
+
+
+@bot.command(aliases=["pull"])
+@_permitted_check(ban_members=True)
+async def pullback(ctx, *targets: str):
+    """
+    DM an invite link to a list of former members so they can rejoin — e.g.
+    after ,massunban-ing everyone from a nuke/raid. Unbanning alone doesn't
+    put anyone back in the server: Discord never lets a bot add someone
+    without them clicking an invite themselves, so this is the closest
+    thing to "pulling them back in." Usage:
+      ,pullback <id/mention> <id/mention> ...
+      ,pullback recent   — targets whoever your last ,massunban unbanned
+    """
+    guild = ctx.guild
+    if not targets:
+        await ctx.send("❌ Usage: `,pullback <id/mention> <id/mention> ...` or `,pullback recent`", delete_after=10)
+        return
+
+    invalid = []
+    if len(targets) == 1 and targets[0].lower() == "recent":
+        ids = LAST_MASSUNBAN.get(guild.id, [])
+        if not ids:
+            await ctx.send("❌ No recent `,massunban` to pull from — run that first, or pass IDs/mentions directly.", delete_after=10)
+            return
+    else:
+        ids, invalid = _parse_user_id_tokens(targets)
+
+    if not ids:
+        await ctx.send("❌ No valid user IDs/mentions to pull back.", delete_after=10)
+        return
+    if len(ids) > 1000:
+        await ctx.send(f"❌ That's {len(ids)} users — narrow it down or run this in batches.", delete_after=12)
+        return
+
+    invite_url = await _get_or_create_invite_link(guild)
+    if not invite_url:
+        await ctx.send("❌ I couldn't find or create an invite link — I need **Create Invite** permission in at least one channel.", delete_after=12)
+        return
+
+    warn_lines = []
+    if invalid:
+        warn_lines.append(f"⚠️ Skipped {len(invalid)} unrecognized token(s).")
+
+    preview = ", ".join(f"`{uid}`" for uid in ids[:20])
+    if len(ids) > 20:
+        preview += f", … +{len(ids) - 20} more"
+
+    embed = discord.Embed(
+        title="⚠️ Confirm Pull-Back",
+        description=(
+            f"You're about to DM an invite link to **{len(ids)}** user(s) for **{guild.name}**.\n\n{preview}"
+            + ("\n\n" + "\n".join(warn_lines) if warn_lines else "")
+        ),
+        color=discord.Color.blurple(),
+    )
+    view = _MassActionConfirmView(ctx.author.id)
+    await ctx.send(embed=embed, view=view)
+    await view.wait()
+    if not view.confirmed:
+        return
+
+    sent = 0
+    failed = 0
+    for uid in ids:
+        try:
+            user = await bot.fetch_user(uid)
+            await user.send(f"👋 You're invited back to **{guild.name}**!\n\nJoin here: {invite_url}")
+            sent += 1
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            failed += 1
+
+    embed2 = discord.Embed(
+        title="📨 Pull-Back Complete",
+        description=f"DMed an invite link to **{sent}**/{len(ids)} user(s).",
+        color=discord.Color.blurple(),
+        timestamp=discord.utils.utcnow()
+    )
+    if failed:
+        embed2.add_field(name="⚠️ Couldn't DM", value=str(failed), inline=True)
+    embed2.set_footer(text="Failures are usually closed DMs or deleted accounts — nothing you can fix from here.")
+    await ctx.send(embed=embed2)
+    await log(guild, "mod", "Pull-Back Executed", None, discord.Color.blurple(),
+              fields=[
+                  ("🛡 Moderator", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
+                  ("📨 DMed",      f"{sent}/{len(ids)}",                         True),
+                  ("🔗 Invite",    invite_url,                                    False),
               ],
               actor=ctx.author)
 
