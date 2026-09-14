@@ -77,6 +77,14 @@ Optional (billing):
                               failed payment before being suspended. Defaults to 5.
   SUPPORT_CONTACT          — how customers should reach you for support, shown
                               on the /terms page. Defaults to a generic placeholder.
+
+Note: every successful OAuth verification (the "Authenticate via Discord"
+button) saves that person's access/refresh token to data/rejoin_tokens.json,
+keyed by guild + user — this is what lets bot.py's ,pullback re-add someone
+straight into the server later (e.g. after a mass-ban/nuke) with no invite
+link, using Discord's guilds.join scope. Treat that file like credentials:
+it's already covered by this repo's normal secret-handling rules, just
+flagging that it now holds real OAuth tokens, not just config.
 """
 
 import os
@@ -894,6 +902,59 @@ async def _exchange_code(session: ClientSession, code: str) -> dict | None:
         return await resp.json()
 
 
+async def _refresh_access_token(session: ClientSession, refresh_token: str) -> dict | None:
+    data = {
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+    }
+    async with session.post(f"{DISCORD_API}/oauth2/token", data=data) as resp:
+        if resp.status != 200:
+            log.warning("Refreshing access token failed (%s): %s", resp.status, await resp.text())
+            return None
+        return await resp.json()
+
+
+# REJOIN_TOKENS["<guild_id>"]["<user_id>"] = {"access_token", "refresh_token",
+# "expires_at"} — captured the moment someone completes the OAuth verify
+# flow, since that's exactly when they grant the guilds.join scope. Lets
+# bot.py's ,pullback re-add them straight back into the ORIGIN guild later
+# (e.g. after a mass-ban/nuke incident) with no invite link and no DM —
+# guilds.join is the one Discord API that can add a user to a guild without
+# them clicking anything, and it only works with a token they personally
+# authorized. Anyone who never verified through the OAuth button has no
+# entry here and can't be pulled back this way — there is no other API for
+# it. Treat this store like credentials: never log full tokens, never
+# expose it through any public route.
+REJOIN_TOKENS: dict = _load_json("rejoin_tokens", {})
+
+
+async def _get_valid_rejoin_token(session: ClientSession, guild_id: str, user_id: str) -> str | None:
+    """A usable access token for this guild/user, refreshing (and
+    persisting the refresh) if the stored one has expired. None if we've
+    never captured one for them, or the refresh token itself is dead —
+    both mean they can't be silently re-added, only invited."""
+    rec = REJOIN_TOKENS.get(guild_id, {}).get(user_id)
+    if not rec:
+        return None
+    if time.time() < rec.get("expires_at", 0) - 60:
+        return rec["access_token"]
+    refresh_token = rec.get("refresh_token")
+    if not refresh_token:
+        return None
+    new_data = await _refresh_access_token(session, refresh_token)
+    if not new_data or "access_token" not in new_data:
+        REJOIN_TOKENS.get(guild_id, {}).pop(user_id, None)
+        _save_json("rejoin_tokens", REJOIN_TOKENS)
+        return None
+    rec["access_token"] = new_data["access_token"]
+    rec["refresh_token"] = new_data.get("refresh_token", refresh_token)
+    rec["expires_at"] = time.time() + new_data.get("expires_in", 604800)
+    _save_json("rejoin_tokens", REJOIN_TOKENS)
+    return rec["access_token"]
+
+
 async def _get_identity(session: ClientSession, access_token: str) -> dict | None:
     headers = {"Authorization": f"Bearer {access_token}"}
     async with session.get(f"{DISCORD_API}/users/@me", headers=headers) as resp:
@@ -941,15 +1002,24 @@ async def _set_role(session: ClientSession, guild_id: str, user_id: str, role_id
                         "Adding" if add else "Removing", role_id, user_id, guild_id, resp.status, await resp.text())
 
 
-async def _join_backup_guild(session: ClientSession, backup_guild_id: str, user_id: str, access_token: str):
+async def _add_member_via_oauth(session: ClientSession, guild_id: str, user_id: str, access_token: str) -> bool:
+    """PUT the member into guild_id using an OAuth access token that carries
+    the guilds.join scope — the only Discord API that can add someone to a
+    guild without them clicking an invite, and only with a token they
+    personally authorized. Shared by the backup-guild join on verify and
+    by ,pullback's silent re-add."""
     headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
-    url = f"{DISCORD_API}/guilds/{backup_guild_id}/members/{user_id}"
+    url = f"{DISCORD_API}/guilds/{guild_id}/members/{user_id}"
     async with session.put(url, headers=headers, json={"access_token": access_token}) as resp:
         if resp.status not in (200, 201, 204):
             body = await resp.text()
-            log.warning("Adding user %s to backup guild %s failed (%s): %s", user_id, backup_guild_id, resp.status, body)
+            log.warning("Adding user %s to guild %s via OAuth failed (%s): %s", user_id, guild_id, resp.status, body)
             return False
         return True
+
+
+async def _join_backup_guild(session: ClientSession, backup_guild_id: str, user_id: str, access_token: str):
+    return await _add_member_via_oauth(session, backup_guild_id, user_id, access_token)
 
 
 async def _find_log_channel(session: ClientSession, guild_id: str):
@@ -1030,6 +1100,16 @@ async def handle_callback(request: web.Request) -> web.Response:
                                  content_type="text/html", status=502)
         user_id = identity["id"]
         username = identity.get("username", "there")
+
+        # Captured here, not just used and discarded, so ,pullback can
+        # re-add this person straight into origin_guild_id later without
+        # another invite/click — this is the moment they grant guilds.join.
+        REJOIN_TOKENS.setdefault(origin_guild_id, {})[user_id] = {
+            "access_token": access_token,
+            "refresh_token": token_data.get("refresh_token"),
+            "expires_at": time.time() + token_data.get("expires_in", 604800),
+        }
+        _save_json("rejoin_tokens", REJOIN_TOKENS)
 
         roles = await _get_guild_roles(session, origin_guild_id)
         verified_role_id   = next((r["id"] for r in roles if r["name"] == VERIFIED_ROLE_NAME), None)
@@ -1279,6 +1359,34 @@ def _create_checkout_session_sync(product: str, tier: str, guild_id: str, discor
     )
 
 
+def _create_role_checkout_session_sync(guild_id: str, role_id: str, role_name: str, price_cents: int, discord_user_id: str, base_url: str):
+    """Dynamic per-purchase price (unlike the fixed PRODUCTS catalog above) —
+    a guild's role listings come from bot.py's ,setroleshop, not a
+    pre-created Stripe Price, so this uses inline price_data instead of a
+    cached Price ID. Always mode='payment': a role purchase is a one-time
+    charge, never a subscription."""
+    metadata = {
+        "kind": "role_purchase",
+        "guild_id": str(guild_id), "role_id": str(role_id),
+        "discord_user_id": str(discord_user_id),
+    }
+    return stripe.checkout.Session.create(
+        mode="payment",
+        line_items=[{
+            "price_data": {
+                "currency": "usd",
+                "product_data": {"name": f"{role_name} role"},
+                "unit_amount": price_cents,
+            },
+            "quantity": 1,
+        }],
+        success_url=f"{base_url}/checkout/success?session_id={{CHECKOUT_SESSION_ID}}",
+        cancel_url=f"{base_url}/checkout/cancel",
+        metadata=metadata,
+        client_reference_id=str(guild_id),
+    )
+
+
 def _product_tier_for_price_id(price_id: str):
     for key, pid in STRIPE_PRICE_IDS.items():
         if pid == price_id:
@@ -1326,8 +1434,35 @@ async def _send_dm(session: ClientSession, user_id: str, content: str):
 # are what actually provision/maintain access — never the client-side
 # success page, which only ever shows a friendly confirmation.
 
+async def _handle_role_purchase_completed(obj: dict, session: ClientSession):
+    """Fulfillment for the real-money role shop (bot.py's ,buyrole) — grants
+    the role straight over Discord's REST API via the bot token, no live
+    gateway connection or shared filesystem with bot.py needed. Runs off
+    checkout.session.completed only, per Stripe's own guidance, never the
+    client-side success page."""
+    metadata = obj.get("metadata") or {}
+    guild_id = metadata.get("guild_id")
+    role_id = metadata.get("role_id")
+    discord_user_id = metadata.get("discord_user_id")
+    if not (guild_id and role_id and discord_user_id):
+        log.warning("role_purchase checkout.session.completed missing metadata on session %s", obj.get("id"))
+        return
+
+    await _set_role(session, guild_id, discord_user_id, role_id, add=True)
+
+    amount = obj.get("amount_total")
+    amount_str = f"${amount / 100:,.2f}" if isinstance(amount, int) else "your payment"
+    await _send_dm(session, discord_user_id, (
+        f"✅ **Payment received — thank you!**\n\n"
+        f"Your role purchase ({amount_str}) is complete — the role has been added to your account in that server."
+    ))
+
+
 async def _handle_checkout_completed(obj: dict, session: ClientSession):
     metadata = obj.get("metadata") or {}
+    if metadata.get("kind") == "role_purchase":
+        await _handle_role_purchase_completed(obj, session)
+        return
     guild_id = metadata.get("guild_id")
     discord_user_id = metadata.get("discord_user_id")
     product = metadata.get("product")
@@ -1955,6 +2090,61 @@ async def handle_internal_checkout_link(request: web.Request) -> web.Response:
     return web.json_response({"url": session_obj.url})
 
 
+async def handle_internal_role_checkout_link(request: web.Request) -> web.Response:
+    if not _check_internal_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if not STRIPE_SECRET_KEY:
+        return web.json_response({"error": "billing not configured"}, status=503)
+
+    body = await request.json()
+    guild_id = str(body.get("guild_id", ""))
+    role_id = str(body.get("role_id", ""))
+    role_name = str(body.get("role_name") or "Role")[:100]
+    discord_user_id = str(body.get("discord_user_id", ""))
+    try:
+        price_cents = int(body.get("price_cents", 0))
+    except (TypeError, ValueError):
+        price_cents = 0
+
+    if not guild_id.isdigit() or not role_id.isdigit() or not discord_user_id.isdigit() or price_cents < 50:
+        return web.json_response({"error": "guild_id, role_id, discord_user_id, and price_cents (min 50) are required"}, status=400)
+
+    base_url = _resolve_base_url(request)
+    try:
+        session_obj = await asyncio.to_thread(
+            _create_role_checkout_session_sync, guild_id, role_id, role_name, price_cents, discord_user_id, base_url,
+        )
+    except Exception as e:
+        log.error("Failed to create role checkout session via internal API: %s", e)
+        return web.json_response({"error": "failed to create checkout session"}, status=502)
+    return web.json_response({"url": session_obj.url})
+
+
+async def handle_internal_pullback(request: web.Request) -> web.Response:
+    if not _check_internal_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+
+    body = await request.json()
+    guild_id = str(body.get("guild_id", ""))
+    user_ids = body.get("user_ids") or []
+    if not guild_id.isdigit() or not isinstance(user_ids, list) or not user_ids:
+        return web.json_response({"error": "guild_id and a non-empty user_ids list are required"}, status=400)
+
+    rejoined, no_token, failed = [], [], []
+    timeout = ClientTimeout(total=15)
+    async with ClientSession(timeout=timeout) as session:
+        for raw_uid in user_ids:
+            uid = str(raw_uid)
+            token = await _get_valid_rejoin_token(session, guild_id, uid)
+            if not token:
+                no_token.append(uid)
+                continue
+            ok = await _add_member_via_oauth(session, guild_id, uid, token)
+            (rejoined if ok else failed).append(uid)
+
+    return web.json_response({"rejoined": rejoined, "no_token": no_token, "failed": failed})
+
+
 async def handle_internal_portal_link(request: web.Request) -> web.Response:
     if not _check_internal_auth(request):
         return web.json_response({"error": "unauthorized"}, status=401)
@@ -1992,6 +2182,8 @@ def create_app() -> web.Application:
     app.router.add_post("/stripe/webhook", handle_stripe_webhook)
     app.router.add_get("/internal/subscription/{guild_id}", handle_internal_get_subscription)
     app.router.add_post("/internal/checkout-link", handle_internal_checkout_link)
+    app.router.add_post("/internal/roleshop/checkout-link", handle_internal_role_checkout_link)
+    app.router.add_post("/internal/pullback", handle_internal_pullback)
     app.router.add_post("/internal/portal-link", handle_internal_portal_link)
     app.router.add_get("/", handle_landing_page)
     app.router.add_get("/health", handle_health)
