@@ -822,6 +822,15 @@ TICKET_ONLY_ALLOWED_COMMANDS = TICKET_MANAGEMENT_COMMANDS | {
     "help", "cmds", "ping", "subscribe", "managesubscription", "subscriptionstatus",
 }
 
+# HOME_GUILD_ID — this bot's own server (leave unset/0 to disable this
+# check entirely, e.g. if you actually want to run the paid subscription
+# model above for other servers). When set, on_guild_join immediately
+# leaves any server that isn't this one — closes off the free-invite path
+# entirely rather than gating it behind ticket-only mode/billing. Only
+# applies going forward, to NEW joins; it does not retroactively remove the
+# bot from servers it's already in.
+HOME_GUILD_ID = int(os.getenv("HOME_GUILD_ID", "0") or "0")
+
 # ── Billing (optional — see oauth_server.py's BILLING section for the
 # Stripe-backed subscription/lifetime purchase flow this talks to) ────────
 # BILLING_API_URL — that service's own public URL, e.g.
@@ -934,6 +943,19 @@ def _is_ticket_only_guild(guild) -> bool:
     if TICKET_ONLY_MODE:
         return True
     return bool(guild) and guild.id in TICKET_ONLY_GUILD_IDS
+
+
+@bot.check
+async def _home_guild_gate(ctx):
+    """Belt-and-suspenders alongside on_guild_join's immediate leave() —
+    guild.leave() isn't guaranteed to land before someone manages to type a
+    command in the window right after an unauthorized invite, so this
+    refuses every command outright in any guild that isn't HOME_GUILD_ID.
+    No-op (always True) if HOME_GUILD_ID isn't configured, and doesn't
+    apply to DMs (ctx.guild is None there)."""
+    if HOME_GUILD_ID and ctx.guild and ctx.guild.id != HOME_GUILD_ID:
+        return False
+    return True
 
 
 class TicketOnlyModeRestricted(commands.CheckFailure):
@@ -4340,6 +4362,19 @@ async def on_ready():
 
 @bot.event
 async def on_guild_join(guild):
+    # Closes off the free-invite path: if HOME_GUILD_ID is configured, this
+    # bot only operates in that one server — anyone who invites it anywhere
+    # else gets an immediate, unconditional leave, before any command can
+    # ever run there. Left unset, this check is disabled entirely (e.g. if
+    # you actually want to run the paid subscription model below).
+    if HOME_GUILD_ID and guild.id != HOME_GUILD_ID:
+        print(f"[home-guild] Leaving unauthorized guild '{guild.name}' ({guild.id}) — not the configured HOME_GUILD_ID.")
+        try:
+            await guild.leave()
+        except discord.HTTPException:
+            pass
+        return
+
     # If this guild is configured as ticket-only (TICKET_ONLY_GUILD_IDS),
     # apply its nickname right away so it visibly reads as a dedicated
     # ticket bot there from the moment it joins.
