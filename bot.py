@@ -822,6 +822,27 @@ TICKET_ONLY_ALLOWED_COMMANDS = TICKET_MANAGEMENT_COMMANDS | {
     "help", "cmds", "ping", "subscribe", "managesubscription", "subscriptionstatus",
 }
 
+# HOME_GUILD_IDS — comma-separated list of this bot's own server(s) (leave
+# unset/empty to disable this check entirely, e.g. if you actually want to
+# run the paid subscription model above for other servers). When set,
+# on_guild_join immediately leaves any server that isn't in this list —
+# closes off the free-invite path entirely rather than gating it behind
+# ticket-only mode/billing. Only applies going forward, to NEW joins; it
+# does not retroactively remove the bot from servers it's already in.
+HOME_GUILD_IDS = {
+    int(g) for g in os.getenv("HOME_GUILD_IDS", "").split(",") if g.strip().isdigit()
+}
+
+# FORCE_LEAVE_GUILD_IDS — comma-separated guild IDs to leave once, checked
+# on every on_ready. HOME_GUILD_IDS only blocks NEW joins — it does nothing
+# about guilds the bot is already in — so this is the one-time cleanup
+# lever for those: set it, let the bot redeploy/reconnect once, then clear
+# it again (leaving it set is harmless — once a guild's gone, on_ready just
+# won't find it in bot.guilds anymore, so nothing repeats).
+FORCE_LEAVE_GUILD_IDS = {
+    int(g) for g in os.getenv("FORCE_LEAVE_GUILD_IDS", "").split(",") if g.strip().isdigit()
+}
+
 # ── Billing (optional — see oauth_server.py's BILLING section for the
 # Stripe-backed subscription/lifetime purchase flow this talks to) ────────
 # BILLING_API_URL — that service's own public URL, e.g.
@@ -934,6 +955,19 @@ def _is_ticket_only_guild(guild) -> bool:
     if TICKET_ONLY_MODE:
         return True
     return bool(guild) and guild.id in TICKET_ONLY_GUILD_IDS
+
+
+@bot.check
+async def _home_guild_gate(ctx):
+    """Belt-and-suspenders alongside on_guild_join's immediate leave() —
+    guild.leave() isn't guaranteed to land before someone manages to type a
+    command in the window right after an unauthorized invite, so this
+    refuses every command outright in any guild that isn't in
+    HOME_GUILD_IDS. No-op (always True) if HOME_GUILD_IDS isn't configured,
+    and doesn't apply to DMs (ctx.guild is None there)."""
+    if HOME_GUILD_IDS and ctx.guild and ctx.guild.id not in HOME_GUILD_IDS:
+        return False
+    return True
 
 
 class TicketOnlyModeRestricted(commands.CheckFailure):
@@ -4248,6 +4282,19 @@ async def on_ready():
         if _is_ticket_only_guild(guild):
             await _apply_ticket_only_nickname(guild)
 
+    # One-time cleanup: leave any guild explicitly listed in
+    # FORCE_LEAVE_GUILD_IDS that the bot is currently in. Safe to run on
+    # every on_ready (including gateway reconnects) — once a guild's been
+    # left it's no longer in bot.guilds, so this becomes a no-op for it.
+    if FORCE_LEAVE_GUILD_IDS:
+        for guild in list(bot.guilds):
+            if guild.id in FORCE_LEAVE_GUILD_IDS:
+                print(f"[force-leave] Leaving '{guild.name}' ({guild.id}) per FORCE_LEAVE_GUILD_IDS.")
+                try:
+                    await guild.leave()
+                except discord.HTTPException as e:
+                    print(f"[force-leave] Failed to leave {guild.id}: {e}")
+
     # Cache current invite use-counts for all guilds
     for guild in bot.guilds:
         try:
@@ -4340,6 +4387,19 @@ async def on_ready():
 
 @bot.event
 async def on_guild_join(guild):
+    # Closes off the free-invite path: if HOME_GUILD_IDS is configured, this
+    # bot only operates in those servers — anyone who invites it anywhere
+    # else gets an immediate, unconditional leave, before any command can
+    # ever run there. Left unset, this check is disabled entirely (e.g. if
+    # you actually want to run the paid subscription model below).
+    if HOME_GUILD_IDS and guild.id not in HOME_GUILD_IDS:
+        print(f"[home-guild] Leaving unauthorized guild '{guild.name}' ({guild.id}) — not in HOME_GUILD_IDS.")
+        try:
+            await guild.leave()
+        except discord.HTTPException:
+            pass
+        return
+
     # If this guild is configured as ticket-only (TICKET_ONLY_GUILD_IDS),
     # apply its nickname right away so it visibly reads as a dedicated
     # ticket bot there from the moment it joins.
