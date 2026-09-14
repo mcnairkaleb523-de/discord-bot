@@ -4866,6 +4866,9 @@ async def on_guild_role_delete(role):
     )
 
     # ── Anti-nuke: track rapid role deletions ─────────────────
+    # Deliberately NOT exempting Administrator — see the matching note on
+    # the mass-ban tracker below. Trusted staff who need to bulk-delete
+    # roles legitimately should be added via ,wl instead.
     guild = role.guild
     try:
         entry = None
@@ -4875,8 +4878,6 @@ async def on_guild_role_delete(role):
         if not entry or entry.user.bot:
             return
         actor = entry.user
-        if actor.guild_permissions.administrator:
-            return
         if actor.id in ANTINUKE_WHITELIST.get(guild.id, set()):
             return
         now = time.time()
@@ -4934,6 +4935,9 @@ async def on_guild_channel_delete(channel):
     )
 
     # ── Anti-nuke: track rapid channel deletions ───────────────
+    # Deliberately NOT exempting Administrator — see the matching note on
+    # the mass-ban tracker below. Trusted staff who need to bulk-delete
+    # channels legitimately should be added via ,wl instead.
     guild = channel.guild
     try:
         entry = None
@@ -4943,8 +4947,6 @@ async def on_guild_channel_delete(channel):
         if not entry or entry.user.bot:
             return
         actor = entry.user
-        if actor.guild_permissions.administrator:
-            return
         if actor.id in ANTINUKE_WHITELIST.get(guild.id, set()):
             return
         now = time.time()
