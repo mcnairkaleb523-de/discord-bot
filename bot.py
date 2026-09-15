@@ -15944,6 +15944,15 @@ def _unlocked_jobs(guild_id, user_id):
     total = _lifetime_earned(guild_id, user_id)
     return [j for j in JOBS if total >= j["unlock"]]
 
+def _next_locked_job(guild_id, user_id):
+    """Returns (job, amount_still_needed) for the next job up the ladder
+    that isn't unlocked yet, or (None, 0) if every job is already unlocked."""
+    total = _lifetime_earned(guild_id, user_id)
+    for j in JOBS:
+        if total < j["unlock"]:
+            return j, j["unlock"] - total
+    return None, 0
+
 def _eco_embed(member, guild_id):
     data = _eco(guild_id, member.id)
     job = _current_job(guild_id, member.id)
@@ -16053,6 +16062,15 @@ async def work(ctx):
         desc = f"You **{random.choice(gigs)}** and earned **{_fmt_money(earned)}**.\n*Get a real job with `,jobs` to earn a lot more.*"
     _add_earned(ctx.guild.id, ctx.author.id, earned)
     embed = discord.Embed(title=title, description=desc, color=discord.Color.green(), timestamp=discord.utils.utcnow())
+    next_job, remaining = _next_locked_job(ctx.guild.id, ctx.author.id)
+    if next_job:
+        embed.add_field(
+            name="📈 Next Job",
+            value=f"**{_fmt_money(remaining)}** more lifetime earned to unlock {next_job['emoji']} **{next_job['name']}**",
+            inline=False
+        )
+    else:
+        embed.add_field(name="🏆 Career Maxed", value="You've unlocked every job on the ladder!", inline=False)
     embed.set_footer(text="Come back in 20 seconds • TrapAI Economy")
     await ctx.send(embed=embed)
 
@@ -17918,12 +17936,17 @@ async def connect4(ctx, opponent: discord.Member = None):
 
 
 # ── Checkers ─────────────────────────────────────────────────
-# Chat-based moves (`c3 b4`) rather than buttons — an 8×8 board has 32
-# playable squares, well past what a Discord view can render as buttons
-# (5 per row / 25 total). Simplified ruleset: captures are legal but not
-# mandatory, and only single jumps (no forced multi-jump chains) — a
-# deliberate scope cut to keep the engine small and fully testable
-# rather than attempting tournament-official chaining rules.
+# Pick-a-piece-then-pick-a-destination dropdowns rather than typed moves
+# — an 8×8 board has 32 playable squares, past what a Discord view can
+# render as buttons (5 per row / 25 total) but each dropdown only ever
+# needs to list ONE player's pieces (≤12) or one piece's destinations
+# (≤4), comfortably under the 25-option select-menu limit. Simplified
+# ruleset: captures are legal but not mandatory, and only single jumps
+# (no forced multi-jump chains) — a deliberate scope cut to keep the
+# engine small and fully testable rather than attempting
+# tournament-official chaining rules.
+def _checkers_square_name(row: int, col: int) -> str:
+    return f"{chr(ord('a') + col)}{8 - row}"
 class CheckersGame:
     def __init__(self, player_r, player_y):
         self.player_r = player_r  # 🔴 starts on rows 1-3, moves toward row 8
@@ -18022,12 +18045,146 @@ class CheckersGame:
         return True, None, is_capture
 
 
+class CheckersView(discord.ui.View):
+    PIECE_EMOJI = {"r": "🔴", "R": "🟥", "y": "🟡", "Y": "🟨"}
+
+    def __init__(self, game: CheckersGame, color_of: dict):
+        super().__init__(timeout=300)
+        self.game = game
+        self.color_of = color_of  # {member.id: "r"/"y"}
+        self.message = None
+        self.origin = None
+        self._build_origin_select()
+
+    @property
+    def current_color(self) -> str:
+        return self.color_of[self.game.current.id]
+
+    def _origin_options(self):
+        seen = {}
+        for src, _dst, _cap in self.game.legal_moves_for(self.current_color):
+            if src not in seen:
+                piece = self.game.board[src[0]][src[1]]
+                seen[src] = f"{self.PIECE_EMOJI[piece]} {_checkers_square_name(*src)}"
+        return [discord.SelectOption(label=label, value=f"{r},{c}") for (r, c), label in seen.items()][:25]
+
+    def _dest_options(self, origin):
+        piece = self.game.board[origin[0]][origin[1]]
+        options = []
+        for _src, dst, is_cap in self.game._piece_moves(origin[0], origin[1], piece):
+            label = _checkers_square_name(*dst) + (" ×" if is_cap else "")
+            options.append(discord.SelectOption(label=label, value=f"{dst[0]},{dst[1]}"))
+        return options[:25]
+
+    def _embed(self, result_text=None):
+        e = discord.Embed(
+            title="🔴🟡 Checkers",
+            color=discord.Color.green() if result_text else discord.Color.blurple(),
+            timestamp=discord.utils.utcnow()
+        )
+        e.description = self.game.render()
+        e.add_field(name="Players", value=f"🔴 {self.game.player_r.mention}  vs  🟡 {self.game.player_y.mention}", inline=False)
+        if result_text:
+            e.add_field(name="Result", value=result_text, inline=False)
+        else:
+            e.add_field(name="Turn", value=f"{self.game.current.mention} ({self.PIECE_EMOJI[self.current_color]})", inline=False)
+        e.set_footer(text="TrapAI Games — pick a piece, then a destination")
+        return e
+
+    def _build_origin_select(self):
+        self.clear_items()
+        select = discord.ui.Select(placeholder="Choose a piece to move...", options=self._origin_options())
+        select.callback = self._on_origin_selected
+        self.add_item(select)
+        resign_btn = discord.ui.Button(label="Resign", emoji="🏳️", style=discord.ButtonStyle.danger)
+        resign_btn.callback = self._on_resign
+        self.add_item(resign_btn)
+
+    def _build_dest_select(self, origin):
+        self.clear_items()
+        select = discord.ui.Select(placeholder=f"Move {_checkers_square_name(*origin)} to...", options=self._dest_options(origin))
+        select.callback = self._on_dest_selected
+        self.add_item(select)
+        back_btn = discord.ui.Button(label="« Back", style=discord.ButtonStyle.secondary)
+        back_btn.callback = self._on_back
+        self.add_item(back_btn)
+        resign_btn = discord.ui.Button(label="Resign", emoji="🏳️", style=discord.ButtonStyle.danger)
+        resign_btn.callback = self._on_resign
+        self.add_item(resign_btn)
+
+    async def _guard_turn(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.game.current.id:
+            await interaction.response.send_message("❌ It's not your turn!", ephemeral=True)
+            return False
+        return True
+
+    async def _on_origin_selected(self, interaction: discord.Interaction):
+        if not await self._guard_turn(interaction):
+            return
+        row, col = (int(x) for x in interaction.data["values"][0].split(","))
+        self.origin = (row, col)
+        self._build_dest_select(self.origin)
+        await interaction.response.edit_message(embed=self._embed(), view=self)
+
+    async def _on_back(self, interaction: discord.Interaction):
+        if not await self._guard_turn(interaction):
+            return
+        self.origin = None
+        self._build_origin_select()
+        await interaction.response.edit_message(embed=self._embed(), view=self)
+
+    async def _on_dest_selected(self, interaction: discord.Interaction):
+        if not await self._guard_turn(interaction):
+            return
+        row, col = (int(x) for x in interaction.data["values"][0].split(","))
+        dst = (row, col)
+        ok, _err, _cap = self.game.try_move(self.current_color, self.origin, dst)
+        self.origin = None
+        if not ok:
+            await interaction.response.send_message("❌ That move is no longer legal.", ephemeral=True)
+            self._build_origin_select()
+            await interaction.message.edit(embed=self._embed(), view=self)
+            return
+
+        mover = self.game.current
+        other_color = "y" if self.current_color == "r" else "r"
+        other_player = self.game.player_y if mover == self.game.player_r else self.game.player_r
+        if not self.game.has_pieces(other_color) or not self.game.has_moves(other_color):
+            self.clear_items()
+            await interaction.response.edit_message(embed=self._embed(result_text=f"**{mover.display_name} wins!**"), view=self)
+            return
+
+        self.game.current = other_player
+        self._build_origin_select()
+        await interaction.response.edit_message(embed=self._embed(), view=self)
+
+    async def _on_resign(self, interaction: discord.Interaction):
+        if not await self._guard_turn(interaction):
+            return
+        winner = self.game.player_y if self.game.current == self.game.player_r else self.game.player_r
+        self.clear_items()
+        await interaction.response.edit_message(
+            embed=self._embed(result_text=f"{self.game.current.display_name} resigned. **{winner.display_name} wins!**"),
+            view=self
+        )
+
+    async def on_timeout(self):
+        if not self.message:
+            return
+        self.clear_items()
+        try:
+            await self.message.edit(content="⏰ Game timed out from inactivity.", view=self)
+        except discord.HTTPException:
+            pass
+
+
 @bot.command(aliases=["draughts"])
 async def checkers(ctx, opponent: discord.Member = None):
     """
-    Challenge another member to Checkers. Simplified rules: captures are
-    legal but optional, single jumps only (no forced multi-jump chains).
-    Move by replying with `<from> <to>`, e.g. `c3 b4`.
+    Challenge another member to Checkers. Pick a piece from the dropdown,
+    then pick where to move it — no notation to learn. Simplified rules:
+    captures are legal but optional, single jumps only (no forced
+    multi-jump chains).
     Usage: ,checkers @opponent
     """
     if opponent is None or opponent == ctx.author or opponent.bot:
@@ -18036,68 +18193,8 @@ async def checkers(ctx, opponent: discord.Member = None):
 
     game = CheckersGame(ctx.author, opponent)
     color_of = {ctx.author.id: "r", opponent.id: "y"}
-
-    embed = discord.Embed(
-        title="🔴🟡 Checkers",
-        description=(
-            f"{game.render()}\n\n"
-            f"{ctx.author.mention} 🔴 vs {opponent.mention} 🟡\n\n"
-            "Columns `a`-`h` left→right, rows `1`-`8` bottom→top. Move with `<from> <to>`, e.g. `c3 b4`.\n\n"
-            f"It's {ctx.author.mention}'s turn!"
-        ),
-        color=discord.Color.blurple(),
-        timestamp=discord.utils.utcnow()
-    )
-    embed.set_footer(text="TrapAI Games — 5 minutes per move, captures optional")
-    await ctx.send(embed=embed)
-
-    while True:
-        acting_player = game.current
-        current_color = color_of[acting_player.id]
-
-        def check(m, expected=acting_player):
-            return m.author.id == expected.id and m.channel.id == ctx.channel.id and len(m.content.split()) == 2
-
-        try:
-            reply = await bot.wait_for("message", check=check, timeout=300)
-        except asyncio.TimeoutError:
-            await ctx.send(f"⏰ {acting_player.mention} took too long — game ended.", delete_after=10)
-            return
-
-        parts = reply.content.split()
-        src, dst = CheckersGame.parse_square(parts[0]), CheckersGame.parse_square(parts[1])
-        if src is None or dst is None:
-            await ctx.send("❌ Invalid square — use letters a-h and numbers 1-8, e.g. `c3 b4`.", delete_after=6)
-            continue
-
-        ok, err, _ = game.try_move(current_color, src, dst)
-        if not ok:
-            await ctx.send(f"❌ {err}", delete_after=6)
-            continue
-
-        other_color = "y" if current_color == "r" else "r"
-        other_player = game.player_y if current_color == "r" else game.player_r
-        if not game.has_pieces(other_color) or not game.has_moves(other_color):
-            embed = discord.Embed(
-                title="🏆 Checkers — Game Over",
-                description=f"{game.render()}\n\n**{acting_player.display_name} wins!**",
-                color=discord.Color.green(),
-                timestamp=discord.utils.utcnow()
-            )
-            await ctx.send(embed=embed)
-            return
-
-        game.current = other_player
-        embed = discord.Embed(
-            title="🔴🟡 Checkers",
-            description=(
-                f"{game.render()}\n\n"
-                f"It's {game.current.mention}'s turn! ({'🔴' if other_color == 'r' else '🟡'})"
-            ),
-            color=discord.Color.blurple(),
-            timestamp=discord.utils.utcnow()
-        )
-        await ctx.send(embed=embed)
+    view = CheckersView(game, color_of)
+    view.message = await ctx.send(embed=view._embed(), view=view)
 
 
 # ── Chess ────────────────────────────────────────────────────
@@ -18118,17 +18215,152 @@ def _chess_render(board) -> str:
     return f"```\n{board.unicode(borders=False, empty_square='·')}\n```"
 
 
-def _chess_parse_move(board, text: str):
-    text = text.strip()
-    try:
-        return board.parse_san(text)
-    except ValueError:
-        pass
-    try:
-        move = chess_lib.Move.from_uci(text.lower())
-    except ValueError:
-        return None
-    return move if move in board.legal_moves else None
+_CHESS_PIECE_EMOJI = {
+    "P": "♙", "N": "♘", "B": "♗", "R": "♖", "Q": "♕", "K": "♔",
+    "p": "♟", "n": "♞", "b": "♝", "r": "♜", "q": "♛", "k": "♚",
+}
+
+
+class ChessView(discord.ui.View):
+    def __init__(self, board, players: dict):
+        super().__init__(timeout=300)
+        self.board = board
+        self.players = players  # {chess_lib.WHITE: member, chess_lib.BLACK: member}
+        self.message = None
+        self.origin = None
+        self._build_origin_select()
+
+    @property
+    def current_player(self):
+        return self.players[self.board.turn]
+
+    def _origin_options(self):
+        seen = {}
+        for mv in self.board.legal_moves:
+            if mv.from_square not in seen:
+                piece = self.board.piece_at(mv.from_square)
+                emoji = _CHESS_PIECE_EMOJI.get(piece.symbol(), "")
+                seen[mv.from_square] = f"{emoji} {chess_lib.square_name(mv.from_square)}"
+        options = [discord.SelectOption(label=label, value=chess_lib.square_name(sq)) for sq, label in seen.items()]
+        return options[:25]
+
+    def _dest_options(self, origin_square):
+        seen = {}
+        for mv in self.board.legal_moves:
+            if mv.from_square == origin_square:
+                label = chess_lib.square_name(mv.to_square)
+                if self.board.is_capture(mv):
+                    label += " ×"
+                seen[mv.to_square] = label
+        options = [discord.SelectOption(label=label, value=chess_lib.square_name(sq)) for sq, label in seen.items()]
+        return options[:25]
+
+    def _embed(self, result_text=None):
+        e = discord.Embed(
+            title="♟️ Chess",
+            color=discord.Color.green() if result_text else discord.Color.blurple(),
+            timestamp=discord.utils.utcnow()
+        )
+        e.description = _chess_render(self.board)
+        e.add_field(name="Players", value=f"⚪ {self.players[chess_lib.WHITE].mention}  vs  ⚫ {self.players[chess_lib.BLACK].mention}", inline=False)
+        if result_text:
+            e.add_field(name="Result", value=result_text, inline=False)
+        else:
+            check_note = " **Check!**" if self.board.is_check() else ""
+            e.add_field(name="Turn", value=f"{self.current_player.mention}{check_note}", inline=False)
+        e.set_footer(text="TrapAI Games — pick a piece, then a destination")
+        return e
+
+    def _build_origin_select(self):
+        self.clear_items()
+        select = discord.ui.Select(placeholder="Choose a piece to move...", options=self._origin_options())
+        select.callback = self._on_origin_selected
+        self.add_item(select)
+        resign_btn = discord.ui.Button(label="Resign", emoji="🏳️", style=discord.ButtonStyle.danger)
+        resign_btn.callback = self._on_resign
+        self.add_item(resign_btn)
+
+    def _build_dest_select(self, origin_square):
+        self.clear_items()
+        select = discord.ui.Select(placeholder=f"Move {chess_lib.square_name(origin_square)} to...", options=self._dest_options(origin_square))
+        select.callback = self._on_dest_selected
+        self.add_item(select)
+        back_btn = discord.ui.Button(label="« Back", style=discord.ButtonStyle.secondary)
+        back_btn.callback = self._on_back
+        self.add_item(back_btn)
+        resign_btn = discord.ui.Button(label="Resign", emoji="🏳️", style=discord.ButtonStyle.danger)
+        resign_btn.callback = self._on_resign
+        self.add_item(resign_btn)
+
+    async def _guard_turn(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.current_player.id:
+            await interaction.response.send_message("❌ It's not your turn!", ephemeral=True)
+            return False
+        return True
+
+    async def _on_origin_selected(self, interaction: discord.Interaction):
+        if not await self._guard_turn(interaction):
+            return
+        self.origin = chess_lib.parse_square(interaction.data["values"][0])
+        self._build_dest_select(self.origin)
+        await interaction.response.edit_message(embed=self._embed(), view=self)
+
+    async def _on_back(self, interaction: discord.Interaction):
+        if not await self._guard_turn(interaction):
+            return
+        self.origin = None
+        self._build_origin_select()
+        await interaction.response.edit_message(embed=self._embed(), view=self)
+
+    async def _on_dest_selected(self, interaction: discord.Interaction):
+        if not await self._guard_turn(interaction):
+            return
+        dest_square = chess_lib.parse_square(interaction.data["values"][0])
+        candidates = [m for m in self.board.legal_moves if m.from_square == self.origin and m.to_square == dest_square]
+        move = next((m for m in candidates if m.promotion == chess_lib.QUEEN), candidates[0] if candidates else None)
+        self.origin = None
+        if move is None:
+            await interaction.response.send_message("❌ That move is no longer legal.", ephemeral=True)
+            self._build_origin_select()
+            await interaction.message.edit(embed=self._embed(), view=self)
+            return
+
+        self.board.push(move)
+
+        outcome = self.board.outcome()
+        if outcome is not None:
+            self.clear_items()
+            if outcome.winner is not None:
+                winner = self.players[outcome.winner]
+                result = f"♟️ Checkmate! **{winner.display_name} wins!**"
+            else:
+                reason = outcome.termination.name.replace("_", " ").title()
+                result = f"🤝 **Draw** ({reason})"
+            await interaction.response.edit_message(embed=self._embed(result_text=result), view=self)
+            return
+
+        self._build_origin_select()
+        await interaction.response.edit_message(embed=self._embed(), view=self)
+
+    async def _on_resign(self, interaction: discord.Interaction):
+        if not await self._guard_turn(interaction):
+            return
+        winner = self.players[not self.board.turn]
+        loser = self.current_player
+        self.clear_items()
+        await interaction.response.edit_message(
+            embed=self._embed(result_text=f"{loser.display_name} resigned. **{winner.display_name} wins!**"),
+            view=self
+        )
+
+    async def on_timeout(self):
+        if not self.message:
+            return
+        self.clear_items()
+        try:
+            await self.message.edit(content="⏰ Game timed out from inactivity.", view=self)
+        except discord.HTTPException:
+            pass
 
 
 @bot.command(name="chess")
@@ -18136,8 +18368,8 @@ async def play_chess(ctx, opponent: discord.Member = None):
     """
     Challenge another member to Chess — full standard rules via a real
     chess engine (castling, en passant, promotion, check/checkmate/
-    stalemate all enforced). Move using algebraic notation (`e4`, `Nf3`,
-    `O-O`) or UCI (`e2e4`, `e7e8q` for promotion). Say `resign` to forfeit.
+    stalemate all enforced). Pick a piece from the dropdown, then pick
+    where to move it — no notation to learn. Promotions always queen.
     Usage: ,chess @opponent
     """
     if not CHESS_AVAILABLE:
@@ -18149,75 +18381,8 @@ async def play_chess(ctx, opponent: discord.Member = None):
 
     board = chess_lib.Board()
     players = {chess_lib.WHITE: ctx.author, chess_lib.BLACK: opponent}
-
-    embed = discord.Embed(
-        title="♟️ Chess",
-        description=(
-            f"{_chess_render(board)}\n"
-            f"{ctx.author.mention} ⚪ vs {opponent.mention} ⚫\n\n"
-            "Move using algebraic (`e4`, `Nf3`, `O-O`) or UCI (`e2e4`) notation. Say `resign` to forfeit.\n\n"
-            f"It's {ctx.author.mention}'s turn!"
-        ),
-        color=discord.Color.blurple(),
-        timestamp=discord.utils.utcnow()
-    )
-    embed.set_footer(text="TrapAI Games — 5 minutes per move")
-    await ctx.send(embed=embed)
-
-    while True:
-        current_player = players[board.turn]
-
-        def check(m, expected=current_player):
-            content = m.content.strip()
-            return (m.author.id == expected.id and m.channel.id == ctx.channel.id and
-                    1 <= len(content) <= 8 and " " not in content)
-
-        try:
-            reply = await bot.wait_for("message", check=check, timeout=300)
-        except asyncio.TimeoutError:
-            await ctx.send(f"⏰ {current_player.mention} took too long — game ended.", delete_after=10)
-            return
-
-        text = reply.content.strip()
-        if text.lower() == "resign":
-            winner = opponent if current_player == ctx.author else ctx.author
-            embed = discord.Embed(
-                title="🏳️ Chess — Resignation",
-                description=f"{_chess_render(board)}\n\n{current_player.display_name} resigned. **{winner.display_name} wins!**",
-                color=discord.Color.green(),
-                timestamp=discord.utils.utcnow()
-            )
-            await ctx.send(embed=embed)
-            return
-
-        move = _chess_parse_move(board, text)
-        if move is None:
-            await ctx.send(f"❌ Not a legal move: `{text}`. Try algebraic (`e4`, `Nf3`) or UCI (`e2e4`).", delete_after=6)
-            continue
-
-        board.push(move)
-
-        outcome = board.outcome()
-        if outcome is not None:
-            if outcome.winner is not None:
-                winner = players[outcome.winner]
-                desc = f"{_chess_render(board)}\n\n♟️ Checkmate! **{winner.display_name} wins!**"
-            else:
-                reason = outcome.termination.name.replace("_", " ").title()
-                desc = f"{_chess_render(board)}\n\n🤝 **Draw** ({reason})"
-            embed = discord.Embed(title="🏆 Chess — Game Over", description=desc, color=discord.Color.green(), timestamp=discord.utils.utcnow())
-            await ctx.send(embed=embed)
-            return
-
-        next_player = players[board.turn]
-        check_note = " **Check!**" if board.is_check() else ""
-        embed = discord.Embed(
-            title="♟️ Chess",
-            description=f"{_chess_render(board)}\n\nIt's {next_player.mention}'s turn!{check_note}",
-            color=discord.Color.blurple(),
-            timestamp=discord.utils.utcnow()
-        )
-        await ctx.send(embed=embed)
+    view = ChessView(board, players)
+    view.message = await ctx.send(embed=view._embed(), view=view)
 
 
 # ============================================================
@@ -18489,7 +18654,7 @@ def _games_fun_embed(guild: discord.Guild) -> discord.Embed:
         name="🔴🟡  Checkers  —  `,checkers @user` / `,draughts`",
         value=(
             "Challenge another member to Checkers.\n"
-            "Move by replying `<from> <to>`, e.g. `c3 b4`.\n"
+            "Pick a piece from the dropdown, then pick where to move it — no notation to learn.\n"
             "Simplified rules — captures optional, single jumps only."
         ),
         inline=False
@@ -18498,7 +18663,7 @@ def _games_fun_embed(guild: discord.Guild) -> discord.Embed:
         name="♟️  Chess  —  `,chess @user`",
         value=(
             "Challenge another member to full-rules Chess.\n"
-            "Move with algebraic (`e4`, `Nf3`, `O-O`) or UCI (`e2e4`) notation, or say `resign`.\n"
+            "Pick a piece from the dropdown, then pick where to move it — no notation to learn (promotions always queen).\n"
             "Castling, en passant, promotion, and checkmate are all enforced."
         ),
         inline=False
