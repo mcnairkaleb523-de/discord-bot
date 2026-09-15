@@ -1242,6 +1242,34 @@ def _clear_jail_expiry(guild_id: int, user_id: int) -> None:
     _save_jail_expiry()
 
 
+# INMATE_NUMBERS[guild_id][user_id] = int — assigned once, the first time
+# someone is ever jailed in this server, and kept forever after that
+# (repeat offenders keep the same number, for flavor/continuity).
+# INMATE_NUMBER_COUNTER[guild_id] = the next number to hand out.
+INMATE_NUMBERS: dict[int, dict[int, int]] = _load_depth(_load_data("inmate_numbers", {}), 2)
+INMATE_NUMBER_COUNTER: dict[int, int] = _load_depth(_load_data("inmate_number_counter", {}), 1)
+
+
+def _save_inmate_numbers():
+    _save_data("inmate_numbers", _dump_depth(INMATE_NUMBERS, 2))
+
+
+def _save_inmate_number_counter():
+    _save_data("inmate_number_counter", _dump_depth(INMATE_NUMBER_COUNTER, 1))
+
+
+def _get_or_assign_inmate_number(guild_id: int, user_id: int) -> int:
+    numbers = INMATE_NUMBERS.setdefault(guild_id, {})
+    if user_id in numbers:
+        return numbers[user_id]
+    next_number = INMATE_NUMBER_COUNTER.get(guild_id, 0) + 1
+    INMATE_NUMBER_COUNTER[guild_id] = next_number
+    numbers[user_id] = next_number
+    _save_inmate_numbers()
+    _save_inmate_number_counter()
+    return next_number
+
+
 # WARNINGS[guild_id][user_id] = [ {reason, moderator, moderator_id, time}, ... ]
 WARNINGS = _load_warnings()
 
@@ -3508,7 +3536,7 @@ class VCAddModModal(discord.ui.Modal, title="🛡 Add VC Moderator"):
 # import relationship with this one — see its docstring).
 HELP_CATEGORIES = [
     ('🛡️', 'Moderation', ['kick', 'ban', 'massban', 'massunban', 'pullback', 'mute', 'unmute', 'timeout', 'warn', 'warnings', 'clearwarnings', 'modhistory', 'hardban', 'unhardban', 'hardbans', 'clear', 'purge', 'lock', 'unlock', 'hide', 'unhide', 'slowmode', 'nuke', 'lockdown', 'unlockdown', 'raidmode', 'nickname', 'strip', 'trapwarn', 'trapscan', 'restart']),
-    ('🔒', 'Jail & Anti-Raid', ['jail', 'unjail', 'setupjail', 'lockjailed', 'antiraid', 'raidwhitelist', 'wl']),
+    ('🔒', 'Jail & Anti-Raid', ['jail', 'unjail', 'worktime', 'setupjail', 'lockjailed', 'antiraid', 'raidwhitelist', 'wl']),
     ('🤖', 'Verification', ['verify', 'unverify', 'denyverify', 'sendverify', 'setverifybackup']),
     ('🏷️', 'Roles', ['role', 'roleall', 'massrole', 'massunrole', 'restoreallroles', 'autorole', 'setgifrole', 'protectedrole', 'br', 'roles']),
     ('🎤', 'Voice Channels', ['vclock', 'vcunlock', 'vchide', 'vcshow', 'vcname', 'vclimit', 'vcbitrate', 'vcregion', 'vckick', 'vcban', 'vcunban', 'vcpermit', 'vcmute', 'vcunmute', 'vcdeafen', 'vcundeafen', 'vctransfer', 'vcclaim', 'vcmod', 'vcremovemod', 'vcstats', 'setupvc', 'setunmutevc', 'd']),
@@ -3826,6 +3854,66 @@ async def _restore_jail_role_snapshot(guild: discord.Guild, member: discord.Memb
             pass
 
 
+async def _dm_jail_release(member, guild: discord.Guild, reason: str, *, moderator=None):
+    """DM someone the moment they're released from jail — manual ,unjail,
+    natural timer expiry, or an early release from ,worktime knocking
+    their remaining sentence to zero. Silently does nothing if their DMs
+    are closed."""
+    embed = discord.Embed(
+        title="🔓 You're Out of Jail!",
+        description=(
+            f"You've been released from **{guild.name}**'s jail — you're free to "
+            "return to chatting and everything else again.\n\n"
+            "🏷️ Your previous roles have been restored automatically (if the "
+            "Verified role was one of them, you'll need to re-verify)."
+        ),
+        color=discord.Color.green(),
+        timestamp=discord.utils.utcnow()
+    )
+    if guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
+    if moderator:
+        embed.add_field(name="🛡 Released By", value=str(moderator), inline=True)
+    embed.add_field(name="📝 Reason", value=reason, inline=False)
+    embed.set_footer(text=f"TrapAI • {guild.name}")
+    try:
+        await member.send(embed=embed)
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
+
+async def _release_from_jail(guild: discord.Guild, member: discord.Member, reason: str, *, moderator=None):
+    """Single release path shared by ,unjail, auto_unjail, and ,worktime's
+    early release — restores roles/channel access, cancels the pending
+    auto-unjail timer, clears expiry state, and DMs the member. Keeping
+    this in one place means all three ways someone can leave jail behave
+    identically instead of risking drift between copies."""
+    jail_role = discord.utils.get(guild.roles, name=JAIL_ROLE)
+    unverified_role = discord.utils.get(guild.roles, name=UNVERIFIED_ROLE)
+
+    if jail_role and jail_role in member.roles:
+        try:
+            await member.remove_roles(jail_role, reason=reason)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+    if unverified_role and unverified_role not in member.roles:
+        try:
+            await member.add_roles(unverified_role, reason="Returned to unverified after jail")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    await _restore_jail_role_snapshot(guild, member)
+    await _remove_jail_overwrites(member)
+
+    old_task = jailed_users.get((guild.id, member.id))
+    if old_task:
+        old_task.cancel()
+    jailed_users.pop((guild.id, member.id), None)
+    _clear_jail_expiry(guild.id, member.id)
+
+    await _dm_jail_release(member, guild, reason, moderator=moderator)
+
+
 async def auto_unjail(guild_id: int, user_id: int, delay: int, reason: str = "Jail timer expired"):
     await asyncio.sleep(delay)
 
@@ -3846,15 +3934,10 @@ async def auto_unjail(guild_id: int, user_id: int, delay: int, reason: str = "Ja
         return
 
     jail_role = discord.utils.get(guild.roles, name=JAIL_ROLE)
-    unverified_role = discord.utils.get(guild.roles, name=UNVERIFIED_ROLE)
 
     if jail_role and jail_role in member.roles:
         try:
-            await member.remove_roles(jail_role, reason=reason)
-            if unverified_role and unverified_role not in member.roles:
-                await member.add_roles(unverified_role, reason="Returned to unverified after jail")
-            await _restore_jail_role_snapshot(guild, member)
-            await _remove_jail_overwrites(member)
+            await _release_from_jail(guild, member, reason)
             _log_mod_action(guild_id, user_id, "auto_unjail", "System (timer expired)", reason)
             await log(
                 guild,
@@ -3873,9 +3956,9 @@ async def auto_unjail(guild_id: int, user_id: int, delay: int, reason: str = "Ja
             )
         except discord.HTTPException:
             pass
-
-    jailed_users.pop((guild_id, user_id), None)
-    _clear_jail_expiry(guild_id, user_id)
+    else:
+        jailed_users.pop((guild_id, user_id), None)
+        _clear_jail_expiry(guild_id, user_id)
 
 
 async def handle_spam(message):
@@ -8609,9 +8692,13 @@ async def jail(ctx, member: discord.Member, duration: str, *, reason="No reason 
             auto_unjail(ctx.guild.id, member.id, seconds, reason)
         )
 
+        inmate_number = _get_or_assign_inmate_number(ctx.guild.id, member.id)
+        cell_number = random.randint(1, 99)
+
         JAIL_EXPIRY.setdefault(ctx.guild.id, {})[member.id] = {
             "expires_at": time.time() + seconds,
             "reason": reason,
+            "cell_number": cell_number,
         }
         _save_jail_expiry()
         _log_mod_action(ctx.guild.id, member.id, "jail", ctx.author, reason, extra=f"Duration: {duration}")
@@ -8619,7 +8706,12 @@ async def jail(ctx, member: discord.Member, duration: str, *, reason="No reason 
         # Fire the DM in the background — no need to block the confirmation
         # embed below on it finishing.
         asyncio.create_task(_dm_action(member, ctx.guild, "jail", ctx.author, reason,
-                                        extra=f"Duration: **{duration}**"))
+                                        extra=(
+                                            f"Duration: **{duration}**\n"
+                                            f"👤 Inmate #{inmate_number} • 🚪 Cell Block #{cell_number}\n\n"
+                                            "Run `,worktime` in #jail to answer a quick question and "
+                                            "shave time off your sentence."
+                                        )))
 
         roles_note = "All other roles stripped — will restore automatically on release." if not already_jailed else "Timer updated — roles unchanged (already jailed)."
         embed = discord.Embed(
@@ -8631,9 +8723,12 @@ async def jail(ctx, member: discord.Member, duration: str, *, reason="No reason 
                 f"Reason: {reason}\n"
                 f"Moderator: {ctx.author}\n"
                 "Status: JAILED\n"
+                f"Inmate #: {inmate_number}\n"
+                f"Cell Block #: {cell_number}\n"
                 "```\n"
                 f"🏷️ {roles_note}\n"
-                "🙈 All channels hidden except #jail."
+                "🙈 All channels hidden except #jail.\n"
+                "🧮 They can run `,worktime` in #jail to reduce their sentence."
             ),
             color=discord.Color.red(),
             timestamp=discord.utils.utcnow()
@@ -8645,6 +8740,8 @@ async def jail(ctx, member: discord.Member, duration: str, *, reason="No reason 
                       ("🛡 Moderator", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
                       ("🔒 User",      f"{member.mention} (`{member.id}`)",          True),
                       ("⏱️ Duration",  duration,                                      True),
+                      ("👤 Inmate #",  str(inmate_number),                            True),
+                      ("🚪 Cell #",    str(cell_number),                              True),
                       ("📝 Reason",    reason,                                         False),
                       ("🏷️ Roles",     "Stripped (will auto-restore)" if not already_jailed else "Unchanged", True),
                       ("📨 DM Sent",   "✅ Notified via DM",                           True),
@@ -8661,7 +8758,6 @@ async def jail(ctx, member: discord.Member, duration: str, *, reason="No reason 
 @_permitted_check(manage_roles=True)
 async def unjail(ctx, member: discord.Member, *, reason="No reason provided"):
     jail_role = discord.utils.get(ctx.guild.roles, name=JAIL_ROLE)
-    unverified_role = discord.utils.get(ctx.guild.roles, name=UNVERIFIED_ROLE)
 
     if not jail_role:
         await ctx.send(f"❌ Role **{JAIL_ROLE}** was not found.")
@@ -8671,18 +8767,7 @@ async def unjail(ctx, member: discord.Member, *, reason="No reason provided"):
         return
 
     try:
-        await member.remove_roles(jail_role, reason=f"Unjailed by {ctx.author} | {reason}")
-        if unverified_role and unverified_role not in member.roles:
-            await member.add_roles(unverified_role, reason="Returned to unverified after unjail")
-
-        await _restore_jail_role_snapshot(ctx.guild, member)
-        await _remove_jail_overwrites(member)
-
-        old_task = jailed_users.get((ctx.guild.id, member.id))
-        if old_task:
-            old_task.cancel()
-            jailed_users.pop((ctx.guild.id, member.id), None)
-        _clear_jail_expiry(ctx.guild.id, member.id)
+        await _release_from_jail(ctx.guild, member, reason, moderator=ctx.author)
         _log_mod_action(ctx.guild.id, member.id, "unjail", ctx.author, reason)
 
         embed = discord.Embed(
@@ -8710,6 +8795,82 @@ async def unjail(ctx, member: discord.Member, *, reason="No reason provided"):
         await ctx.send(_role_forbidden_reason(ctx.guild))
     except discord.HTTPException:
         await ctx.send("❌ Something went wrong while unjailing that member.")
+
+
+@bot.command(name="worktime", aliases=["dotime"])
+async def worktime(ctx):
+    """
+    Answer a quick math question to shave 1 minute off your jail
+    sentence. Only works while jailed — on a 2-minute cooldown per
+    attempt (right or wrong). Usage: ,worktime
+    """
+    guild = ctx.guild
+    jail_role = discord.utils.get(guild.roles, name=JAIL_ROLE)
+    if not jail_role or jail_role not in ctx.author.roles:
+        await ctx.send("❌ This is only for jailed members.", delete_after=8)
+        return
+
+    cd = _on_cooldown(guild.id, ctx.author.id, "worktime", 120)
+    if cd:
+        m, s = divmod(cd, 60)
+        await ctx.send(f"⏳ You can work again in **{m}m {s}s**.", delete_after=8)
+        return
+
+    inmate_number = _get_or_assign_inmate_number(guild.id, ctx.author.id)
+    a, b = random.randint(1, 20), random.randint(1, 20)
+    op = random.choice(["+", "-", "×"])
+    answer = a + b if op == "+" else a - b if op == "-" else a * b
+
+    await ctx.send(
+        f"🧮 Inmate #{inmate_number}, solve this in 30 seconds to shave **1 minute** off your time: "
+        f"**{a} {op} {b} = ?**"
+    )
+
+    def check(m):
+        return m.author.id == ctx.author.id and m.channel.id == ctx.channel.id
+
+    try:
+        guess = await bot.wait_for("message", check=check, timeout=30)
+    except asyncio.TimeoutError:
+        await ctx.send(f"⏰ Too slow, Inmate #{inmate_number} — no time off this round.", delete_after=8)
+        return
+
+    try:
+        given = int(guess.content.strip())
+    except ValueError:
+        given = None
+
+    if given != answer:
+        await ctx.send(f"❌ Wrong — it was **{answer}**. Try again in 2 minutes.", delete_after=8)
+        return
+
+    entry = JAIL_EXPIRY.get(guild.id, {}).get(ctx.author.id)
+    if not entry:
+        await ctx.send("✅ Correct! (No timed sentence on file to reduce, though.)", delete_after=8)
+        return
+
+    remaining = entry["expires_at"] - time.time()
+    new_remaining = remaining - 60
+
+    if new_remaining <= 0:
+        await _release_from_jail(guild, ctx.author, "Time served reduced to zero via ,worktime")
+        _log_mod_action(guild.id, ctx.author.id, "worktime_release", "System (task completed)",
+                         "Time served reduced to zero via ,worktime")
+        await ctx.send(f"🎉 Correct! That's enough — Inmate #{inmate_number} has served their time and is **released**!")
+        return
+
+    entry["expires_at"] = time.time() + new_remaining
+    _save_jail_expiry()
+
+    old_task = jailed_users.get((guild.id, ctx.author.id))
+    if old_task:
+        old_task.cancel()
+    jailed_users[(guild.id, ctx.author.id)] = asyncio.create_task(
+        auto_unjail(guild.id, ctx.author.id, new_remaining, entry.get("reason", "Jail timer expired"))
+    )
+
+    m, s = divmod(int(new_remaining), 60)
+    await ctx.send(f"✅ Correct! **1 minute** off your sentence — Inmate #{inmate_number} now has **{m}m {s}s** left.")
 
 
 # ============================================================
