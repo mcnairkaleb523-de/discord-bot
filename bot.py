@@ -1043,7 +1043,7 @@ WHOLE_BOT_PREMIUM_ONLY_COMMANDS = {
     "giveaway", "giveawayend", "giveaways", "poll", "pollend",
     # Economy & Games (whole category)
     "balance", "jobs", "setjob", "daily", "weekly", "work", "rob", "give", "deposit", "withdraw",
-    "leaderboard", "gamblers", "slots", "blackjack", "coinflip", "dice", "8ball",
+    "leaderboard", "gamblers", "slots", "blackjack", "coinflip", "dice", "duel", "8ball",
     "trivia", "hangman", "tictactoe", "numguess", "rockpaperscissors", "highlow",
     "crash", "games",
     # Birthdays (whole category)
@@ -3564,7 +3564,7 @@ HELP_CATEGORIES = [
     ('📊', 'Stats & Info', ['whois', 'chatstats', 'serverstats', 'invites', 'invitelogs', 'inviteleaderboard', 'setinvite', 'milestones', 'setmilestone', 'testmilestone', 'ping', 'exitsurveys']),
     ('✅', 'Vouch', ['vouch', 'unvouch', 'cancelvouch', 'pendingvouches', 'vouches', 'vouchleaderboard', 'vouchstats', 'vouchconfig']),
     ('🎉', 'Giveaways & Polls', ['giveaway', 'giveawayend', 'giveaways', 'poll', 'pollend']),
-    ('💰', 'Economy & Games', ['balance', 'jobs', 'setjob', 'daily', 'weekly', 'work', 'rob', 'give', 'deposit', 'withdraw', 'leaderboard', 'gamblers', 'slots', 'blackjack', 'coinflip', 'dice', '8ball', 'trivia', 'hangman', 'tictactoe', 'numguess', 'rockpaperscissors', 'highlow', 'crash', 'games', 'shop', 'buyrole', 'setroleshop']),
+    ('💰', 'Economy & Games', ['balance', 'jobs', 'setjob', 'daily', 'weekly', 'work', 'rob', 'give', 'deposit', 'withdraw', 'leaderboard', 'gamblers', 'slots', 'blackjack', 'coinflip', 'dice', 'duel', '8ball', 'trivia', 'hangman', 'tictactoe', 'numguess', 'rockpaperscissors', 'highlow', 'crash', 'games', 'shop', 'buyrole', 'setroleshop']),
     ('🎂', 'Birthdays', ['birthday', 'removebirthday', 'setbirthday', 'setbirthdaychannel', 'birthdaylist', 'settimezone']),
     ('🚀', 'Boosts & Vanity', ['setboostchannel', 'setvanitycode', 'setvanityrole', 'vanityconfig']),
     ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist', 'acceptstaff', 'denystaff', 'setstaffrules', 'staffleaderboard', 'staffstats', 'staffwarn', 'staffstrike', 'staffwarnings', 'staffstrikes', 'clearstaffwarnings', 'clearstaffstrikes']),
@@ -16694,6 +16694,349 @@ async def crash(ctx, bet: int = None):
     await ctx.send(embed=fin)
 
 
+# ── Duels (PvP) ──────────────────────────────────────────────
+# ,duel @user <coinflip|dice|rps|blackjack> <bet> — heads-up bet between
+# two real members, winner takes both wagers. Both bets are reserved the
+# moment the challenge is *accepted* (not when it's sent), and every
+# resolver below only ever adds to wallets afterward — it never
+# subtracts again — matching the reserve-then-award pattern the
+# single-player casino games above already use.
+
+def _record_duel_result(guild_id, winner_id, loser_id, bet):
+    GAMBLE_WINS.setdefault(guild_id, {})[winner_id] = \
+        GAMBLE_WINS.setdefault(guild_id, {}).get(winner_id, 0) + bet
+    GAMBLE_WINS.setdefault(guild_id, {})[loser_id] = \
+        GAMBLE_WINS.setdefault(guild_id, {}).get(loser_id, 0) - bet
+
+
+async def _duel_coinflip(channel, guild_id, challenger, opponent, bet):
+    winner = random.choice([challenger, opponent])
+    loser = opponent if winner == challenger else challenger
+    _eco(guild_id, winner.id)["wallet"] += bet * 2
+    _record_duel_result(guild_id, winner.id, loser.id, bet)
+    embed = discord.Embed(
+        title="🪙 Duel — Coin Flip",
+        description=f"The coin landed in {winner.mention}'s favor!\n🎉 **{winner.display_name} wins {_fmt_money(bet * 2)}**!",
+        color=discord.Color.green(),
+        timestamp=discord.utils.utcnow()
+    )
+    await channel.send(embed=embed)
+
+
+async def _duel_dice(channel, guild_id, challenger, opponent, bet):
+    while True:
+        c_roll, o_roll = random.randint(1, 6), random.randint(1, 6)
+        if c_roll != o_roll:
+            break
+    winner, loser = (challenger, opponent) if c_roll > o_roll else (opponent, challenger)
+    _eco(guild_id, winner.id)["wallet"] += bet * 2
+    _record_duel_result(guild_id, winner.id, loser.id, bet)
+    embed = discord.Embed(
+        title="🎲 Duel — Dice",
+        description=(
+            f"{challenger.mention} rolled **{c_roll}** • {opponent.mention} rolled **{o_roll}**\n\n"
+            f"🎉 **{winner.display_name} wins {_fmt_money(bet * 2)}**!"
+        ),
+        color=discord.Color.green(),
+        timestamp=discord.utils.utcnow()
+    )
+    await channel.send(embed=embed)
+
+
+class DuelRPSView(discord.ui.View):
+    CHOICES = {"rock": "✊", "paper": "✋", "scissors": "✌️"}
+    BEATS = {"rock": "scissors", "paper": "rock", "scissors": "paper"}
+
+    def __init__(self, guild_id, challenger, opponent, bet):
+        super().__init__(timeout=30)
+        self.guild_id = guild_id
+        self.challenger = challenger
+        self.opponent = opponent
+        self.bet = bet
+        self.picks = {}
+        self.message = None
+        for name, emoji in self.CHOICES.items():
+            self.add_item(self._make_button(name, emoji))
+
+    def _make_button(self, name, emoji):
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id not in (self.challenger.id, self.opponent.id):
+                await interaction.response.send_message("❌ This isn't your duel.", ephemeral=True)
+                return
+            if interaction.user.id in self.picks:
+                await interaction.response.send_message("❌ You already picked.", ephemeral=True)
+                return
+            self.picks[interaction.user.id] = name
+            await interaction.response.send_message(f"You picked **{name.title()}**! Waiting on your opponent...", ephemeral=True)
+            if len(self.picks) == 2:
+                await self._resolve()
+        button = discord.ui.Button(label=name.title(), emoji=emoji, style=discord.ButtonStyle.secondary)
+        button.callback = callback
+        return button
+
+    async def _resolve(self):
+        for child in self.children:
+            child.disabled = True
+        c_pick = self.picks[self.challenger.id]
+        o_pick = self.picks[self.opponent.id]
+        if c_pick == o_pick:
+            _eco(self.guild_id, self.challenger.id)["wallet"] += self.bet
+            _eco(self.guild_id, self.opponent.id)["wallet"] += self.bet
+            desc = (
+                f"{self.challenger.mention}: {self.CHOICES[c_pick]} **{c_pick.title()}**\n"
+                f"{self.opponent.mention}: {self.CHOICES[o_pick]} **{o_pick.title()}**\n\n"
+                "🤝 **Tie!** Bets returned."
+            )
+            color = discord.Color.blurple()
+        else:
+            winner, loser = (self.challenger, self.opponent) if self.BEATS[c_pick] == o_pick else (self.opponent, self.challenger)
+            _eco(self.guild_id, winner.id)["wallet"] += self.bet * 2
+            _record_duel_result(self.guild_id, winner.id, loser.id, self.bet)
+            desc = (
+                f"{self.challenger.mention}: {self.CHOICES[c_pick]} **{c_pick.title()}**\n"
+                f"{self.opponent.mention}: {self.CHOICES[o_pick]} **{o_pick.title()}**\n\n"
+                f"🎉 **{winner.display_name} wins {_fmt_money(self.bet * 2)}**!"
+            )
+            color = discord.Color.green()
+        embed = discord.Embed(title="✊✋✌️ Duel — Rock Paper Scissors", description=desc, color=color, timestamp=discord.utils.utcnow())
+        if self.message:
+            try:
+                await self.message.edit(embed=embed, view=self)
+            except discord.HTTPException:
+                pass
+
+    async def on_timeout(self):
+        if len(self.picks) >= 2 or not self.message:
+            return
+        _eco(self.guild_id, self.challenger.id)["wallet"] += self.bet
+        _eco(self.guild_id, self.opponent.id)["wallet"] += self.bet
+        for child in self.children:
+            child.disabled = True
+        try:
+            await self.message.edit(content="⏰ Duel timed out — bets refunded.", view=self)
+        except discord.HTTPException:
+            pass
+
+
+async def _duel_rps(channel, guild_id, challenger, opponent, bet):
+    view = DuelRPSView(guild_id, challenger, opponent, bet)
+    embed = discord.Embed(
+        title="✊✋✌️ Duel — Rock Paper Scissors",
+        description=f"{challenger.mention} vs {opponent.mention}\n\nBoth players: pick your move below (privately)!",
+        color=discord.Color.blurple(),
+        timestamp=discord.utils.utcnow()
+    )
+    view.message = await channel.send(embed=embed, view=view)
+
+
+async def _duel_blackjack(channel, guild_id, challenger, opponent, bet):
+    deck = list(range(1, 14)) * 4
+    random.shuffle(deck)
+    hands = {challenger.id: [deck.pop(), deck.pop()], opponent.id: [deck.pop(), deck.pop()]}
+    order = [challenger, opponent]
+
+    def hand_str(h):
+        return " ".join(_bj_card_name(c) for c in h)
+
+    def make_embed(turn_player=None, result_text=None):
+        e = discord.Embed(title="🃏 Duel — Blackjack", color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
+        for p in order:
+            pv = _bj_hand_value(hands[p.id])
+            e.add_field(name=f"{p.display_name} ({pv})", value=hand_str(hands[p.id]), inline=True)
+        if result_text:
+            e.add_field(name="Result", value=result_text, inline=False)
+        elif turn_player:
+            e.add_field(name="Turn", value=f"{turn_player.mention}'s move — reply `h`/`hit` or `s`/`stand`", inline=False)
+        e.set_footer(text=f"Bet: {_fmt_money(bet)} each  •  TrapAI Casino")
+        return e
+
+    msg = await channel.send(embed=make_embed(turn_player=order[0]))
+    busted = set()
+
+    for player in order:
+        while True:
+            pv = _bj_hand_value(hands[player.id])
+            if pv >= 21:
+                if pv > 21:
+                    busted.add(player.id)
+                break
+
+            def check(m, player=player):
+                return m.author.id == player.id and m.channel.id == channel.id and \
+                       m.content.lower() in ("h", "hit", "s", "stand")
+
+            try:
+                reply = await bot.wait_for("message", check=check, timeout=30)
+            except asyncio.TimeoutError:
+                await channel.send(f"⏰ {player.mention} took too long — auto-stand.")
+                break
+            if reply.content.lower() in ("h", "hit"):
+                hands[player.id].append(deck.pop())
+                pv = _bj_hand_value(hands[player.id])
+                if pv > 21:
+                    busted.add(player.id)
+                    await msg.edit(embed=make_embed(turn_player=player))
+                    break
+                await msg.edit(embed=make_embed(turn_player=player))
+            else:
+                break
+        next_idx = order.index(player) + 1
+        if next_idx < len(order):
+            await msg.edit(embed=make_embed(turn_player=order[next_idx]))
+
+    c_val, o_val = _bj_hand_value(hands[challenger.id]), _bj_hand_value(hands[opponent.id])
+    if challenger.id in busted and opponent.id in busted:
+        _eco(guild_id, challenger.id)["wallet"] += bet
+        _eco(guild_id, opponent.id)["wallet"] += bet
+        result = "🤝 **Both busted!** Bets returned."
+    elif challenger.id in busted:
+        _eco(guild_id, opponent.id)["wallet"] += bet * 2
+        _record_duel_result(guild_id, opponent.id, challenger.id, bet)
+        result = f"💥 {challenger.display_name} busted! **{opponent.display_name} wins {_fmt_money(bet * 2)}**!"
+    elif opponent.id in busted:
+        _eco(guild_id, challenger.id)["wallet"] += bet * 2
+        _record_duel_result(guild_id, challenger.id, opponent.id, bet)
+        result = f"💥 {opponent.display_name} busted! **{challenger.display_name} wins {_fmt_money(bet * 2)}**!"
+    elif c_val == o_val:
+        _eco(guild_id, challenger.id)["wallet"] += bet
+        _eco(guild_id, opponent.id)["wallet"] += bet
+        result = f"🤝 **Push!** Both had {c_val}. Bets returned."
+    elif c_val > o_val:
+        _eco(guild_id, challenger.id)["wallet"] += bet * 2
+        _record_duel_result(guild_id, challenger.id, opponent.id, bet)
+        result = f"🎉 **{challenger.display_name} wins {_fmt_money(bet * 2)}**! ({c_val} vs {o_val})"
+    else:
+        _eco(guild_id, opponent.id)["wallet"] += bet * 2
+        _record_duel_result(guild_id, opponent.id, challenger.id, bet)
+        result = f"🎉 **{opponent.display_name} wins {_fmt_money(bet * 2)}**! ({o_val} vs {c_val})"
+
+    await msg.edit(embed=make_embed(result_text=result))
+
+
+DUEL_GAMES = {
+    "coinflip": _duel_coinflip,
+    "dice": _duel_dice,
+    "rps": _duel_rps,
+    "blackjack": _duel_blackjack,
+}
+DUEL_GAME_NAMES = {
+    "coinflip": "Coin Flip", "dice": "Dice",
+    "rps": "Rock Paper Scissors", "blackjack": "Blackjack",
+}
+DUEL_GAME_ALIASES = {"cf": "coinflip", "flip": "coinflip", "bj": "blackjack"}
+
+
+class DuelChallengeView(discord.ui.View):
+    def __init__(self, challenger, opponent, game, bet):
+        super().__init__(timeout=60)
+        self.challenger = challenger
+        self.opponent = opponent
+        self.game = game
+        self.bet = bet
+        self.resolved = False
+        self.message = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.opponent.id:
+            await interaction.response.send_message("❌ This challenge isn't for you.", ephemeral=True)
+            return False
+        return True
+
+    async def on_timeout(self):
+        if self.resolved or not self.message:
+            return
+        for child in self.children:
+            child.disabled = True
+        try:
+            await self.message.edit(content="⏰ Challenge expired — no response.", embed=None, view=self)
+        except discord.HTTPException:
+            pass
+
+    @discord.ui.button(label="Accept", emoji="✅", style=discord.ButtonStyle.success)
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.resolved = True
+        for child in self.children:
+            child.disabled = True
+
+        guild_id = interaction.guild.id
+        challenger_data = _eco(guild_id, self.challenger.id)
+        opponent_data = _eco(guild_id, self.opponent.id)
+        if challenger_data["wallet"] < self.bet:
+            await interaction.response.edit_message(
+                content=f"❌ {self.challenger.mention} no longer has enough to cover the bet — challenge cancelled.",
+                embed=None, view=self
+            )
+            return
+        if opponent_data["wallet"] < self.bet:
+            await interaction.response.edit_message(
+                content="❌ You don't have enough to cover the bet — challenge cancelled.",
+                embed=None, view=self
+            )
+            return
+
+        challenger_data["wallet"] -= self.bet
+        opponent_data["wallet"] -= self.bet
+
+        await interaction.response.edit_message(
+            content=f"✅ Challenge accepted! Starting **{DUEL_GAME_NAMES[self.game]}**...",
+            embed=None, view=self
+        )
+        await DUEL_GAMES[self.game](interaction.channel, guild_id, self.challenger, self.opponent, self.bet)
+
+    @discord.ui.button(label="Decline", emoji="❌", style=discord.ButtonStyle.danger)
+    async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.resolved = True
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content=f"❌ {self.opponent.mention} declined the challenge.", embed=None, view=self
+        )
+
+
+@bot.command(aliases=["challenge"])
+async def duel(ctx, opponent: discord.Member = None, game: str = None, bet: int = None):
+    """
+    Challenge another member to a heads-up bet — winner takes both wagers.
+    Usage: ,duel @user <coinflip|dice|rps|blackjack> <bet>
+    Aliases: cf/flip = coinflip, bj = blackjack
+    """
+    if opponent is None or game is None or bet is None:
+        await ctx.send("❌ Usage: `,duel @user <coinflip|dice|rps|blackjack> <bet>`", delete_after=10)
+        return
+    if opponent == ctx.author or opponent.bot:
+        await ctx.send("❌ Pick a real member who isn't you or a bot.", delete_after=6)
+        return
+    if bet <= 0:
+        await ctx.send("❌ Bet must be greater than 0.", delete_after=6)
+        return
+    game_key = DUEL_GAME_ALIASES.get(game.lower(), game.lower())
+    if game_key not in DUEL_GAMES:
+        await ctx.send("❌ Unknown game. Choose from `coinflip`, `dice`, `rps`, `blackjack`.", delete_after=8)
+        return
+
+    challenger_data = _eco(ctx.guild.id, ctx.author.id)
+    if bet > challenger_data["wallet"]:
+        await ctx.send(f"❌ You only have **{_fmt_money(challenger_data['wallet'])}**.", delete_after=6)
+        return
+    opponent_data = _eco(ctx.guild.id, opponent.id)
+    if bet > opponent_data["wallet"]:
+        await ctx.send(f"❌ {opponent.display_name} doesn't have enough to cover that bet.", delete_after=8)
+        return
+
+    view = DuelChallengeView(ctx.author, opponent, game_key, bet)
+    embed = discord.Embed(
+        title="⚔️ Duel Challenge!",
+        description=(
+            f"{ctx.author.mention} is challenging {opponent.mention} to **{DUEL_GAME_NAMES[game_key]}**!\n\n"
+            f"💰 Bet: **{_fmt_money(bet)}** each — winner takes **{_fmt_money(bet * 2)}**.\n\n"
+            f"{opponent.mention}, accept or decline below (60 seconds)."
+        ),
+        color=discord.Color.orange(),
+        timestamp=discord.utils.utcnow()
+    )
+    view.message = await ctx.send(embed=embed, view=view)
+
+
 # ── Rock Paper Scissors ──────────────────────────────────────
 @bot.command(aliases=["rps"])
 async def rockpaperscissors(ctx, choice: str = None):
@@ -17173,6 +17516,15 @@ def _games_casino_embed(guild: discord.Guild) -> discord.Embed:
             "A card is drawn (Ace–King). Predict if the next card is **higher** or **lower**.\n"
             "Reply `higher` or `lower` (or `h` / `l`) within 20 seconds.\n"
             "Tie = bet returned."
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="⚔️  Duel (PvP)  —  `,duel @user <game> <bet>`",
+        value=(
+            "Challenge another member directly — winner takes both bets.\n"
+            "Supports `coinflip`, `dice`, `rps`, and `blackjack`.\n"
+            "They have 60 seconds to accept or decline."
         ),
         inline=False
     )
