@@ -1042,7 +1042,7 @@ WHOLE_BOT_PREMIUM_ONLY_COMMANDS = {
     # Giveaways & Polls (whole category)
     "giveaway", "giveawayend", "giveaways", "poll", "pollend",
     # Economy & Games (whole category)
-    "balance", "daily", "weekly", "work", "rob", "give", "deposit", "withdraw",
+    "balance", "jobs", "setjob", "daily", "weekly", "work", "rob", "give", "deposit", "withdraw",
     "leaderboard", "gamblers", "slots", "blackjack", "coinflip", "dice", "8ball",
     "trivia", "hangman", "tictactoe", "numguess", "rockpaperscissors", "highlow",
     "crash", "games",
@@ -3564,7 +3564,7 @@ HELP_CATEGORIES = [
     ('📊', 'Stats & Info', ['whois', 'chatstats', 'serverstats', 'invites', 'invitelogs', 'inviteleaderboard', 'setinvite', 'milestones', 'setmilestone', 'testmilestone', 'ping', 'exitsurveys']),
     ('✅', 'Vouch', ['vouch', 'unvouch', 'cancelvouch', 'pendingvouches', 'vouches', 'vouchleaderboard', 'vouchstats', 'vouchconfig']),
     ('🎉', 'Giveaways & Polls', ['giveaway', 'giveawayend', 'giveaways', 'poll', 'pollend']),
-    ('💰', 'Economy & Games', ['balance', 'daily', 'weekly', 'work', 'rob', 'give', 'deposit', 'withdraw', 'leaderboard', 'gamblers', 'slots', 'blackjack', 'coinflip', 'dice', '8ball', 'trivia', 'hangman', 'tictactoe', 'numguess', 'rockpaperscissors', 'highlow', 'crash', 'games', 'shop', 'buyrole', 'setroleshop']),
+    ('💰', 'Economy & Games', ['balance', 'jobs', 'setjob', 'daily', 'weekly', 'work', 'rob', 'give', 'deposit', 'withdraw', 'leaderboard', 'gamblers', 'slots', 'blackjack', 'coinflip', 'dice', '8ball', 'trivia', 'hangman', 'tictactoe', 'numguess', 'rockpaperscissors', 'highlow', 'crash', 'games', 'shop', 'buyrole', 'setroleshop']),
     ('🎂', 'Birthdays', ['birthday', 'removebirthday', 'setbirthday', 'setbirthdaychannel', 'birthdaylist', 'settimezone']),
     ('🚀', 'Boosts & Vanity', ['setboostchannel', 'setvanitycode', 'setvanityrole', 'vanityconfig']),
     ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist', 'acceptstaff', 'denystaff', 'setstaffrules', 'staffleaderboard', 'staffstats', 'staffwarn', 'staffstrike', 'staffwarnings', 'staffstrikes', 'clearstaffwarnings', 'clearstaffstrikes']),
@@ -15817,16 +15817,90 @@ def _eco(guild_id: int, user_id: int) -> dict:
 def _add_wallet(guild_id, user_id, amount):
     _eco(guild_id, user_id)["wallet"] += amount
 
+def _fmt_money(amount: int) -> str:
+    sign = "-" if amount < 0 else ""
+    return f"{sign}${abs(amount):,}"
+
+# LIFETIME_EARNED[guild_id][user_id] = total ever earned via work/daily/
+# weekly/trivia-style rewards — monotonically increasing (gambling wins/
+# losses and ,give never touch it), used purely to gate job unlocks in
+# JOBS below so a lucky slots win can't instantly "hire" someone as CEO
+# and a robbery/gambling loss can't un-qualify them from a job already earned.
+LIFETIME_EARNED: dict[int, dict[int, int]] = _load_depth(_load_data("lifetime_earned", {}), 2)
+
+# CURRENT_JOB[guild_id][user_id] = job name string, set via ,setjob.
+CURRENT_JOB: dict[int, dict[int, str]] = _load_depth(_load_data("current_job", {}), 2)
+
+
+def _save_lifetime_earned():
+    _save_data("lifetime_earned", _dump_depth(LIFETIME_EARNED, 2))
+
+def _save_current_job():
+    _save_data("current_job", _dump_depth(CURRENT_JOB, 2))
+
+def _add_earned(guild_id, user_id, amount):
+    """Wallet income that also counts toward job-unlock progress."""
+    _add_wallet(guild_id, user_id, amount)
+    guild_earned = LIFETIME_EARNED.setdefault(guild_id, {})
+    guild_earned[user_id] = guild_earned.get(user_id, 0) + amount
+    _save_lifetime_earned()
+
+def _lifetime_earned(guild_id, user_id) -> int:
+    return LIFETIME_EARNED.get(guild_id, {}).get(user_id, 0)
+
+
+# JOBS — ordered low to high pay, each locked behind a lifetime-earned
+# threshold so progression feels like an actual career ladder rather than
+# an instant pick-any-job list.
+JOBS = [
+    {"name": "Cashier",           "emoji": "🛒", "pay": (20, 60),     "unlock": 0},
+    {"name": "Delivery Driver",   "emoji": "🚴", "pay": (40, 100),    "unlock": 500},
+    {"name": "Barista",           "emoji": "☕", "pay": (50, 120),    "unlock": 1_000},
+    {"name": "Uber Driver",       "emoji": "🚗", "pay": (70, 160),    "unlock": 2_500},
+    {"name": "Mechanic",          "emoji": "🔧", "pay": (100, 220),   "unlock": 5_000},
+    {"name": "Chef",              "emoji": "🍳", "pay": (130, 280),   "unlock": 10_000},
+    {"name": "Nurse",             "emoji": "🩺", "pay": (180, 380),   "unlock": 20_000},
+    {"name": "Software Engineer", "emoji": "💻", "pay": (250, 550),   "unlock": 40_000},
+    {"name": "Lawyer",            "emoji": "⚖️", "pay": (350, 750),   "unlock": 75_000},
+    {"name": "Doctor",            "emoji": "🏥", "pay": (450, 950),   "unlock": 150_000},
+    {"name": "CEO",               "emoji": "💼", "pay": (700, 1_500), "unlock": 300_000},
+]
+JOBS_BY_NAME = {j["name"].lower(): j for j in JOBS}
+
+JOB_FLAVOR = {
+    "Cashier":           ["rang up groceries", "handled the register", "restocked shelves"],
+    "Delivery Driver":   ["dropped off packages", "delivered a rush order", "made a dozen stops"],
+    "Barista":           ["pulled espresso shots", "latte-art'd a cappuccino", "survived the morning rush"],
+    "Uber Driver":       ["drove across town", "gave someone a 5-star ride", "picked up a late-night fare"],
+    "Mechanic":          ["fixed a transmission", "changed some brake pads", "diagnosed an engine problem"],
+    "Chef":              ["plated a tasting menu", "ran the dinner rush", "perfected a new recipe"],
+    "Nurse":             ["worked a double shift", "took vitals all day", "helped out in the ER"],
+    "Software Engineer": ["shipped a bug fix", "closed out a sprint", "refactored some legacy code"],
+    "Lawyer":            ["won a case", "drafted a contract", "billed a lot of hours"],
+    "Doctor":            ["ran the clinic", "performed a checkup", "consulted on a diagnosis"],
+    "CEO":               ["closed a merger", "gave a keynote", "signed off on quarterly earnings"],
+}
+
+def _current_job(guild_id, user_id):
+    name = CURRENT_JOB.get(guild_id, {}).get(user_id)
+    return JOBS_BY_NAME.get(name.lower()) if name else None
+
+def _unlocked_jobs(guild_id, user_id):
+    total = _lifetime_earned(guild_id, user_id)
+    return [j for j in JOBS if total >= j["unlock"]]
+
 def _eco_embed(member, guild_id):
     data = _eco(guild_id, member.id)
+    job = _current_job(guild_id, member.id)
     embed = discord.Embed(
         title=f"💰 {member.display_name}'s Balance",
         color=discord.Color.purple(),
         timestamp=discord.utils.utcnow()
     )
-    embed.add_field(name="👛 Wallet", value=f"**{data['wallet']:,}** coins", inline=True)
-    embed.add_field(name="🏦 Bank",   value=f"**{data['bank']:,}** coins",   inline=True)
-    embed.add_field(name="💎 Total",  value=f"**{data['wallet']+data['bank']:,}** coins", inline=True)
+    embed.add_field(name="👛 Wallet", value=f"**{_fmt_money(data['wallet'])}**", inline=True)
+    embed.add_field(name="🏦 Bank",   value=f"**{_fmt_money(data['bank'])}**",   inline=True)
+    embed.add_field(name="💎 Total",  value=f"**{_fmt_money(data['wallet']+data['bank'])}**", inline=True)
+    embed.add_field(name="💼 Job", value=f"{job['emoji']} {job['name']}" if job else "*Unemployed — see `,jobs`*", inline=True)
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.set_footer(text="TrapAI Economy")
     return embed
@@ -15850,6 +15924,60 @@ async def balance(ctx, member: discord.Member = None):
     await ctx.send(embed=_eco_embed(member, ctx.guild.id))
 
 
+# ── Jobs ─────────────────────────────────────────────────────
+@bot.command(name="jobs")
+async def jobs_cmd(ctx):
+    """View every job, what it pays, and what you need to unlock it."""
+    total = _lifetime_earned(ctx.guild.id, ctx.author.id)
+    current = _current_job(ctx.guild.id, ctx.author.id)
+    lines = []
+    for j in JOBS:
+        unlocked = total >= j["unlock"]
+        lo, hi = j["pay"]
+        tag = " **(current)**" if current and current["name"] == j["name"] else ""
+        if unlocked:
+            lines.append(f"✅ {j['emoji']} **{j['name']}**{tag} — {_fmt_money(lo)}–{_fmt_money(hi)} per shift")
+        else:
+            lines.append(f"🔒 {j['emoji']} {j['name']} — {_fmt_money(lo)}–{_fmt_money(hi)} • unlocks at **{_fmt_money(j['unlock'])}** lifetime earned")
+    embed = discord.Embed(
+        title="💼 Career Ladder",
+        description="\n".join(lines),
+        color=discord.Color.purple(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(name="📈 Your Progress", value=f"**{_fmt_money(total)}** lifetime earned", inline=False)
+    embed.set_footer(text="Pick a job with ,setjob <name> • TrapAI Economy")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="setjob", aliases=["job"])
+async def setjob(ctx, *, name: str = None):
+    """Set your current job from the ones you've unlocked. Usage: ,setjob <name> (see ,jobs)"""
+    if not name:
+        current = _current_job(ctx.guild.id, ctx.author.id)
+        await ctx.send(
+            f"💼 Current job: {current['emoji']} **{current['name']}**" if current else
+            "💼 You're currently **unemployed**. See `,jobs` and run `,setjob <name>`.",
+            delete_after=10
+        )
+        return
+    job = JOBS_BY_NAME.get(name.strip().lower())
+    if not job:
+        await ctx.send("❌ That's not a real job. See `,jobs` for the full list.", delete_after=8)
+        return
+    total = _lifetime_earned(ctx.guild.id, ctx.author.id)
+    if total < job["unlock"]:
+        await ctx.send(
+            f"🔒 You haven't unlocked **{job['name']}** yet — needs **{_fmt_money(job['unlock'])}** lifetime "
+            f"earned, you have **{_fmt_money(total)}**.",
+            delete_after=10
+        )
+        return
+    CURRENT_JOB.setdefault(ctx.guild.id, {})[ctx.author.id] = job["name"]
+    _save_current_job()
+    await ctx.send(f"✅ You're now working as a {job['emoji']} **{job['name']}**! Use `,work` to start earning.")
+
+
 # ── Work ─────────────────────────────────────────────────────
 @bot.command()
 async def work(ctx):
@@ -15858,16 +15986,19 @@ async def work(ctx):
         m, s = divmod(cd, 60)
         await ctx.send(f"⏳ You're tired. Come back in **{m}m {s}s**.", delete_after=8)
         return
-    earned = random.randint(50, 250)
-    _add_wallet(ctx.guild.id, ctx.author.id, earned)
-    jobs = ["delivered packages", "fixed some code", "walked dogs", "cooked meals",
-            "drove Uber", "sold lemonade", "wrote a report", "cleaned the streets"]
-    embed = discord.Embed(
-        title="💼 Work Complete",
-        description=f"You **{random.choice(jobs)}** and earned **{earned:,} coins**!",
-        color=discord.Color.green(),
-        timestamp=discord.utils.utcnow()
-    )
+    job = _current_job(ctx.guild.id, ctx.author.id)
+    if job:
+        earned = random.randint(*job["pay"])
+        action = random.choice(JOB_FLAVOR[job["name"]])
+        title = f"{job['emoji']} {job['name']} Shift Complete"
+        desc = f"You **{action}** and earned **{_fmt_money(earned)}**!"
+    else:
+        earned = random.randint(10, 40)
+        gigs = ["walked a dog", "sold some lemonade", "did a random odd job", "ran an errand for a neighbor"]
+        title = "💼 Work Complete"
+        desc = f"You **{random.choice(gigs)}** and earned **{_fmt_money(earned)}**.\n*Get a real job with `,jobs` to earn a lot more.*"
+    _add_earned(ctx.guild.id, ctx.author.id, earned)
+    embed = discord.Embed(title=title, description=desc, color=discord.Color.green(), timestamp=discord.utils.utcnow())
     embed.set_footer(text="Come back in 1 hour • TrapAI Economy")
     await ctx.send(embed=embed)
 
@@ -15882,10 +16013,10 @@ async def daily(ctx):
         await ctx.send(f"⏳ Daily already claimed. Come back in **{h}h {m}m**.", delete_after=8)
         return
     earned = random.randint(200, 500)
-    _add_wallet(ctx.guild.id, ctx.author.id, earned)
+    _add_earned(ctx.guild.id, ctx.author.id, earned)
     embed = discord.Embed(
         title="📅 Daily Reward",
-        description=f"You claimed your daily reward of **{earned:,} coins**! Come back tomorrow.",
+        description=f"You claimed your daily reward of **{_fmt_money(earned)}**! Come back tomorrow.",
         color=discord.Color.purple(),
         timestamp=discord.utils.utcnow()
     )
@@ -15903,10 +16034,10 @@ async def weekly(ctx):
         await ctx.send(f"⏳ Weekly already claimed. Come back in **{d}d {h}h**.", delete_after=8)
         return
     earned = random.randint(1000, 2500)
-    _add_wallet(ctx.guild.id, ctx.author.id, earned)
+    _add_earned(ctx.guild.id, ctx.author.id, earned)
     embed = discord.Embed(
         title="📆 Weekly Reward",
-        description=f"You claimed your weekly reward of **{earned:,} coins**! Come back next week.",
+        description=f"You claimed your weekly reward of **{_fmt_money(earned)}**! Come back next week.",
         color=discord.Color.purple(),
         timestamp=discord.utils.utcnow()
     )
@@ -15930,11 +16061,11 @@ async def deposit(ctx, amount: str = None):
             await ctx.send("❌ Amount must be a number or `all`.", delete_after=6)
             return
     if amt <= 0 or amt > data["wallet"]:
-        await ctx.send(f"❌ You only have **{data['wallet']:,}** coins in your wallet.", delete_after=6)
+        await ctx.send(f"❌ You only have **{_fmt_money(data['wallet'])}** in your wallet.", delete_after=6)
         return
     data["wallet"] -= amt
     data["bank"]   += amt
-    await ctx.send(f"🏦 Deposited **{amt:,} coins** into your bank. Bank: **{data['bank']:,}**")
+    await ctx.send(f"🏦 Deposited **{_fmt_money(amt)}** into your bank. Bank: **{_fmt_money(data['bank'])}**")
 
 
 # ── Withdraw ─────────────────────────────────────────────────
@@ -15953,11 +16084,11 @@ async def withdraw(ctx, amount: str = None):
             await ctx.send("❌ Amount must be a number or `all`.", delete_after=6)
             return
     if amt <= 0 or amt > data["bank"]:
-        await ctx.send(f"❌ You only have **{data['bank']:,}** coins in your bank.", delete_after=6)
+        await ctx.send(f"❌ You only have **{_fmt_money(data['bank'])}** in your bank.", delete_after=6)
         return
     data["bank"]   -= amt
     data["wallet"] += amt
-    await ctx.send(f"👛 Withdrew **{amt:,} coins** to your wallet. Wallet: **{data['wallet']:,}**")
+    await ctx.send(f"👛 Withdrew **{_fmt_money(amt)}** to your wallet. Wallet: **{_fmt_money(data['wallet'])}**")
 
 
 # ── Give ─────────────────────────────────────────────────────
@@ -15967,15 +16098,15 @@ async def give(ctx, member: discord.Member = None, amount: int = None):
         await ctx.send("❌ Usage: `,give @user <amount>`", delete_after=6)
         return
     if member == ctx.author:
-        await ctx.send("❌ You can't give coins to yourself.", delete_after=6)
+        await ctx.send("❌ You can't give money to yourself.", delete_after=6)
         return
     data = _eco(ctx.guild.id, ctx.author.id)
     if amount > data["wallet"]:
-        await ctx.send(f"❌ You only have **{data['wallet']:,}** coins in your wallet.", delete_after=6)
+        await ctx.send(f"❌ You only have **{_fmt_money(data['wallet'])}** in your wallet.", delete_after=6)
         return
     data["wallet"] -= amount
     _add_wallet(ctx.guild.id, member.id, amount)
-    await ctx.send(f"✅ Sent **{amount:,} coins** to {member.mention}.")
+    await ctx.send(f"✅ Sent **{_fmt_money(amount)}** to {member.mention}.")
 
 
 # ── Rob ───────────────────────────────────────────────────────
@@ -16001,11 +16132,11 @@ async def rob(ctx, member: discord.Member = None):
         stolen = random.randint(1, max(1, target["wallet"] // 3))
         target["wallet"] -= stolen
         robber["wallet"] += stolen
-        await ctx.send(f"🦹 You successfully robbed **{stolen:,} coins** from {member.mention}!")
+        await ctx.send(f"🦹 You successfully robbed **{_fmt_money(stolen)}** from {member.mention}!")
     else:
         fine = random.randint(50, 200)
         robber["wallet"] = max(0, robber["wallet"] - fine)
-        await ctx.send(f"🚔 You got caught! You paid a **{fine:,} coin** fine.")
+        await ctx.send(f"🚔 You got caught! You paid a **{_fmt_money(fine)}** fine.")
 
 
 # ── Role Shop (real money, via Stripe) ──────────────────────
@@ -16178,7 +16309,7 @@ async def leaderboard(ctx):
         member = ctx.guild.get_member(uid)
         name = member.display_name if member else f"<@{uid}>"
         total = data["wallet"] + data["bank"]
-        lines.append(f"{medals[i]} **{name}** — {total:,} coins")
+        lines.append(f"{medals[i]} **{name}** — {_fmt_money(total)}")
     embed.description = "\n".join(lines) or "No data yet."
     embed.set_footer(text="TrapAI Economy")
     await ctx.send(embed=embed)
@@ -16203,7 +16334,7 @@ async def gamblers(ctx):
         member = ctx.guild.get_member(uid)
         name = member.display_name if member else f"<@{uid}>"
         sign = "+" if net >= 0 else ""
-        lines.append(f"{medals[i]} **{name}** — {sign}{net:,} coins")
+        lines.append(f"{medals[i]} **{name}** — {sign}{_fmt_money(net)}")
     embed.description = "\n".join(lines) or "No data yet."
     embed.set_footer(text="TrapAI Economy")
     await ctx.send(embed=embed)
@@ -16220,7 +16351,7 @@ async def slots(ctx, bet: int = None):
         return
     data = _eco(ctx.guild.id, ctx.author.id)
     if bet > data["wallet"]:
-        await ctx.send(f"❌ You only have **{data['wallet']:,}** coins.", delete_after=6)
+        await ctx.send(f"❌ You only have **{_fmt_money(data['wallet'])}**.", delete_after=6)
         return
     reels = [random.choice(SLOT_SYMBOLS) for _ in range(3)]
     data["wallet"] -= bet
@@ -16230,7 +16361,7 @@ async def slots(ctx, bet: int = None):
         data["wallet"] += win
         GAMBLE_WINS.setdefault(ctx.guild.id, {})[ctx.author.id] = \
             GAMBLE_WINS.setdefault(ctx.guild.id, {}).get(ctx.author.id, 0) + (win - bet)
-        result = f"🎉 **JACKPOT!** `{' '.join(reels)}` — Won **{win:,} coins** (×{mult})!"
+        result = f"🎉 **JACKPOT!** `{' '.join(reels)}` — Won **{_fmt_money(win)}** (×{mult})!"
         color = discord.Color.purple()
     elif reels[0] == reels[1] or reels[1] == reels[2]:
         win = bet
@@ -16240,11 +16371,11 @@ async def slots(ctx, bet: int = None):
     else:
         GAMBLE_WINS.setdefault(ctx.guild.id, {})[ctx.author.id] = \
             GAMBLE_WINS.setdefault(ctx.guild.id, {}).get(ctx.author.id, 0) - bet
-        result = f"😢 **Lost!** `{' '.join(reels)}` — Lost **{bet:,} coins**."
+        result = f"😢 **Lost!** `{' '.join(reels)}` — Lost **{_fmt_money(bet)}**."
         color = discord.Color.red()
     embed = discord.Embed(title="🎰 Slot Machine", description=result, color=color, timestamp=discord.utils.utcnow())
-    embed.add_field(name="👛 Wallet", value=f"{data['wallet']:,} coins", inline=True)
-    embed.set_footer(text=f"Bet: {bet:,} • TrapAI Casino")
+    embed.add_field(name="👛 Wallet", value=_fmt_money(data['wallet']), inline=True)
+    embed.set_footer(text=f"Bet: {_fmt_money(bet)} • TrapAI Casino")
     await ctx.send(embed=embed)
 
 
@@ -16263,7 +16394,7 @@ async def coinflip(ctx, bet: int = None, choice: str = None):
         return
     data = _eco(ctx.guild.id, ctx.author.id)
     if bet > data["wallet"]:
-        await ctx.send(f"❌ You only have **{data['wallet']:,}** coins.", delete_after=6)
+        await ctx.send(f"❌ You only have **{_fmt_money(data['wallet'])}**.", delete_after=6)
         return
     result = random.choice(["heads", "tails"])
     won = choice in (result, result[0])
@@ -16276,13 +16407,13 @@ async def coinflip(ctx, bet: int = None, choice: str = None):
         title=f"{emoji} Coin Flip",
         description=(
             f"The coin landed on **{result.upper()}**!\n"
-            f"{'✅ You **won** ' if won else '❌ You **lost** '}**{bet:,} coins**!"
+            f"{'✅ You **won** ' if won else '❌ You **lost** '}**{_fmt_money(bet)}**!"
         ),
         color=color,
         timestamp=discord.utils.utcnow()
     )
-    embed.add_field(name="👛 Wallet", value=f"{data['wallet']:,} coins", inline=True)
-    embed.set_footer(text=f"Bet: {bet:,} • TrapAI Casino")
+    embed.add_field(name="👛 Wallet", value=_fmt_money(data['wallet']), inline=True)
+    embed.set_footer(text=f"Bet: {_fmt_money(bet)} • TrapAI Casino")
     await ctx.send(embed=embed)
 
 
@@ -16300,7 +16431,7 @@ async def dice(ctx, bet: int = None, guess: int = None):
         return
     data = _eco(ctx.guild.id, ctx.author.id)
     if bet > data["wallet"]:
-        await ctx.send(f"❌ You only have **{data['wallet']:,}** coins.", delete_after=6)
+        await ctx.send(f"❌ You only have **{_fmt_money(data['wallet'])}**.", delete_after=6)
         return
     roll = random.randint(1, 6)
     dice_faces = {1:"1️⃣", 2:"2️⃣", 3:"3️⃣", 4:"4️⃣", 5:"5️⃣", 6:"6️⃣"}
@@ -16309,17 +16440,17 @@ async def dice(ctx, bet: int = None, guess: int = None):
         data["wallet"] += win
         GAMBLE_WINS.setdefault(ctx.guild.id, {})[ctx.author.id] = \
             GAMBLE_WINS.setdefault(ctx.guild.id, {}).get(ctx.author.id, 0) + win
-        desc = f"{dice_faces[roll]} Rolled **{roll}** — You guessed right! Won **{win:,} coins** (×5)!"
+        desc = f"{dice_faces[roll]} Rolled **{roll}** — You guessed right! Won **{_fmt_money(win)}** (×5)!"
         color = discord.Color.purple()
     else:
         data["wallet"] -= bet
         GAMBLE_WINS.setdefault(ctx.guild.id, {})[ctx.author.id] = \
             GAMBLE_WINS.setdefault(ctx.guild.id, {}).get(ctx.author.id, 0) - bet
-        desc = f"{dice_faces[roll]} Rolled **{roll}** — You guessed **{guess}**. Lost **{bet:,} coins**."
+        desc = f"{dice_faces[roll]} Rolled **{roll}** — You guessed **{guess}**. Lost **{_fmt_money(bet)}**."
         color = discord.Color.red()
     embed = discord.Embed(title="🎲 Dice Roll", description=desc, color=color, timestamp=discord.utils.utcnow())
-    embed.add_field(name="👛 Wallet", value=f"{data['wallet']:,} coins", inline=True)
-    embed.set_footer(text=f"Bet: {bet:,} • TrapAI Casino")
+    embed.add_field(name="👛 Wallet", value=_fmt_money(data['wallet']), inline=True)
+    embed.set_footer(text=f"Bet: {_fmt_money(bet)} • TrapAI Casino")
     await ctx.send(embed=embed)
 
 
@@ -16331,7 +16462,7 @@ async def highlow(ctx, bet: int = None):
         return
     data = _eco(ctx.guild.id, ctx.author.id)
     if bet > data["wallet"]:
-        await ctx.send(f"❌ You only have **{data['wallet']:,}** coins.", delete_after=6)
+        await ctx.send(f"❌ You only have **{_fmt_money(data['wallet'])}**.", delete_after=6)
         return
     # Reserve the bet immediately — otherwise someone could open two games at
     # once against the same unspent balance while this one waits on wait_for.
@@ -16349,7 +16480,7 @@ async def highlow(ctx, bet: int = None):
         color=discord.Color.blurple(),
         timestamp=discord.utils.utcnow()
     )
-    embed.set_footer(text=f"Bet: {bet:,} • TrapAI Casino")
+    embed.set_footer(text=f"Bet: {_fmt_money(bet)} • TrapAI Casino")
     await ctx.send(embed=embed)
 
     def check(m):
@@ -16382,12 +16513,12 @@ async def highlow(ctx, bet: int = None):
         title="🃏 High or Low — Result",
         description=(
             f"Next card: **{card_names[next_card]}** (`{next_card}`)\n"
-            f"{'✅ Correct! Won' if won else '❌ Wrong! Lost'} **{bet:,} coins**!"
+            f"{'✅ Correct! Won' if won else '❌ Wrong! Lost'} **{_fmt_money(bet)}**!"
         ),
         color=color,
         timestamp=discord.utils.utcnow()
     )
-    embed2.add_field(name="👛 Wallet", value=f"{data['wallet']:,} coins", inline=True)
+    embed2.add_field(name="👛 Wallet", value=_fmt_money(data['wallet']), inline=True)
     await ctx.send(embed=embed2)
 
 
@@ -16411,7 +16542,7 @@ async def blackjack(ctx, bet: int = None):
         return
     data = _eco(ctx.guild.id, ctx.author.id)
     if bet > data["wallet"]:
-        await ctx.send(f"❌ You only have **{data['wallet']:,}** coins.", delete_after=6)
+        await ctx.send(f"❌ You only have **{_fmt_money(data['wallet'])}**.", delete_after=6)
         return
     # Reserve the bet immediately — otherwise someone could open two games at
     # once against the same unspent balance while this one waits on wait_for.
@@ -16436,7 +16567,7 @@ async def blackjack(ctx, bet: int = None):
         e.add_field(name="Dealer's Hand", value=hand_str(dealer, hide_second=result_text is None), inline=True)
         if result_text:
             e.add_field(name="Result", value=result_text, inline=False)
-        e.set_footer(text=f"Bet: {bet:,}  •  Hit: `h`  Stand: `s`  •  TrapAI Casino")
+        e.set_footer(text=f"Bet: {_fmt_money(bet)}  •  Hit: `h`  Stand: `s`  •  TrapAI Casino")
         return e
 
     await ctx.send(embed=make_embed())
@@ -16500,7 +16631,7 @@ async def crash(ctx, bet: int = None):
         return
     data = _eco(ctx.guild.id, ctx.author.id)
     if bet > data["wallet"]:
-        await ctx.send(f"❌ You only have **{data['wallet']:,}** coins.", delete_after=6)
+        await ctx.send(f"❌ You only have **{_fmt_money(data['wallet'])}**.", delete_after=6)
         return
 
     data["wallet"] -= bet
@@ -16513,7 +16644,7 @@ async def crash(ctx, bet: int = None):
         color=discord.Color.green(),
         timestamp=discord.utils.utcnow()
     )
-    embed.set_footer(text=f"Bet: {bet:,} • TrapAI Casino")
+    embed.set_footer(text=f"Bet: {_fmt_money(bet)} • TrapAI Casino")
     msg = await ctx.send(embed=embed)
 
     def check(m):
@@ -16541,11 +16672,11 @@ async def crash(ctx, bet: int = None):
                 GAMBLE_WINS.setdefault(ctx.guild.id, {}).get(ctx.author.id, 0) + (won - bet)
             fin = discord.Embed(
                 title="🚀 Cashed Out!",
-                description=f"Cashed out at **×{multiplier:.2f}** — Won **{won:,} coins**!",
+                description=f"Cashed out at **×{multiplier:.2f}** — Won **{_fmt_money(won)}**!",
                 color=discord.Color.green(),
                 timestamp=discord.utils.utcnow()
             )
-            fin.add_field(name="👛 Wallet", value=f"{data['wallet']:,} coins", inline=True)
+            fin.add_field(name="👛 Wallet", value=_fmt_money(data['wallet']), inline=True)
             await ctx.send(embed=fin)
             return
         except asyncio.TimeoutError:
@@ -16555,11 +16686,11 @@ async def crash(ctx, bet: int = None):
         GAMBLE_WINS.setdefault(ctx.guild.id, {}).get(ctx.author.id, 0) - bet
     fin = discord.Embed(
         title="💥 Crashed!",
-        description=f"The rocket crashed at **×{multiplier:.2f}**. You lost **{bet:,} coins**!",
+        description=f"The rocket crashed at **×{multiplier:.2f}**. You lost **{_fmt_money(bet)}**!",
         color=discord.Color.red(),
         timestamp=discord.utils.utcnow()
     )
-    fin.add_field(name="👛 Wallet", value=f"{data['wallet']:,} coins", inline=True)
+    fin.add_field(name="👛 Wallet", value=_fmt_money(data['wallet']), inline=True)
     await ctx.send(embed=fin)
 
 
@@ -16625,7 +16756,7 @@ async def trivia(ctx):
     reward = random.randint(30, 100)
     embed = discord.Embed(
         title="🧠 Trivia Time!",
-        description=f"**{question}**\n\nYou have **30 seconds** to answer! Correct = **{reward} coins**",
+        description=f"**{question}**\n\nYou have **30 seconds** to answer! Correct = **{_fmt_money(reward)}**",
         color=discord.Color.blurple(),
         timestamp=discord.utils.utcnow()
     )
@@ -16642,8 +16773,8 @@ async def trivia(ctx):
         return
 
     if msg.content.strip().lower() == answer.lower():
-        _add_wallet(ctx.guild.id, ctx.author.id, reward)
-        await ctx.send(f"✅ Correct! You earned **{reward} coins**! 🎉")
+        _add_earned(ctx.guild.id, ctx.author.id, reward)
+        await ctx.send(f"✅ Correct! You earned **{_fmt_money(reward)}**! 🎉")
     else:
         await ctx.send(f"❌ Wrong! The correct answer was **{answer}**.")
 
@@ -16658,7 +16789,7 @@ async def numguess(ctx):
     await ctx.send(
         f"🔢 **Number Guessing Game!**\n"
         f"I'm thinking of a number between **1 and 100**.\n"
-        f"You have **{attempts} attempts**. Correct = **{reward} coins**!"
+        f"You have **{attempts} attempts**. Correct = **{_fmt_money(reward)}**!"
     )
 
     def check(m):
@@ -16672,8 +16803,8 @@ async def numguess(ctx):
             return
         guess = int(msg.content)
         if guess == number:
-            _add_wallet(ctx.guild.id, ctx.author.id, reward)
-            await ctx.send(f"🎉 **Correct in {attempt} attempt(s)!** You earned **{reward} coins**!")
+            _add_earned(ctx.guild.id, ctx.author.id, reward)
+            await ctx.send(f"🎉 **Correct in {attempt} attempt(s)!** You earned **{_fmt_money(reward)}**!")
             return
         elif guess < number:
             await ctx.send(f"📈 Too low! ({attempts - attempt} attempts left)")
@@ -16714,7 +16845,7 @@ async def hangman(ctx):
 
     await ctx.send(
         f"🪢 **Hangman!** Guess the word letter by letter.\n"
-        f"{HANGMAN_STAGES[0]}\n`{display()}`\nWrong: 0/{max_wrong} | Correct = **{reward} coins**"
+        f"{HANGMAN_STAGES[0]}\n`{display()}`\nWrong: 0/{max_wrong} | Correct = **{_fmt_money(reward)}**"
     )
 
     def check(m):
@@ -16741,10 +16872,10 @@ async def hangman(ctx):
         if letter in word:
             board = display()
             if "_" not in board:
-                _add_wallet(ctx.guild.id, ctx.author.id, reward)
+                _add_earned(ctx.guild.id, ctx.author.id, reward)
                 await ctx.send(
                     f"{HANGMAN_STAGES[wrong]}\n✅ **You got it!** The word was **{word}**!\n"
-                    f"Earned **{reward} coins**! 🎉"
+                    f"Earned **{_fmt_money(reward)}**! 🎉"
                 )
                 return
             await ctx.send(f"{HANGMAN_STAGES[wrong]}\n✅ `{letter}` is in the word!\n`{board}`")
@@ -16899,9 +17030,9 @@ def _games_home_embed(guild: discord.Guild) -> discord.Embed:
         timestamp=discord.utils.utcnow()
     )
     categories = [
-        ("💰", "Economy",        "Earn, save, spend & transfer coins",                  "work · daily · weekly · balance · deposit · withdraw · give · rob"),
-        ("🎰", "Casino",         "Gamble your coins in high-stakes games",              "slots · coinflip · blackjack · dice · crash · highlow"),
-        ("🎯", "Fun Games",      "Casual games — no bet needed, coins for winning",     "rps · trivia · hangman · numguess · 8ball · tictactoe"),
+        ("💰", "Economy",        "Earn, save, spend & transfer money",                  "jobs · setjob · work · daily · weekly · balance · deposit · withdraw · give · rob"),
+        ("🎰", "Casino",         "Gamble your cash in high-stakes games",               "slots · coinflip · blackjack · dice · crash · highlow"),
+        ("🎯", "Fun Games",      "Casual games — no bet needed, cash for winning",      "rps · trivia · hangman · numguess · 8ball · tictactoe"),
         ("🏆", "Leaderboards",   "See who's on top — richest & best gamblers",          "leaderboard · gamblers"),
     ]
     for emoji, name, desc, cmds in categories:
@@ -16923,8 +17054,8 @@ def _games_home_embed(guild: discord.Guild) -> discord.Embed:
 
 def _games_economy_embed(guild: discord.Guild) -> discord.Embed:
     embed = discord.Embed(
-        title="💰  Economy — Earn & Manage Coins",
-        description="Build your fortune, save it, spend it, or steal it.\nCoins are stored **per server** — separate on every Discord.",
+        title="💰  Economy — Earn & Manage Money",
+        description="Build your fortune, save it, spend it, or steal it.\nMoney is stored **per server** — separate on every Discord.",
         color=discord.Color.purple(),
         timestamp=discord.utils.utcnow()
     )
@@ -16932,25 +17063,34 @@ def _games_economy_embed(guild: discord.Guild) -> discord.Embed:
         name="📊  Check Balance",
         value=(
             "`,balance` / `,bal`\n"
-            "Shows your **wallet** (spendable) and **bank** (safe) balance.\n"
+            "Shows your **wallet** (spendable), **bank** (safe) balance, and current job.\n"
             "`,balance @user` — view someone else's balance."
         ),
         inline=False
     )
     embed.add_field(
-        name="💼  Earn Coins",
+        name="💼  Get a Job",
         value=(
-            "`,work`  **50–250 coins**  ·  ⏳ 1 hour cooldown\n"
-            "`,daily`  **200–500 coins**  ·  ⏳ 24 hour cooldown\n"
-            "`,weekly`  **1,000–2,500 coins**  ·  ⏳ 7 day cooldown"
+            "`,jobs` — view the full career ladder, from Cashier up to CEO.\n"
+            "`,setjob <name>` / `,job` — start working a job you've unlocked.\n"
+            "Higher-paying jobs unlock as you earn more — see `,jobs` for thresholds."
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="💵  Earn Money",
+        value=(
+            "`,work`  ·  ⏳ 1 hour cooldown — pay depends on your job (see `,jobs`)\n"
+            "`,daily`  **$200–$500**  ·  ⏳ 24 hour cooldown\n"
+            "`,weekly`  **$1,000–$2,500**  ·  ⏳ 7 day cooldown"
         ),
         inline=False
     )
     embed.add_field(
         name="🏦  Banking",
         value=(
-            "`,deposit <amount|all>` — move coins from wallet → bank (safe from robbery)\n"
-            "`,withdraw <amount|all>` — move coins from bank → wallet (to spend)"
+            "`,deposit <amount|all>` — move money from wallet → bank (safe from robbery)\n"
+            "`,withdraw <amount|all>` — move money from bank → wallet (to spend)"
         ),
         inline=False
     )
@@ -16958,7 +17098,7 @@ def _games_economy_embed(guild: discord.Guild) -> discord.Embed:
         name="🤝  Transfer",
         value=(
             "`,give @user <amount>` / `,pay` / `,transfer`\n"
-            "Send coins directly to another member's wallet."
+            "Send money directly to another member's wallet."
         ),
         inline=False
     )
@@ -16980,7 +17120,7 @@ def _games_economy_embed(guild: discord.Guild) -> discord.Embed:
 def _games_casino_embed(guild: discord.Guild) -> discord.Embed:
     embed = discord.Embed(
         title="🎰  Casino — High Stakes Gambling",
-        description="Bet your wallet coins. You can win big — or lose it all.\n⚠️ **Only coins in your wallet can be bet** — bank is safe.",
+        description="Bet money from your wallet. You can win big — or lose it all.\n⚠️ **Only money in your wallet can be bet** — bank is safe.",
         color=discord.Color.from_rgb(255, 100, 0),
         timestamp=discord.utils.utcnow()
     )
@@ -17045,7 +17185,7 @@ def _games_casino_embed(guild: discord.Guild) -> discord.Embed:
 def _games_fun_embed(guild: discord.Guild) -> discord.Embed:
     embed = discord.Embed(
         title="🎯  Fun Games — Play & Earn",
-        description="No bets required — just play and win coins for correct answers!",
+        description="No bets required — just play and win money for correct answers!",
         color=discord.Color.from_rgb(88, 101, 242),
         timestamp=discord.utils.utcnow()
     )
@@ -17054,7 +17194,7 @@ def _games_fun_embed(guild: discord.Guild) -> discord.Embed:
         value=(
             "Beat the bot at rock paper scissors.\n"
             "Choices: `rock` / `paper` / `scissors`  (or `r` / `p` / `s`)\n"
-            "No coins involved — just glory."
+            "No money involved — just glory."
         ),
         inline=False
     )
@@ -17062,7 +17202,7 @@ def _games_fun_embed(guild: discord.Guild) -> discord.Embed:
         name="🧠  Trivia  —  `,trivia`",
         value=(
             "Answer a random question correctly within **30 seconds**.\n"
-            "**Reward: 30–100 coins** for a correct answer!\n"
+            "**Reward: $30–$100** for a correct answer!\n"
             "20 questions across science, geography, history & more."
         ),
         inline=False
@@ -17072,7 +17212,7 @@ def _games_fun_embed(guild: discord.Guild) -> discord.Embed:
         value=(
             "Guess a hidden word one letter at a time.\n"
             "6 wrong guesses allowed before you're hanged.\n"
-            "**Reward: 200 coins** for guessing the word!"
+            "**Reward: $200** for guessing the word!"
         ),
         inline=False
     )
@@ -17081,7 +17221,7 @@ def _games_fun_embed(guild: discord.Guild) -> discord.Embed:
         value=(
             "Guess a number between **1 and 100** in 7 attempts.\n"
             "The bot tells you if you're too high or too low.\n"
-            "**Reward: 150 coins** for guessing correctly!"
+            "**Reward: $150** for guessing correctly!"
         ),
         inline=False
     )
@@ -17119,7 +17259,7 @@ def _games_lb_embed(guild: discord.Guild) -> discord.Embed:
         name="💎  Richest Members  —  `,leaderboard` / `,lb`",
         value=(
             "Top 10 members ranked by **wallet + bank** total.\n"
-            "Earn coins via `,work`, `,daily`, `,weekly`, and casino wins."
+            "Earn money via `,work`, `,daily`, `,weekly`, and casino wins."
         ),
         inline=False
     )
@@ -17127,7 +17267,7 @@ def _games_lb_embed(guild: discord.Guild) -> discord.Embed:
         name="🎰  Top Gamblers  —  `,gamblers`",
         value=(
             "Top 10 members ranked by **net casino winnings**.\n"
-            "Shows total coins won minus coins lost across all casino games.\n"
+            "Shows total money won minus money lost across all casino games.\n"
             "Negative values mean they're in the red — a true degenerate."
         ),
         inline=False
@@ -17138,7 +17278,7 @@ def _games_lb_embed(guild: discord.Guild) -> discord.Embed:
             "• Use `,daily` and `,weekly` every reset\n"
             "• Win big in `,slots` or `,blackjack`\n"
             "• Rob from others with `,rob`\n"
-            "• Answer `,trivia` for free coins"
+            "• Answer `,trivia` for free money"
         ),
         inline=False
     )
