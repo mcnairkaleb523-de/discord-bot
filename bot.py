@@ -8401,7 +8401,7 @@ async def unverify(ctx, member: discord.Member):
 
         embed = discord.Embed(
             title="🚫 Member Unverified",
-            description=f"{member.mention} has been moved back to **Unverified Smoker**.",
+            description=f"{member.mention} has been moved back to {unverified_role.mention}.",
             color=discord.Color.orange(),
             timestamp=discord.utils.utcnow()
         )
