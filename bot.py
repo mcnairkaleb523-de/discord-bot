@@ -1045,7 +1045,7 @@ WHOLE_BOT_PREMIUM_ONLY_COMMANDS = {
     "balance", "jobs", "setjob", "daily", "weekly", "work", "rob", "give", "deposit", "withdraw",
     "leaderboard", "gamblers", "slots", "blackjack", "coinflip", "dice", "duel",
     "basketball", "archery", "cuppong", "8ball",
-    "trivia", "hangman", "wordle", "tictactoe", "connect4", "numguess", "rockpaperscissors", "highlow",
+    "trivia", "hangman", "wordle", "tictactoe", "connect4", "checkers", "numguess", "rockpaperscissors", "highlow",
     "crash", "21questions", "games",
     # Birthdays (whole category)
     "birthday", "removebirthday", "setbirthday", "setbirthdaychannel",
@@ -3565,7 +3565,7 @@ HELP_CATEGORIES = [
     ('📊', 'Stats & Info', ['whois', 'chatstats', 'serverstats', 'invites', 'invitelogs', 'inviteleaderboard', 'setinvite', 'milestones', 'setmilestone', 'testmilestone', 'ping', 'exitsurveys']),
     ('✅', 'Vouch', ['vouch', 'unvouch', 'cancelvouch', 'pendingvouches', 'vouches', 'vouchleaderboard', 'vouchstats', 'vouchconfig']),
     ('🎉', 'Giveaways & Polls', ['giveaway', 'giveawayend', 'giveaways', 'poll', 'pollend']),
-    ('💰', 'Economy & Games', ['balance', 'jobs', 'setjob', 'daily', 'weekly', 'work', 'rob', 'give', 'deposit', 'withdraw', 'leaderboard', 'gamblers', 'slots', 'blackjack', 'coinflip', 'dice', 'duel', 'basketball', 'archery', 'cuppong', '8ball', 'trivia', 'hangman', 'wordle', 'tictactoe', 'connect4', 'numguess', 'rockpaperscissors', 'highlow', 'crash', '21questions', 'games', 'shop', 'buyrole', 'setroleshop']),
+    ('💰', 'Economy & Games', ['balance', 'jobs', 'setjob', 'daily', 'weekly', 'work', 'rob', 'give', 'deposit', 'withdraw', 'leaderboard', 'gamblers', 'slots', 'blackjack', 'coinflip', 'dice', 'duel', 'basketball', 'archery', 'cuppong', '8ball', 'trivia', 'hangman', 'wordle', 'tictactoe', 'connect4', 'checkers', 'numguess', 'rockpaperscissors', 'highlow', 'crash', '21questions', 'games', 'shop', 'buyrole', 'setroleshop']),
     ('🎂', 'Birthdays', ['birthday', 'removebirthday', 'setbirthday', 'setbirthdaychannel', 'birthdaylist', 'settimezone']),
     ('🚀', 'Boosts & Vanity', ['setboostchannel', 'setvanitycode', 'setvanityrole', 'vanityconfig']),
     ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist', 'acceptstaff', 'denystaff', 'setstaffrules', 'staffleaderboard', 'staffstats', 'staffwarn', 'staffstrike', 'staffwarnings', 'staffstrikes', 'clearstaffwarnings', 'clearstaffstrikes']),
@@ -17717,6 +17717,189 @@ async def connect4(ctx, opponent: discord.Member = None):
     view.message = await ctx.send(embed=embed, view=view)
 
 
+# ── Checkers ─────────────────────────────────────────────────
+# Chat-based moves (`c3 b4`) rather than buttons — an 8×8 board has 32
+# playable squares, well past what a Discord view can render as buttons
+# (5 per row / 25 total). Simplified ruleset: captures are legal but not
+# mandatory, and only single jumps (no forced multi-jump chains) — a
+# deliberate scope cut to keep the engine small and fully testable
+# rather than attempting tournament-official chaining rules.
+class CheckersGame:
+    def __init__(self, player_r, player_y):
+        self.player_r = player_r  # 🔴 starts on rows 1-3, moves toward row 8
+        self.player_y = player_y  # 🟡 starts on rows 6-8, moves toward row 1
+        self.current = player_r
+        self.board = [[None] * 8 for _ in range(8)]
+        for row in range(3):
+            for col in range(8):
+                if (row + col) % 2 == 1:
+                    self.board[row][col] = "y"
+        for row in range(5, 8):
+            for col in range(8):
+                if (row + col) % 2 == 1:
+                    self.board[row][col] = "r"
+
+    def render(self) -> str:
+        symbols = {"r": "🔴", "R": "🟥", "y": "🟡", "Y": "🟨", None: "⬛"}
+        lines = []
+        for row in range(8):
+            line = ["⬜" if (row + col) % 2 == 0 else symbols[self.board[row][col]] for col in range(8)]
+            lines.append("".join(line))
+        return "\n".join(lines)
+
+    @staticmethod
+    def parse_square(pos: str):
+        if len(pos) != 2:
+            return None
+        col_c, row_c = pos[0].lower(), pos[1]
+        if col_c not in "abcdefgh" or row_c not in "12345678":
+            return None
+        return (8 - int(row_c), ord(col_c) - ord("a"))  # (row, col), row 0 = top ("8")
+
+    @staticmethod
+    def _owner(piece):
+        if piece is None:
+            return None
+        return "r" if piece.lower() == "r" else "y"
+
+    @staticmethod
+    def _is_king(piece):
+        return piece is not None and piece.isupper()
+
+    def _directions(self, piece):
+        if self._is_king(piece):
+            return [(-1, -1), (-1, 1), (1, -1), (1, 1)]
+        return [(-1, -1), (-1, 1)] if piece == "r" else [(1, -1), (1, 1)]
+
+    def _piece_moves(self, row, col, piece):
+        moves = []
+        owner = self._owner(piece)
+        for dr, dc in self._directions(piece):
+            r1, c1 = row + dr, col + dc
+            if not (0 <= r1 < 8 and 0 <= c1 < 8):
+                continue
+            if self.board[r1][c1] is None:
+                moves.append(((row, col), (r1, c1), False))
+            elif self._owner(self.board[r1][c1]) != owner:
+                r2, c2 = row + 2 * dr, col + 2 * dc
+                if 0 <= r2 < 8 and 0 <= c2 < 8 and self.board[r2][c2] is None:
+                    moves.append(((row, col), (r2, c2), True))
+        return moves
+
+    def legal_moves_for(self, color):
+        moves = []
+        for row in range(8):
+            for col in range(8):
+                piece = self.board[row][col]
+                if piece is not None and self._owner(piece) == color:
+                    moves.extend(self._piece_moves(row, col, piece))
+        return moves
+
+    def has_pieces(self, color):
+        return any(self._owner(self.board[r][c]) == color for r in range(8) for c in range(8))
+
+    def has_moves(self, color):
+        return len(self.legal_moves_for(color)) > 0
+
+    def try_move(self, color, src, dst):
+        """Returns (ok, error_message_or_None, was_capture)."""
+        piece = self.board[src[0]][src[1]]
+        if piece is None or self._owner(piece) != color:
+            return False, "That's not your piece.", False
+        match = next((m for m in self._piece_moves(src[0], src[1], piece) if m[1] == dst), None)
+        if not match:
+            return False, "Illegal move for that piece.", False
+        _, _, is_capture = match
+        self.board[src[0]][src[1]] = None
+        if is_capture:
+            mid = ((src[0] + dst[0]) // 2, (src[1] + dst[1]) // 2)
+            self.board[mid[0]][mid[1]] = None
+        if piece == "r" and dst[0] == 0:
+            piece = "R"
+        elif piece == "y" and dst[0] == 7:
+            piece = "Y"
+        self.board[dst[0]][dst[1]] = piece
+        return True, None, is_capture
+
+
+@bot.command(aliases=["draughts"])
+async def checkers(ctx, opponent: discord.Member = None):
+    """
+    Challenge another member to Checkers. Simplified rules: captures are
+    legal but optional, single jumps only (no forced multi-jump chains).
+    Move by replying with `<from> <to>`, e.g. `c3 b4`.
+    Usage: ,checkers @opponent
+    """
+    if opponent is None or opponent == ctx.author or opponent.bot:
+        await ctx.send("❌ Usage: `,checkers @opponent` (must be a real member, not a bot)", delete_after=6)
+        return
+
+    game = CheckersGame(ctx.author, opponent)
+    color_of = {ctx.author.id: "r", opponent.id: "y"}
+
+    embed = discord.Embed(
+        title="🔴🟡 Checkers",
+        description=(
+            f"{game.render()}\n\n"
+            f"{ctx.author.mention} 🔴 vs {opponent.mention} 🟡\n\n"
+            "Columns `a`-`h` left→right, rows `1`-`8` bottom→top. Move with `<from> <to>`, e.g. `c3 b4`.\n\n"
+            f"It's {ctx.author.mention}'s turn!"
+        ),
+        color=discord.Color.blurple(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_footer(text="TrapAI Games — 5 minutes per move, captures optional")
+    await ctx.send(embed=embed)
+
+    while True:
+        acting_player = game.current
+        current_color = color_of[acting_player.id]
+
+        def check(m, expected=acting_player):
+            return m.author.id == expected.id and m.channel.id == ctx.channel.id and len(m.content.split()) == 2
+
+        try:
+            reply = await bot.wait_for("message", check=check, timeout=300)
+        except asyncio.TimeoutError:
+            await ctx.send(f"⏰ {acting_player.mention} took too long — game ended.", delete_after=10)
+            return
+
+        parts = reply.content.split()
+        src, dst = CheckersGame.parse_square(parts[0]), CheckersGame.parse_square(parts[1])
+        if src is None or dst is None:
+            await ctx.send("❌ Invalid square — use letters a-h and numbers 1-8, e.g. `c3 b4`.", delete_after=6)
+            continue
+
+        ok, err, _ = game.try_move(current_color, src, dst)
+        if not ok:
+            await ctx.send(f"❌ {err}", delete_after=6)
+            continue
+
+        other_color = "y" if current_color == "r" else "r"
+        other_player = game.player_y if current_color == "r" else game.player_r
+        if not game.has_pieces(other_color) or not game.has_moves(other_color):
+            embed = discord.Embed(
+                title="🏆 Checkers — Game Over",
+                description=f"{game.render()}\n\n**{acting_player.display_name} wins!**",
+                color=discord.Color.green(),
+                timestamp=discord.utils.utcnow()
+            )
+            await ctx.send(embed=embed)
+            return
+
+        game.current = other_player
+        embed = discord.Embed(
+            title="🔴🟡 Checkers",
+            description=(
+                f"{game.render()}\n\n"
+                f"It's {game.current.mention}'s turn! ({'🔴' if other_color == 'r' else '🟡'})"
+            ),
+            color=discord.Color.blurple(),
+            timestamp=discord.utils.utcnow()
+        )
+        await ctx.send(embed=embed)
+
+
 # ============================================================
 # ,games  — interactive multi-page game directory
 # ============================================================
@@ -17979,6 +18162,15 @@ def _games_fun_embed(guild: discord.Guild) -> discord.Embed:
             "Challenge another member to Connect Four.\n"
             "Click a column number to drop your piece — get 4 in a row to win.\n"
             "3 minutes to finish the game or it times out."
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="🔴🟡  Checkers  —  `,checkers @user` / `,draughts`",
+        value=(
+            "Challenge another member to Checkers.\n"
+            "Move by replying `<from> <to>`, e.g. `c3 b4`.\n"
+            "Simplified rules — captures optional, single jumps only."
         ),
         inline=False
     )
