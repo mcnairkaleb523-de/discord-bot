@@ -18096,9 +18096,7 @@ class CheckersView(discord.ui.View):
         select = discord.ui.Select(placeholder="Choose a piece to move...", options=self._origin_options())
         select.callback = self._on_origin_selected
         self.add_item(select)
-        resign_btn = discord.ui.Button(label="Resign", emoji="🏳️", style=discord.ButtonStyle.danger)
-        resign_btn.callback = self._on_resign
-        self.add_item(resign_btn)
+        self._add_end_game_buttons()
 
     def _build_dest_select(self, origin):
         self.clear_items()
@@ -18108,13 +18106,25 @@ class CheckersView(discord.ui.View):
         back_btn = discord.ui.Button(label="« Back", style=discord.ButtonStyle.secondary)
         back_btn.callback = self._on_back
         self.add_item(back_btn)
+        self._add_end_game_buttons()
+
+    def _add_end_game_buttons(self):
         resign_btn = discord.ui.Button(label="Resign", emoji="🏳️", style=discord.ButtonStyle.danger)
         resign_btn.callback = self._on_resign
         self.add_item(resign_btn)
+        cancel_btn = discord.ui.Button(label="Cancel Game", emoji="🚫", style=discord.ButtonStyle.secondary)
+        cancel_btn.callback = self._on_cancel
+        self.add_item(cancel_btn)
 
     async def _guard_turn(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.game.current.id:
             await interaction.response.send_message("❌ It's not your turn!", ephemeral=True)
+            return False
+        return True
+
+    async def _guard_player(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id not in (self.game.player_r.id, self.game.player_y.id):
+            await interaction.response.send_message("❌ This isn't your game.", ephemeral=True)
             return False
         return True
 
@@ -18159,12 +18169,22 @@ class CheckersView(discord.ui.View):
         await interaction.response.edit_message(embed=self._embed(), view=self)
 
     async def _on_resign(self, interaction: discord.Interaction):
-        if not await self._guard_turn(interaction):
+        if not await self._guard_player(interaction):
             return
-        winner = self.game.player_y if self.game.current == self.game.player_r else self.game.player_r
+        resigner = interaction.user
+        winner = self.game.player_y if resigner.id == self.game.player_r.id else self.game.player_r
         self.clear_items()
         await interaction.response.edit_message(
-            embed=self._embed(result_text=f"{self.game.current.display_name} resigned. **{winner.display_name} wins!**"),
+            embed=self._embed(result_text=f"{resigner.display_name} resigned. **{winner.display_name} wins!**"),
+            view=self
+        )
+
+    async def _on_cancel(self, interaction: discord.Interaction):
+        if not await self._guard_player(interaction):
+            return
+        self.clear_items()
+        await interaction.response.edit_message(
+            embed=self._embed(result_text=f"🚫 Game cancelled by {interaction.user.display_name} — no winner."),
             view=self
         )
 
@@ -18276,9 +18296,7 @@ class ChessView(discord.ui.View):
         select = discord.ui.Select(placeholder="Choose a piece to move...", options=self._origin_options())
         select.callback = self._on_origin_selected
         self.add_item(select)
-        resign_btn = discord.ui.Button(label="Resign", emoji="🏳️", style=discord.ButtonStyle.danger)
-        resign_btn.callback = self._on_resign
-        self.add_item(resign_btn)
+        self._add_end_game_buttons()
 
     def _build_dest_select(self, origin_square):
         self.clear_items()
@@ -18288,13 +18306,25 @@ class ChessView(discord.ui.View):
         back_btn = discord.ui.Button(label="« Back", style=discord.ButtonStyle.secondary)
         back_btn.callback = self._on_back
         self.add_item(back_btn)
+        self._add_end_game_buttons()
+
+    def _add_end_game_buttons(self):
         resign_btn = discord.ui.Button(label="Resign", emoji="🏳️", style=discord.ButtonStyle.danger)
         resign_btn.callback = self._on_resign
         self.add_item(resign_btn)
+        cancel_btn = discord.ui.Button(label="Cancel Game", emoji="🚫", style=discord.ButtonStyle.secondary)
+        cancel_btn.callback = self._on_cancel
+        self.add_item(cancel_btn)
 
     async def _guard_turn(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.current_player.id:
             await interaction.response.send_message("❌ It's not your turn!", ephemeral=True)
+            return False
+        return True
+
+    async def _guard_player(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id not in (self.players[chess_lib.WHITE].id, self.players[chess_lib.BLACK].id):
+            await interaction.response.send_message("❌ This isn't your game.", ephemeral=True)
             return False
         return True
 
@@ -18343,13 +18373,22 @@ class ChessView(discord.ui.View):
         await interaction.response.edit_message(embed=self._embed(), view=self)
 
     async def _on_resign(self, interaction: discord.Interaction):
-        if not await self._guard_turn(interaction):
+        if not await self._guard_player(interaction):
             return
-        winner = self.players[not self.board.turn]
-        loser = self.current_player
+        resigner = interaction.user
+        winner = self.players[chess_lib.BLACK] if resigner.id == self.players[chess_lib.WHITE].id else self.players[chess_lib.WHITE]
         self.clear_items()
         await interaction.response.edit_message(
-            embed=self._embed(result_text=f"{loser.display_name} resigned. **{winner.display_name} wins!**"),
+            embed=self._embed(result_text=f"{resigner.display_name} resigned. **{winner.display_name} wins!**"),
+            view=self
+        )
+
+    async def _on_cancel(self, interaction: discord.Interaction):
+        if not await self._guard_player(interaction):
+            return
+        self.clear_items()
+        await interaction.response.edit_message(
+            embed=self._embed(result_text=f"🚫 Game cancelled by {interaction.user.display_name} — no winner."),
             view=self
         )
 
