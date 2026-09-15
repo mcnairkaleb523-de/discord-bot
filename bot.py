@@ -3521,7 +3521,7 @@ HELP_CATEGORIES = [
     ('🎂', 'Birthdays', ['birthday', 'removebirthday', 'setbirthday', 'setbirthdaychannel', 'birthdaylist', 'settimezone']),
     ('🚀', 'Boosts & Vanity', ['setboostchannel', 'setvanitycode', 'setvanityrole', 'vanityconfig']),
     ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist', 'acceptstaff', 'denystaff', 'setstaffrules', 'staffleaderboard', 'staffstats', 'staffwarn', 'staffstrike', 'staffwarnings', 'staffstrikes', 'clearstaffwarnings', 'clearstaffstrikes']),
-    ('⚙️', 'Admin & Setup', ['setup', 'backup', 'restore', 'listbackups', 'deletebackup', 'exportconfig', 'setlogchannel', 'setwelcome', 'disablewelcome', 'sendwelcome', 'welcome', 'sendinvite', 'announce', 'setpermittedrole', 'setbotbio', 'setupdatechannel']),
+    ('⚙️', 'Admin & Setup', ['setup', 'lockunverified', 'backup', 'restore', 'listbackups', 'deletebackup', 'exportconfig', 'setlogchannel', 'setwelcome', 'disablewelcome', 'sendwelcome', 'welcome', 'sendinvite', 'announce', 'setpermittedrole', 'setbotbio', 'setupdatechannel']),
     ('🎲', 'Fun & Utility', ['snipe', 'clearsnipe', 'editsnipe', 'quote', 'rules', 'cmds', 'help']),
 ]
 
@@ -7201,6 +7201,67 @@ async def setup(ctx):
     )
     embed.set_footer(text=f"TrapAI Setup System • {guild.name}")
     await ctx.send(embed=embed)
+
+
+@bot.command(name="lockunverified", aliases=["fixverification"])
+@_permitted_check(administrator=True)
+async def lockunverified(ctx):
+    """
+    Deny view access to the Unverified role on every channel in the
+    server except welcome/rules/verify. ,setup only sets this up on the
+    3 categories it creates by name — any channel outside those (added
+    later, or living under a differently-named/renamed category) never
+    gets the deny overwrite at all, so Discord's default lets Unverified
+    see it. Safe to re-run anytime after adding new channels.
+    Usage: ,lockunverified
+    """
+    guild = ctx.guild
+    unverified_role = discord.utils.get(guild.roles, name=UNVERIFIED_ROLE)
+    if not unverified_role:
+        await ctx.send(f"❌ Role **{UNVERIFIED_ROLE}** not found — run `,setup` first.", delete_after=10)
+        return
+
+    keep_visible_names = {"welcome", "rules", "verify"}
+
+    await ctx.send(f"🔒 Locking down channel visibility for {unverified_role.mention}...")
+
+    updated = 0
+    kept = 0
+    failed = 0
+    for channel in guild.channels:
+        if isinstance(channel, discord.CategoryChannel):
+            continue
+        if channel.name.lower() in keep_visible_names:
+            kept += 1
+            continue
+        if channel.overwrites_for(unverified_role).view_channel is False:
+            continue  # already denied — no API call needed
+        try:
+            await channel.set_permissions(
+                unverified_role, view_channel=False,
+                reason=f"Lock down Unverified visibility ({ctx.author})"
+            )
+            updated += 1
+        except (discord.Forbidden, discord.HTTPException):
+            failed += 1
+
+    embed = discord.Embed(
+        title="🔒 Unverified Lockdown Complete",
+        description=f"Denied view access on **{updated}** channel(s) for {unverified_role.mention}.",
+        color=discord.Color.purple(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(name="✅ Kept Visible", value=f"{kept} (welcome/rules/verify)", inline=True)
+    if failed:
+        embed.add_field(name="⚠️ Failed", value=str(failed), inline=True)
+    embed.set_footer(text=f"TrapAI • {guild.name}")
+    await ctx.send(embed=embed)
+    await log(guild, "mod", "Unverified Lockdown Run", None, discord.Color.purple(),
+              fields=[
+                  ("🛡 Moderator",         f"{ctx.author.mention} (`{ctx.author.id}`)", True),
+                  ("🔒 Channels Updated",  str(updated),                                 True),
+              ],
+              actor=ctx.author)
 
 
 @bot.command()
