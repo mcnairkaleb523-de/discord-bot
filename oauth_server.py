@@ -30,7 +30,7 @@ paste the client secret in chat/commits):
                                 added on the same OAuth2 Developer Portal page.
 Optional:
   PORT                    — defaults to 8080 (most hosts inject this themselves)
-  VERIFIED_ROLE_NAME       — defaults to "✅ Ballin Member" — MUST match bot.py's
+  VERIFIED_ROLE_NAME       — defaults to "✅ Glock30 Member" — MUST match bot.py's
                               VERIFIED_ROLE constant exactly, character for
                               character. If you ever rename that role again,
                               update this env var here too (or verification
@@ -111,7 +111,7 @@ BOT_TOKEN     = os.getenv("DISCORD_TOKEN")
 REDIRECT_URI  = os.getenv("DISCORD_OAUTH_REDIRECT_URI")
 PORT          = int(os.getenv("PORT", "8080"))
 
-VERIFIED_ROLE_NAME   = os.getenv("VERIFIED_ROLE_NAME", "✅ Ballin Member")
+VERIFIED_ROLE_NAME   = os.getenv("VERIFIED_ROLE_NAME", "✅ Glock30 Member")
 UNVERIFIED_ROLE_NAME = os.getenv("UNVERIFIED_ROLE_NAME", "🚫 Unverified")
 LOG_CHANNEL_NAME      = os.getenv("VERIFICATION_LOG_CHANNEL_NAME", "verification-logs")
 
@@ -396,7 +396,7 @@ document.addEventListener('DOMContentLoaded', function () {
   function resize() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
   resize();
   window.addEventListener('resize', resize);
-  var colors = ['#FFC629', '#F2B90D', '#ffffff', '#5865F2', '#57F287'];
+  var colors = ['#9B59B6', '#B983D6', '#ffffff', '#5865F2', '#57F287'];
   var particles = [];
   for (var i = 0; i < 130; i++) {
     particles.push({
@@ -565,7 +565,7 @@ document.addEventListener('DOMContentLoaded', function () {
 """
 
 
-BRAND_GOLD = "#FFC629"
+BRAND_GOLD = "#9B59B6"
 
 # Static decorative background markup (faint triangle outlines + scattered
 # dots, echoing the landing-page look this was modeled on). No dynamic

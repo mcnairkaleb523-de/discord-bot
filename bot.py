@@ -750,7 +750,7 @@ MEMBER_MILESTONES = {
 }
 
 UNVERIFIED_ROLE = "🚫 Unverified"
-VERIFIED_ROLE = "✅ Ballin Member"
+VERIFIED_ROLE = "✅ Glock30 Member"
 JAIL_ROLE = "🔒 Jailed"
 MUTED_ROLE = "🔇 Muted"
 # Ownership-tier role allowed to issue formal staff warnings/strikes —
@@ -1659,7 +1659,7 @@ _DM_ACTION_CFG = {
     "kick":     ("👢 You have been kicked",         discord.Color.orange(),   "👢", "Kicked from"),
     "ban":      ("🔨 You have been banned",          discord.Color.red(),      "🔨", "Banned from"),
     "hardban":  ("🔴 You have been permanently banned", discord.Color.dark_red(), "🔴", "Hard-banned from"),
-    "timeout":  ("⏳ You have been timed out",       discord.Color.gold(),     "⏳", "Timed out in"),
+    "timeout":  ("⏳ You have been timed out",       discord.Color.purple(),     "⏳", "Timed out in"),
     "jail":     ("🔒 You have been restricted",      discord.Color.dark_red(), "🔒", "Jailed in"),
 }
 
@@ -2319,7 +2319,7 @@ class VerifyView(discord.ui.View):
                 "Server Entry: Locked\n"
                 "```"
             ),
-            color=discord.Color.gold(),
+            color=discord.Color.purple(),
             timestamp=discord.utils.utcnow()
         )
         scan_embed.set_footer(text="TrapAI Security • Initializing")
@@ -3160,7 +3160,7 @@ async def _vc_add_mod(ch, guild_id, actor, member):
 # ============================================================
 
 class VCRenameModal(discord.ui.Modal, title="✏️ Rename VC"):
-    new_name = discord.ui.TextInput(label="New name", placeholder="e.g. Ballin Hangout", min_length=1, max_length=100)
+    new_name = discord.ui.TextInput(label="New name", placeholder="e.g. Glock30 Hangout", min_length=1, max_length=100)
 
     def __init__(self, vc):
         super().__init__()
@@ -4027,7 +4027,7 @@ async def _check_milestone(guild: discord.Guild):
             f"Thank you to everyone who's been part of **{guild.name}** 🏘️🔥\n"
             f"Keep spreading the word and let's hit the next one!"
         ),
-        color=discord.Color.gold(),
+        color=discord.Color.purple(),
         timestamp=discord.utils.utcnow()
     )
     embed.add_field(name="📊 Current Members", value=f"**{count:,}**", inline=True)
@@ -4272,7 +4272,7 @@ async def on_ready():
         status=discord.Status.online,
         activity=discord.Activity(
             type=discord.ActivityType.watching,
-            name="discord.gg/ballin"
+            name="discord.gg/glock30"
         )
     )
     # Ticket-only guilds get their nickname applied right away, in case it
@@ -4861,7 +4861,7 @@ async def on_member_update(before, after):
                 attr="timed_out_until", expected=after.timed_out_until
             )
             if not (to_mod and to_mod.bot):
-                await log(after.guild, "timeouts", "Member Timed Out (Discord)", None, discord.Color.gold(),
+                await log(after.guild, "timeouts", "Member Timed Out (Discord)", None, discord.Color.purple(),
                           fields=[
                               ("🛡 Moderator", f"{to_mod.mention} (`{to_mod.id}`)" if to_mod else "*Unknown*", True),
                               ("⏳ User",      f"{after.mention} (`{after.id}`)",                              True),
@@ -5123,7 +5123,7 @@ async def on_guild_channel_update(before, after):
             "channel_update",
             "Channel Updated",
             f"Changes made to {ch_ref}",
-            discord.Color.gold(),
+            discord.Color.purple(),
             fields=changes
         )
 
@@ -5267,7 +5267,7 @@ async def on_message_edit(before, after):
         "messages",
         "Message Edited",
         None,
-        discord.Color.gold(),
+        discord.Color.purple(),
         fields=[
             ("👤 Author",     f"{before.author.mention} (`{before.author.id}`)",   True),
             ("📍 Channel",    before.channel.mention,                               True),
@@ -5311,7 +5311,7 @@ def _snipe_delete_embed(ctx, cache, index: int):
 
 def _snipe_edit_embed(ctx, cache, index: int):
     entry = cache[index]
-    embed = discord.Embed(color=discord.Color.gold(), timestamp=datetime.fromtimestamp(entry["edited_at"]))
+    embed = discord.Embed(color=discord.Color.purple(), timestamp=datetime.fromtimestamp(entry["edited_at"]))
     embed.set_author(name=entry["author_name"], icon_url=entry["author_avatar"])
     embed.add_field(name="Before", value=entry["before"][:1000] or "*(empty)*", inline=False)
     embed.add_field(name="After",  value=entry["after"][:1000]  or "*(empty)*", inline=False)
@@ -5656,7 +5656,7 @@ async def on_voice_state_update(member, before, after):
         if mod:
             await log(guild, "vc", "VC Moved (by Staff)",
                       f"**{member.display_name}** was moved from {before.channel.mention} to {after.channel.mention} by {mod.mention}.",
-                      discord.Color.gold(),
+                      discord.Color.purple(),
                       fields=[
                           ("👤 Member",    f"{member.mention} (`{member.id}`)", True),
                           ("📤 From",      before.channel.mention,              True),
@@ -5668,7 +5668,7 @@ async def on_voice_state_update(member, before, after):
         else:
             await log(guild, "vc", "VC Moved",
                       f"**{member.display_name}** moved from {before.channel.mention} to {after.channel.mention}.",
-                      discord.Color.gold(),
+                      discord.Color.purple(),
                       fields=[
                           ("👤 Member",         f"{member.mention} (`{member.id}`)", True),
                           ("📤 From",           before.channel.mention,              True),
@@ -6532,7 +6532,7 @@ async def br(ctx, action: str = None, *, arg: str = None):
     if action is None:
         embed = discord.Embed(
             title="🌟 Booster Role",
-            color=role.color if role else discord.Color.gold(),
+            color=role.color if role else discord.Color.purple(),
             timestamp=discord.utils.utcnow()
         )
         embed.add_field(name="🎭 Your Role", value=role.mention if role else "*None yet*", inline=True)
@@ -6925,7 +6925,7 @@ async def vctransfer(ctx, member: discord.Member):
     if err:
         await ctx.send(err)
         return
-    await ctx.send(embed=_vc_embed("👑 Ownership Transferred", f"{member.mention} is now the owner of **{ch.name}**.", discord.Color.gold()))
+    await ctx.send(embed=_vc_embed("👑 Ownership Transferred", f"{member.mention} is now the owner of **{ch.name}**.", discord.Color.purple()))
     await _vc_announce(ctx.guild, ch, f"👑 **{ctx.author.display_name}** transferred ownership to **{member.display_name}**.")
 
 
@@ -6970,14 +6970,14 @@ async def vcclaim(ctx):
         if text_ch:
             await text_ch.set_permissions(ctx.author, view_channel=True, send_messages=True, read_message_history=True)
 
-    await ctx.send(embed=_vc_embed("👑 Ownership Claimed", f"{ctx.author.mention} claimed ownership of **{ch.name}** — the previous owner left.", discord.Color.gold()))
+    await ctx.send(embed=_vc_embed("👑 Ownership Claimed", f"{ctx.author.mention} claimed ownership of **{ch.name}** — the previous owner left.", discord.Color.purple()))
     await _vc_announce(ctx.guild, ch, f"👑 **{ctx.author.display_name}** claimed ownership — the previous owner left the VC.")
     await log(
         ctx.guild,
         "vc",
         "VC Ownership Claimed",
         f"{ctx.author.mention} claimed **{ch.name}** after the owner left.",
-        discord.Color.gold(),
+        discord.Color.purple(),
         fields=[
             ("👑 New Owner",      f"{ctx.author.mention} (`{ctx.author.id}`)", True),
             ("👤 Previous Owner", old_owner.mention if old_owner else (f"`{old_owner_id}`" if old_owner_id else "Unknown"), True),
@@ -7089,9 +7089,9 @@ async def setup(ctx):
     if arrival_category is None:
         arrival_category = await guild.create_category("🤖 TrapAI Arrival Zone")
 
-    island_category = discord.utils.get(guild.categories, name="🏘️ Ballin")
+    island_category = discord.utils.get(guild.categories, name="🏘️ Glock30")
     if island_category is None:
-        island_category = await guild.create_category("🏘️ Ballin")
+        island_category = await guild.create_category("🏘️ Glock30")
 
     staff_category = discord.utils.get(guild.categories, name="🛡 Staff HQ")
     if staff_category is None:
@@ -7160,12 +7160,12 @@ async def setup(ctx):
     jail_logs_channel = await get_or_create_text_channel("jail-logs", restricted_category)
 
     await get_or_create_voice_channel(JOIN_TO_CREATE_CHANNEL_NAME, island_category)
-    await get_or_create_voice_channel("🔥 Ballin VC", island_category)
+    await get_or_create_voice_channel("🔥 Glock30 VC", island_category)
     await get_or_create_voice_channel("🎮 Chill VC", island_category)
 
-    await welcome_channel.edit(topic="🏘️ Arrival Zone • New members are scanned by TrapAI before entering Ballin")
+    await welcome_channel.edit(topic="🏘️ Arrival Zone • New members are scanned by TrapAI before entering Glock30")
     await rules_channel.edit(topic="📜 TrapAI server rules and enforcement")
-    await verify_channel.edit(topic="🌐 Server Verification System • Click Authenticate via Discord below to enter Ballin")
+    await verify_channel.edit(topic="🌐 Server Verification System • Click Authenticate via Discord below to enter Glock30")
     await bot_channel.edit(topic="🤖 Use bot commands here")
     await vc_logs_channel.edit(topic="🎤 Voice channel logs")
     await mod_logs_channel.edit(topic="🛡 Moderator actions and security logs")
@@ -7207,7 +7207,7 @@ async def setup(ctx):
 @_permitted_check(administrator=True)
 async def setupvc(ctx, category_name: str = None):
     """Create the ➕ Create VC trigger channel in this server.
-    Optionally pass a category name to place it in: ,setupvc "Ballin VCs"
+    Optionally pass a category name to place it in: ,setupvc "Glock30 VCs"
     If omitted, it uses the default TEMP_VC_CATEGORY_NAME category."""
     guild = ctx.guild
 
@@ -7545,10 +7545,10 @@ async def sendtickets(ctx):
 
 _TICKET_COLOR_MAP = {
     "red": discord.Color.red(), "green": discord.Color.green(), "blue": discord.Color.blue(),
-    "gold": discord.Color.gold(), "purple": discord.Color.purple(), "teal": discord.Color.teal(),
+    "gold": discord.Color.purple(), "purple": discord.Color.purple(), "teal": discord.Color.teal(),
     "orange": discord.Color.orange(), "pink": discord.Color.from_rgb(255, 105, 180),
     "dark_red": discord.Color.dark_red(), "dark_teal": discord.Color.dark_teal(),
-    "dark_gold": discord.Color.dark_gold(), "blurple": discord.Color.blurple(),
+    "dark_gold": discord.Color.dark_purple(), "blurple": discord.Color.blurple(),
 }
 
 
@@ -7860,7 +7860,7 @@ def _pricing_embed() -> discord.Embed:
             "Then run `,subscribe <product> <tier>` (e.g. `,subscribe ticketbot pro` or `,subscribe wholebot premium`)."
             f"{web_note}"
         ),
-        color=discord.Color.gold(),
+        color=discord.Color.purple(),
         timestamp=discord.utils.utcnow()
     )
     for product, product_cfg in BILLING_PRODUCTS.items():
@@ -7928,7 +7928,7 @@ async def subscribe(ctx, product: str = None, tier: str = None):
     embed = discord.Embed(
         title=f"💳 Checkout — {product_label} ({tier_label})",
         description=f"Click below to complete your **{product_label} — {tier_label}** purchase securely via Stripe.\n\n[Complete Checkout]({checkout_url})",
-        color=discord.Color.gold(),
+        color=discord.Color.purple(),
         timestamp=discord.utils.utcnow()
     )
     embed.set_footer(text="TrapAI never sees your card details — Stripe handles all payment info.")
@@ -8109,7 +8109,7 @@ async def verify(ctx, member: discord.Member):
 
         embed = discord.Embed(
             title="✅ Member Verified",
-            description=f"{member.mention} is now a **Ballin Member** 🏘️🔥",
+            description=f"{member.mention} is now a **Glock30 Member** 🏘️🔥",
             color=discord.Color.green(),
             timestamp=discord.utils.utcnow()
         )
@@ -8226,7 +8226,7 @@ async def trapscan(ctx, member: discord.Member):
             "Threat Model  : Loading...\n"
             "```"
         ),
-        color=discord.Color.gold(),
+        color=discord.Color.purple(),
         timestamp=discord.utils.utcnow()
     )
     scanning_embed.set_footer(text="TrapAI Security • Scanning…")
@@ -8309,7 +8309,7 @@ async def trapscan(ctx, member: discord.Member):
         verdict       = "ELEVATED RISK — Monitor closely."
     elif threat_points >= 15:
         threat_label  = "🟡 MEDIUM"
-        threat_color  = discord.Color.gold()
+        threat_color  = discord.Color.purple()
         verdict       = "MODERATE RISK — Some flags detected."
     else:
         threat_label  = "🟢 LOW"
@@ -8721,7 +8721,7 @@ async def timeout(ctx, member: discord.Member, minutes: int, *, reason="No reaso
     embed = discord.Embed(
         title="⏳ Member Timed Out",
         description=f"{member.mention} has been timed out in **{ctx.guild.name}**.",
-        color=discord.Color.gold(),
+        color=discord.Color.purple(),
         timestamp=discord.utils.utcnow()
     )
     embed.add_field(name="📝 Reason",    value=reason,            inline=False)
@@ -8731,7 +8731,7 @@ async def timeout(ctx, member: discord.Member, minutes: int, *, reason="No reaso
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.set_footer(text=f"TrapAI Moderation • {ctx.guild.name}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
-    await log(ctx.guild, "timeouts", "Member Timed Out", None, discord.Color.gold(),
+    await log(ctx.guild, "timeouts", "Member Timed Out", None, discord.Color.purple(),
               fields=[
                   ("🛡 Moderator", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
                   ("⏳ User",      f"{member.mention} (`{member.id}`)",          True),
@@ -9286,7 +9286,7 @@ def _ss_build_pages(guild: discord.Guild, requester) -> list:
     """Build all embed pages for the serverstats paginator."""
     now   = discord.utils.utcnow()
     icon  = guild.icon.url if guild.icon else None
-    acol  = discord.Color.gold()
+    acol  = discord.Color.purple()
 
     # ── raw counts ───────────────────────────────────────────
     total       = guild.member_count or len(guild.members)
@@ -9675,7 +9675,7 @@ async def inviteleaderboard(ctx):
     embed = discord.Embed(
         title="📨 Invite Leaderboard",
         description=f"**Top inviters in {ctx.guild.name}**",
-        color=discord.Color.gold(),
+        color=discord.Color.purple(),
         timestamp=discord.utils.utcnow()
     )
     medals = ["🥇", "🥈", "🥉"] + ["🔹"] * 7
@@ -9815,9 +9815,9 @@ async def role_create(ctx, *, rest: str):
     or hex like ff0000) and/or the word "hoist" to display the role
     separately in the member list; both are peeled off the end if present,
     everything else becomes the name.
-    Usage: ,role create Ballin Member
-           ,role create Ballin Member gold
-           ,role create Ballin Member gold hoist
+    Usage: ,role create Glock30 Member
+           ,role create Glock30 Member purple
+           ,role create Glock30 Member purple hoist
     """
     tokens = rest.split()
 
@@ -10296,7 +10296,7 @@ async def staffleaderboard(ctx):
     embed = discord.Embed(
         title="🏆 Staff Leaderboard",
         description="Ranked by total moderation actions + tickets claimed.\n\n" + "\n".join(lines),
-        color=discord.Color.gold(),
+        color=discord.Color.purple(),
         timestamp=discord.utils.utcnow()
     )
     if ctx.guild.icon:
@@ -11519,7 +11519,7 @@ async def milestones(ctx):
 
     embed = discord.Embed(
         title="🎯 Member Milestones",
-        color=discord.Color.gold(),
+        color=discord.Color.purple(),
         timestamp=discord.utils.utcnow()
     )
     embed.add_field(name="📊 Current Members", value=f"**{count:,}**", inline=True)
@@ -11842,7 +11842,7 @@ async def setvanitycode(ctx, code: str = None):
     doesn't have Discord's native boosted vanity URL. Scoped to THIS
     server only. Run with no argument to clear the override and fall
     back to this server's native vanity URL (if any).
-    Usage: ,setvanitycode ballin
+    Usage: ,setvanitycode glock30
     """
     guild = ctx.guild
     if code is None:
@@ -12102,7 +12102,7 @@ async def giveaway(ctx, duration: str, winners: int, *, prize: str):
             f"Click again to **leave**.\n\n"
             f"⏰ Ends {ends_str}"
         ),
-        color=discord.Color.gold(),
+        color=discord.Color.purple(),
         timestamp=ends_dt
     )
     embed.add_field(name="🎟️ Entries",  value="0",              inline=True)
@@ -12152,7 +12152,7 @@ async def giveaways(ctx):
     if not active:
         await ctx.send("📭 No active giveaways right now.")
         return
-    embed = discord.Embed(title="🎉 Active Giveaways", color=discord.Color.gold(), timestamp=discord.utils.utcnow())
+    embed = discord.Embed(title="🎉 Active Giveaways", color=discord.Color.purple(), timestamp=discord.utils.utcnow())
     for mid, d in active:
         ends = discord.utils.format_dt(
             discord.utils.utcnow() + timedelta(seconds=max(0, d["ends_at"] - discord.utils.utcnow().timestamp())), "R"
@@ -12523,7 +12523,7 @@ TASK_PRIORITIES = {
 
 TASK_STATUSES = {
     "open":        ("📋", "Open",        discord.Color.blurple()),
-    "in-progress": ("⚙️",  "In Progress", discord.Color.gold()),
+    "in-progress": ("⚙️",  "In Progress", discord.Color.purple()),
     "done":        ("✅", "Done",        discord.Color.green()),
     "blocked":     ("🚫", "Blocked",     discord.Color.red()),
     "review":      ("🔍", "In Review",   discord.Color.from_rgb(114, 137, 218)),
@@ -12545,7 +12545,7 @@ def _resolve_task_assignee(guild: discord.Guild, task: dict):
 
 def _task_embed(task: dict, guild: discord.Guild) -> discord.Embed:
     s_icon, s_label, _ = TASK_STATUSES.get(task["status"], ("📋", task["status"], discord.Color.blurple()))
-    p_icon, p_label, p_color = TASK_PRIORITIES.get(task["priority"], ("🟡", task["priority"], discord.Color.gold()))
+    p_icon, p_label, p_color = TASK_PRIORITIES.get(task["priority"], ("🟡", task["priority"], discord.Color.purple()))
 
     # Color driven by priority
     color = p_color
@@ -13376,7 +13376,7 @@ async def vouch(ctx, member: discord.Member = None, role: discord.Role = None, *
                 f"**{ctx.author}** is requesting the **{role.name}** role for **{member}**.\n\n"
                 f"This role is **protected** — only you can approve or reject this."
             ),
-            color=discord.Color.gold(),
+            color=discord.Color.purple(),
             timestamp=discord.utils.utcnow()
         )
         request_embed.add_field(name="👤 Member",     value=f"{member.mention} (`{member.id}`)", inline=True)
@@ -13402,7 +13402,7 @@ async def vouch(ctx, member: discord.Member = None, role: discord.Role = None, *
                 f"**{owner}** for approval.\n\n"
                 f"{'✅ Owner has been notified via DM.' if owner_notified else '⚠️ Could not DM owner — they may need to check manually.'}"
             ),
-            color=discord.Color.gold(),
+            color=discord.Color.purple(),
             timestamp=discord.utils.utcnow()
         )
         confirm.add_field(name="👤 Member",   value=member.mention, inline=True)
@@ -13411,7 +13411,7 @@ async def vouch(ctx, member: discord.Member = None, role: discord.Role = None, *
         confirm.set_footer(text=f"Awaiting owner approval • TrapAI • {ctx.guild.name}")
         await ctx.send(embed=confirm)
 
-        await log(ctx.guild, "vouches", "Vouch-Role Request Submitted", None, discord.Color.gold(),
+        await log(ctx.guild, "vouches", "Vouch-Role Request Submitted", None, discord.Color.purple(),
                   fields=[
                       ("📨 Requester", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
                       ("👤 Member",    f"{member.mention} (`{member.id}`)",          True),
@@ -13567,7 +13567,7 @@ async def vouchleaderboard(ctx):
     embed = discord.Embed(
         title="✅ Vouch Leaderboard",
         description=f"**Top vouched members in {ctx.guild.name}** (threshold: {threshold})",
-        color=discord.Color.gold(),
+        color=discord.Color.purple(),
         timestamp=discord.utils.utcnow()
     )
     medals = ["🥇", "🥈", "🥉"] + ["🔹"] * 7
@@ -14114,7 +14114,7 @@ async def pendingvouches(ctx):
             "Owner must approve or reject via the DM they received.\n"
             "Use `,cancelvouch @user @role` to withdraw any of these."
         ),
-        color=discord.Color.gold(),
+        color=discord.Color.purple(),
         timestamp=discord.utils.utcnow()
     )
 
@@ -15067,7 +15067,7 @@ async def announce(ctx, channel: discord.TextChannel = None, *, text: str = None
                 "red":    discord.Color.red(),
                 "green":  discord.Color.green(),
                 "blue":   discord.Color.blue(),
-                "gold":   discord.Color.gold(),
+                "gold":   discord.Color.purple(),
                 "purple": discord.Color.purple(),
                 "teal":   discord.Color.teal(),
                 "orange": discord.Color.orange(),
@@ -15223,7 +15223,7 @@ async def quote(ctx, *, target: str = None):
                 pass
 
         # Pick color from attributed member's top role, else gold
-        color = discord.Color.gold()
+        color = discord.Color.purple()
         if isinstance(attributed, discord.Member):
             rc = attributed.color
             if rc != discord.Color.default():
@@ -15415,7 +15415,7 @@ def _eco_embed(member, guild_id):
     data = _eco(guild_id, member.id)
     embed = discord.Embed(
         title=f"💰 {member.display_name}'s Balance",
-        color=discord.Color.gold(),
+        color=discord.Color.purple(),
         timestamp=discord.utils.utcnow()
     )
     embed.add_field(name="👛 Wallet", value=f"**{data['wallet']:,}** coins", inline=True)
@@ -15480,7 +15480,7 @@ async def daily(ctx):
     embed = discord.Embed(
         title="📅 Daily Reward",
         description=f"You claimed your daily reward of **{earned:,} coins**! Come back tomorrow.",
-        color=discord.Color.gold(),
+        color=discord.Color.purple(),
         timestamp=discord.utils.utcnow()
     )
     embed.set_footer(text="Resets every 24 hours • TrapAI Economy")
@@ -15501,7 +15501,7 @@ async def weekly(ctx):
     embed = discord.Embed(
         title="📆 Weekly Reward",
         description=f"You claimed your weekly reward of **{earned:,} coins**! Come back next week.",
-        color=discord.Color.from_rgb(255, 215, 0),
+        color=discord.Color.purple(),
         timestamp=discord.utils.utcnow()
     )
     embed.set_footer(text="Resets every 7 days • TrapAI Economy")
@@ -15619,7 +15619,7 @@ async def shop(ctx):
             "Buy a role with real money — secure checkout via Stripe, `,buyrole @role`.\n\n"
             + ("\n".join(lines) if lines else "*Nothing for sale yet.*")
         ),
-        color=discord.Color.gold(),
+        color=discord.Color.purple(),
         timestamp=discord.utils.utcnow()
     )
     if not lines:
@@ -15672,7 +15672,7 @@ async def buyrole(ctx, role: discord.Role = None):
             f"[Complete Checkout]({checkout_url})\n\n"
             "The role is granted automatically the moment payment confirms."
         ),
-        color=discord.Color.gold(),
+        color=discord.Color.purple(),
         timestamp=discord.utils.utcnow()
     )
     embed.set_footer(text="TrapAI never sees your card details — Stripe handles all payment info.")
@@ -15683,7 +15683,7 @@ async def buyrole(ctx, role: discord.Role = None):
     except (discord.Forbidden, discord.HTTPException):
         await ctx.send(embed=embed)  # DMs closed — post it here instead
 
-    await log(ctx.guild, "roles", "Role Shop Checkout Started", None, discord.Color.gold(),
+    await log(ctx.guild, "roles", "Role Shop Checkout Started", None, discord.Color.purple(),
               fields=[
                   ("👤 Member", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
                   ("🏷️ Role",   f"{role.mention} (`{role.id}`)",             True),
@@ -15763,7 +15763,7 @@ async def leaderboard(ctx):
     sorted_users = sorted(guild_data.items(), key=lambda x: x[1]["wallet"] + x[1]["bank"], reverse=True)[:10]
     embed = discord.Embed(
         title=f"💎 Richest Members — {ctx.guild.name}",
-        color=discord.Color.gold(),
+        color=discord.Color.purple(),
         timestamp=discord.utils.utcnow()
     )
     medals = ["🥇", "🥈", "🥉"] + ["🏅"] * 7
@@ -15825,7 +15825,7 @@ async def slots(ctx, bet: int = None):
         GAMBLE_WINS.setdefault(ctx.guild.id, {})[ctx.author.id] = \
             GAMBLE_WINS.setdefault(ctx.guild.id, {}).get(ctx.author.id, 0) + (win - bet)
         result = f"🎉 **JACKPOT!** `{' '.join(reels)}` — Won **{win:,} coins** (×{mult})!"
-        color = discord.Color.gold()
+        color = discord.Color.purple()
     elif reels[0] == reels[1] or reels[1] == reels[2]:
         win = bet
         data["wallet"] += win
@@ -15904,7 +15904,7 @@ async def dice(ctx, bet: int = None, guess: int = None):
         GAMBLE_WINS.setdefault(ctx.guild.id, {})[ctx.author.id] = \
             GAMBLE_WINS.setdefault(ctx.guild.id, {}).get(ctx.author.id, 0) + win
         desc = f"{dice_faces[roll]} Rolled **{roll}** — You guessed right! Won **{win:,} coins** (×5)!"
-        color = discord.Color.gold()
+        color = discord.Color.purple()
     else:
         data["wallet"] -= bet
         GAMBLE_WINS.setdefault(ctx.guild.id, {})[ctx.author.id] = \
@@ -16519,7 +16519,7 @@ def _games_economy_embed(guild: discord.Guild) -> discord.Embed:
     embed = discord.Embed(
         title="💰  Economy — Earn & Manage Coins",
         description="Build your fortune, save it, spend it, or steal it.\nCoins are stored **per server** — separate on every Discord.",
-        color=discord.Color.gold(),
+        color=discord.Color.purple(),
         timestamp=discord.utils.utcnow()
     )
     embed.add_field(
@@ -16706,7 +16706,7 @@ def _games_lb_embed(guild: discord.Guild) -> discord.Embed:
     embed = discord.Embed(
         title="🏆  Leaderboards",
         description="See who's on top across all economy and casino activity.",
-        color=discord.Color.from_rgb(255, 215, 0),
+        color=discord.Color.purple(),
         timestamp=discord.utils.utcnow()
     )
     embed.add_field(
