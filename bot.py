@@ -565,6 +565,20 @@ CHANGELOG = [
             "This update-announcement system itself wasn't posting reliably — one guild's error could silently block it for every other server; now isolated and logged per guild.",
         ],
     },
+    {
+        "version": "1.2",
+        "new": [
+            "Verification now uses the real Discord OAuth flow — clicking Verify takes you to the site to confirm instead of just showing an in-Discord button.",
+            "Jailed members can no longer see any voice channels or text channels besides #jail (,lockjailed).",
+            "Jail now assigns each inmate a persistent inmate number and a cell number, and ,worktime lets them shave time off their sentence by solving a quick math problem.",
+            "Members are now DM'd when they're released from jail, letting them know their roles were restored.",
+        ],
+        "fixed": [
+            "Invite-log tracking was missing joins made through the server's vanity invite link (discord.gg/<code>) — those are now detected and logged too.",
+            ",unlock wasn't actually reopening chat for unverified members — it now clears the Unverified role's block too, not just @everyone's.",
+            ",unverify was showing a leftover old role name in its confirmation message instead of the real Unverified role.",
+        ],
+    },
 ]
 
 # UPDATE_CHANNEL_OVERRIDES[guild_id] = channel_id — set via ,setupdatechannel.
