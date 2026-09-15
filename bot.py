@@ -1045,7 +1045,7 @@ WHOLE_BOT_PREMIUM_ONLY_COMMANDS = {
     "balance", "jobs", "setjob", "daily", "weekly", "work", "rob", "give", "deposit", "withdraw",
     "leaderboard", "gamblers", "slots", "blackjack", "coinflip", "dice", "duel",
     "basketball", "archery", "cuppong", "8ball",
-    "trivia", "hangman", "tictactoe", "numguess", "rockpaperscissors", "highlow",
+    "trivia", "hangman", "wordle", "tictactoe", "numguess", "rockpaperscissors", "highlow",
     "crash", "21questions", "games",
     # Birthdays (whole category)
     "birthday", "removebirthday", "setbirthday", "setbirthdaychannel",
@@ -3565,7 +3565,7 @@ HELP_CATEGORIES = [
     ('📊', 'Stats & Info', ['whois', 'chatstats', 'serverstats', 'invites', 'invitelogs', 'inviteleaderboard', 'setinvite', 'milestones', 'setmilestone', 'testmilestone', 'ping', 'exitsurveys']),
     ('✅', 'Vouch', ['vouch', 'unvouch', 'cancelvouch', 'pendingvouches', 'vouches', 'vouchleaderboard', 'vouchstats', 'vouchconfig']),
     ('🎉', 'Giveaways & Polls', ['giveaway', 'giveawayend', 'giveaways', 'poll', 'pollend']),
-    ('💰', 'Economy & Games', ['balance', 'jobs', 'setjob', 'daily', 'weekly', 'work', 'rob', 'give', 'deposit', 'withdraw', 'leaderboard', 'gamblers', 'slots', 'blackjack', 'coinflip', 'dice', 'duel', 'basketball', 'archery', 'cuppong', '8ball', 'trivia', 'hangman', 'tictactoe', 'numguess', 'rockpaperscissors', 'highlow', 'crash', '21questions', 'games', 'shop', 'buyrole', 'setroleshop']),
+    ('💰', 'Economy & Games', ['balance', 'jobs', 'setjob', 'daily', 'weekly', 'work', 'rob', 'give', 'deposit', 'withdraw', 'leaderboard', 'gamblers', 'slots', 'blackjack', 'coinflip', 'dice', 'duel', 'basketball', 'archery', 'cuppong', '8ball', 'trivia', 'hangman', 'wordle', 'tictactoe', 'numguess', 'rockpaperscissors', 'highlow', 'crash', '21questions', 'games', 'shop', 'buyrole', 'setroleshop']),
     ('🎂', 'Birthdays', ['birthday', 'removebirthday', 'setbirthday', 'setbirthdaychannel', 'birthdaylist', 'settimezone']),
     ('🚀', 'Boosts & Vanity', ['setboostchannel', 'setvanitycode', 'setvanityrole', 'vanityconfig']),
     ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist', 'acceptstaff', 'denystaff', 'setstaffrules', 'staffleaderboard', 'staffstats', 'staffwarn', 'staffstrike', 'staffwarnings', 'staffstrikes', 'clearstaffwarnings', 'clearstaffstrikes']),
@@ -17303,6 +17303,132 @@ async def hangman(ctx):
     await ctx.send(f"💀 You lost! The word was **{word}**.")
 
 
+# ── Wordle ───────────────────────────────────────────────────
+WORDLE_WORDS = [
+    "about", "above", "actor", "adapt", "admit", "adopt", "after", "again",
+    "agent", "agree", "alarm", "album", "alert", "alike", "alive", "allow",
+    "alone", "among", "angel", "anger", "angle", "apple", "apply", "arena",
+    "argue", "arise", "armor", "aside", "asset", "audio", "audit", "avoid",
+    "awake", "award", "aware", "badge", "baker", "basic", "basin", "beach",
+    "beast", "begin", "being", "below", "bench", "birth", "black", "blade",
+    "blame", "blank", "blast", "blend", "bless", "blind", "block", "blood",
+    "board", "boost", "booth", "bound", "brain", "brand", "brave", "bread",
+    "break", "brick", "bride", "brief", "bring", "broad", "broke", "brown",
+    "build", "built", "bunch", "burst", "cabin", "cable", "camel", "canal",
+    "candy", "cargo", "carry", "catch", "cause", "chain", "chair", "chalk",
+    "charm", "chart", "chase", "cheap", "check", "cheer", "chest", "chief",
+    "child", "choir", "chose", "civic", "claim", "class", "clean", "clear",
+    "climb", "clock", "close", "cloud", "coach", "coast", "could", "count",
+    "court", "cover", "craft", "crash", "crazy", "cream", "creek", "crime",
+    "cross", "crowd", "crown", "crush", "curve", "cycle", "daily", "dance",
+    "dealt", "death", "debut", "delay", "depth", "diary", "dirty", "doubt",
+    "dozen", "draft", "drama", "dream", "dress", "drift", "drink", "drive",
+    "eager", "early", "earth", "eight", "elite", "empty", "enemy", "enjoy",
+    "enter", "equal", "error", "event", "every", "exact", "exist", "extra",
+    "faith", "fault", "favor", "fence", "fewer", "fiber", "field", "fifth",
+    "fight", "final", "first", "flame", "flash", "fleet", "flesh", "float",
+    "flock", "floor", "focus", "force", "forge", "forth", "found", "frame",
+    "fresh", "front", "frost", "fruit", "fully", "funny", "giant", "given",
+    "glass", "globe", "glory", "grace", "grade", "grain", "grand", "grant",
+    "grass", "great", "green", "greet", "grief", "grill", "gross", "group",
+    "guard", "guess", "guest", "guide", "habit", "happy", "harsh", "haste",
+    "heart", "heavy", "hedge", "hello", "hobby", "honor", "horse", "hotel",
+    "house", "human", "humor", "ideal", "image", "index", "inner", "input",
+    "issue", "ivory", "japan", "jelly", "joint", "judge", "juice", "known",
+    "label", "labor", "large", "laser", "later", "laugh", "layer", "learn",
+    "least", "level", "light", "limit", "little", "lobby", "local", "lodge",
+    "logic", "loose", "lower", "loyal", "lucky", "lunch", "lying", "magic",
+    "major", "maker", "march", "match", "maybe", "mayor", "medal", "media",
+    "metal", "meter", "might", "minor", "minus", "mixed", "model", "moist",
+    "money", "month", "moral", "motor", "mount", "mouse", "mouth", "movie",
+    "music", "needy", "nerve", "never", "newly", "night", "noble", "noise",
+    "north", "novel", "nurse", "ocean", "offer", "often", "older", "olive",
+    "opera", "orbit", "order", "organ", "otter", "ought", "outer", "owner",
+    "paint", "panel", "panic", "party", "pasta", "patch", "pause", "peace",
+    "phase", "phone", "photo", "piece", "pilot", "pitch", "pizza", "place",
+    "plain", "plane", "plant", "plate", "point", "pound", "power", "press",
+    "price", "pride", "prime", "print", "prior", "prize", "proof", "proud",
+    "prove", "pulse", "punch", "pupil", "purse", "queen", "quick", "quiet",
+    "quite", "radio", "raise", "range", "rapid", "reach", "react", "ready",
+    "realm", "rebel", "refer", "relax", "reply", "right", "rigid", "rival",
+    "river", "roast", "robot", "rocky", "roman", "rough", "round", "route",
+    "royal", "rural", "sadly", "salad", "sauce", "scale", "scare", "scene",
+    "scope", "score", "sense", "serve", "seven", "shade", "shake", "shall",
+    "shape", "share", "sharp", "sheet", "shelf", "shell", "shift", "shine",
+    "shirt", "shock", "shoot", "shore", "short", "shown", "sight", "silly",
+    "since", "skill", "sleep", "slide", "slope", "small", "smart", "smell",
+    "smile", "smoke", "snake", "solar", "solid", "solve", "sorry", "sound",
+    "south", "space", "spare", "spark", "speak", "speed", "spell", "spend",
+    "spice", "spine", "spite", "split", "sport", "spray", "spring", "squad",
+    "stack", "staff", "stage", "stake", "stand", "stark", "start", "state",
+    "steam", "steel", "steep", "steer", "stick", "stiff", "still", "stock",
+    "stone", "store", "storm", "story", "strip", "study", "stuff", "style",
+    "sugar", "suite", "super", "sweet", "swift", "swing", "sword", "table",
+    "taken", "taste", "teach", "thank", "theme", "there", "thick", "thing",
+    "think", "third", "those", "three", "throw", "thumb", "tiger", "tight",
+    "timer", "title", "today", "topic", "total", "touch", "tough", "tower",
+    "toxic", "trace", "track", "trade", "trail", "train", "trait", "trash",
+    "treat", "trend", "trial", "tribe", "trick", "tried", "truck", "trust",
+    "truth", "twice", "under", "union", "unity", "until", "upper", "upset",
+    "urban", "usage", "usual", "valid", "value", "video", "virus", "visit",
+    "vital", "voice", "waste", "watch", "water", "weigh", "which", "while",
+    "white", "whole", "whose", "woman", "world", "worry", "worst", "worth",
+    "would", "wound", "write", "wrong", "yield", "young", "youth",
+]
+WORDLE_WORDS = [w for w in WORDLE_WORDS if len(w) == 5]  # a couple entries above are 6 letters — drop them
+
+
+def _wordle_feedback(guess: str, secret: str) -> str:
+    result = ["⬛"] * 5
+    remaining = list(secret)
+    for i in range(5):
+        if guess[i] == secret[i]:
+            result[i] = "🟩"
+            remaining[i] = None
+    for i in range(5):
+        if result[i] == "⬛" and guess[i] in remaining:
+            result[i] = "🟨"
+            remaining[remaining.index(guess[i])] = None
+    return "".join(result)
+
+
+@bot.command()
+async def wordle(ctx):
+    """Guess the secret 5-letter word in 6 tries. Usage: ,wordle"""
+    secret = random.choice(WORDLE_WORDS)
+    max_attempts = 6
+    await ctx.send(
+        f"🟩 **Wordle!** Guess the **5-letter word** in **{max_attempts} tries** — reply right here.\n"
+        "🟩 = right letter, right spot  •  🟨 = right letter, wrong spot  •  ⬛ = not in the word"
+    )
+
+    def check(m):
+        return m.author == ctx.author and m.channel == ctx.channel and \
+               len(m.content) == 5 and m.content.isalpha()
+
+    history = []
+    for attempt in range(1, max_attempts + 1):
+        try:
+            msg = await bot.wait_for("message", check=check, timeout=60)
+        except asyncio.TimeoutError:
+            await ctx.send(f"⏰ Time's up! The word was **{secret.upper()}**.", delete_after=10)
+            return
+        guess = msg.content.lower()
+        feedback = _wordle_feedback(guess, secret)
+        history.append(f"{feedback}  `{guess.upper()}`")
+        if guess == secret:
+            reward = max(50, 350 - (attempt - 1) * 50)
+            _add_earned(ctx.guild.id, ctx.author.id, reward)
+            await ctx.send(
+                "\n".join(history) +
+                f"\n\n🎉 **Correct in {attempt}/{max_attempts}!** You earned **{_fmt_money(reward)}**!"
+            )
+            return
+        await ctx.send("\n".join(history) + f"\n*({max_attempts - attempt} tries left)*")
+
+    await ctx.send(f"😢 Out of tries! The word was **{secret.upper()}**.")
+
+
 # ── 8-Ball ───────────────────────────────────────────────────
 _8BALL_RESPONSES = [
     "✅ It is certain.", "✅ It is decidedly so.", "✅ Without a doubt.",
@@ -17683,6 +17809,15 @@ def _games_fun_embed(guild: discord.Guild) -> discord.Embed:
             "Guess a hidden word one letter at a time.\n"
             "6 wrong guesses allowed before you're hanged.\n"
             "**Reward: $200** for guessing the word!"
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="🟩  Wordle  —  `,wordle`",
+        value=(
+            "Guess the secret 5-letter word in **6 tries**.\n"
+            "🟩 right spot • 🟨 wrong spot • ⬛ not in the word\n"
+            "**Reward: $100–$350** based on how few guesses you needed!"
         ),
         inline=False
     )
