@@ -3568,7 +3568,7 @@ HELP_CATEGORIES = [
     ('🎂', 'Birthdays', ['birthday', 'removebirthday', 'setbirthday', 'setbirthdaychannel', 'birthdaylist', 'settimezone']),
     ('🚀', 'Boosts & Vanity', ['setboostchannel', 'setvanitycode', 'setvanityrole', 'vanityconfig']),
     ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist', 'acceptstaff', 'denystaff', 'setstaffrules', 'staffleaderboard', 'staffstats', 'staffwarn', 'staffstrike', 'staffwarnings', 'staffstrikes', 'clearstaffwarnings', 'clearstaffstrikes']),
-    ('⚙️', 'Admin & Setup', ['setup', 'lockunverified', 'backup', 'restore', 'listbackups', 'deletebackup', 'exportconfig', 'setlogchannel', 'setwelcome', 'disablewelcome', 'sendwelcome', 'welcome', 'sendinvite', 'announce', 'setpermittedrole', 'setbotbio', 'setupdatechannel']),
+    ('⚙️', 'Admin & Setup', ['setup', 'lockunverified', 'backup', 'restore', 'listbackups', 'deletebackup', 'exportconfig', 'setlogchannel', 'setwelcome', 'disablewelcome', 'sendwelcome', 'welcome', 'sendinvite', 'announce', 'setpermittedrole', 'setbotbio', 'setupdatechannel', 'resendupdate']),
     ('🎲', 'Fun & Utility', ['snipe', 'clearsnipe', 'editsnipe', 'quote', 'rules', 'cmds', 'help']),
 ]
 
@@ -6632,6 +6632,34 @@ async def setupdatechannel(ctx, channel: discord.TextChannel = None):
     )
     embed.set_footer(text=f"Set by {ctx.author}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
+
+
+@bot.command(name="resendupdate", aliases=["reannounce"])
+@_permitted_check(manage_guild=True)
+async def resendupdate(ctx):
+    """
+    Re-post the latest changelog entry to THIS server only — bypasses the
+    "already announced" check, so it works even if this server already
+    saw it. Doesn't touch any other server the bot is in. Useful after
+    fixing the update-announcement channel with ,setupdatechannel.
+    Usage: ,resendupdate
+    """
+    if not CHANGELOG:
+        await ctx.send("❌ No changelog entries configured.", delete_after=8)
+        return
+    latest = CHANGELOG[-1]
+    channel = _resolve_update_channel(ctx.guild)
+    if not channel:
+        await ctx.send("❌ No update channel found — set one with `,setupdatechannel #channel` first.", delete_after=10)
+        return
+    try:
+        await channel.send(embed=_build_update_embed(latest))
+    except (discord.Forbidden, discord.HTTPException) as e:
+        await ctx.send(f"❌ Failed to post: {e}", delete_after=10)
+        return
+    LAST_ANNOUNCED_VERSION[ctx.guild.id] = latest["version"]
+    _save_last_announced_version()
+    await ctx.send(f"✅ Re-posted v{latest['version']} changelog to {channel.mention}.", delete_after=8)
 
 
 def _br_embed(title, description, color):
