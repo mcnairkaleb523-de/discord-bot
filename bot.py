@@ -1043,9 +1043,10 @@ WHOLE_BOT_PREMIUM_ONLY_COMMANDS = {
     "giveaway", "giveawayend", "giveaways", "poll", "pollend",
     # Economy & Games (whole category)
     "balance", "jobs", "setjob", "daily", "weekly", "work", "rob", "give", "deposit", "withdraw",
-    "leaderboard", "gamblers", "slots", "blackjack", "coinflip", "dice", "duel", "8ball",
+    "leaderboard", "gamblers", "slots", "blackjack", "coinflip", "dice", "duel",
+    "basketball", "archery", "cuppong", "8ball",
     "trivia", "hangman", "tictactoe", "numguess", "rockpaperscissors", "highlow",
-    "crash", "games",
+    "crash", "21questions", "games",
     # Birthdays (whole category)
     "birthday", "removebirthday", "setbirthday", "setbirthdaychannel",
     "birthdaylist", "settimezone",
@@ -3564,7 +3565,7 @@ HELP_CATEGORIES = [
     ('📊', 'Stats & Info', ['whois', 'chatstats', 'serverstats', 'invites', 'invitelogs', 'inviteleaderboard', 'setinvite', 'milestones', 'setmilestone', 'testmilestone', 'ping', 'exitsurveys']),
     ('✅', 'Vouch', ['vouch', 'unvouch', 'cancelvouch', 'pendingvouches', 'vouches', 'vouchleaderboard', 'vouchstats', 'vouchconfig']),
     ('🎉', 'Giveaways & Polls', ['giveaway', 'giveawayend', 'giveaways', 'poll', 'pollend']),
-    ('💰', 'Economy & Games', ['balance', 'jobs', 'setjob', 'daily', 'weekly', 'work', 'rob', 'give', 'deposit', 'withdraw', 'leaderboard', 'gamblers', 'slots', 'blackjack', 'coinflip', 'dice', 'duel', '8ball', 'trivia', 'hangman', 'tictactoe', 'numguess', 'rockpaperscissors', 'highlow', 'crash', 'games', 'shop', 'buyrole', 'setroleshop']),
+    ('💰', 'Economy & Games', ['balance', 'jobs', 'setjob', 'daily', 'weekly', 'work', 'rob', 'give', 'deposit', 'withdraw', 'leaderboard', 'gamblers', 'slots', 'blackjack', 'coinflip', 'dice', 'duel', 'basketball', 'archery', 'cuppong', '8ball', 'trivia', 'hangman', 'tictactoe', 'numguess', 'rockpaperscissors', 'highlow', 'crash', '21questions', 'games', 'shop', 'buyrole', 'setroleshop']),
     ('🎂', 'Birthdays', ['birthday', 'removebirthday', 'setbirthday', 'setbirthdaychannel', 'birthdaylist', 'settimezone']),
     ('🚀', 'Boosts & Vanity', ['setboostchannel', 'setvanitycode', 'setvanityrole', 'vanityconfig']),
     ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist', 'acceptstaff', 'denystaff', 'setstaffrules', 'staffleaderboard', 'staffstats', 'staffwarn', 'staffstrike', 'staffwarnings', 'staffstrikes', 'clearstaffwarnings', 'clearstaffstrikes']),
@@ -15981,10 +15982,9 @@ async def setjob(ctx, *, name: str = None):
 # ── Work ─────────────────────────────────────────────────────
 @bot.command()
 async def work(ctx):
-    cd = _on_cooldown(ctx.guild.id, ctx.author.id, "work", 3600)
+    cd = _on_cooldown(ctx.guild.id, ctx.author.id, "work", 20)
     if cd:
-        m, s = divmod(cd, 60)
-        await ctx.send(f"⏳ You're tired. Come back in **{m}m {s}s**.", delete_after=8)
+        await ctx.send(f"⏳ You're tired. Come back in **{cd}s**.", delete_after=8)
         return
     job = _current_job(ctx.guild.id, ctx.author.id)
     if job:
@@ -15999,7 +15999,7 @@ async def work(ctx):
         desc = f"You **{random.choice(gigs)}** and earned **{_fmt_money(earned)}**.\n*Get a real job with `,jobs` to earn a lot more.*"
     _add_earned(ctx.guild.id, ctx.author.id, earned)
     embed = discord.Embed(title=title, description=desc, color=discord.Color.green(), timestamp=discord.utils.utcnow())
-    embed.set_footer(text="Come back in 1 hour • TrapAI Economy")
+    embed.set_footer(text="Come back in 20 seconds • TrapAI Economy")
     await ctx.send(embed=embed)
 
 
@@ -17037,6 +17037,77 @@ async def duel(ctx, opponent: discord.Member = None, game: str = None, bet: int 
     view.message = await ctx.send(embed=embed, view=view)
 
 
+# ── Sports Mini-Games (Basketball / Archery / Cup Pong) ──────
+# All three follow the same shape as slots/dice above: bet against the
+# house, a weighted random outcome tier decides the multiplier, reserve
+# the bet up front and only ever add the payout back afterward.
+
+async def _play_sports_bet(ctx, bet, title, footer_tag, tiers):
+    """tiers: list of (threshold, multiplier, description, color) checked
+    in order against a random() roll — first threshold the roll is below
+    wins that tier. multiplier 0 = total loss, 1 = bet back, >1 = profit."""
+    if bet is None or bet <= 0:
+        await ctx.send(f"❌ Usage: `,{footer_tag.lower()} <bet>`", delete_after=6)
+        return
+    data = _eco(ctx.guild.id, ctx.author.id)
+    if bet > data["wallet"]:
+        await ctx.send(f"❌ You only have **{_fmt_money(data['wallet'])}**.", delete_after=6)
+        return
+    data["wallet"] -= bet
+    roll = random.random()
+    cumulative = 0.0
+    for threshold, mult, desc, color in tiers:
+        cumulative += threshold
+        if roll < cumulative:
+            break
+    win = int(bet * mult)
+    data["wallet"] += win
+    net = win - bet
+    GAMBLE_WINS.setdefault(ctx.guild.id, {})[ctx.author.id] = \
+        GAMBLE_WINS.setdefault(ctx.guild.id, {}).get(ctx.author.id, 0) + net
+    if net > 0:
+        result = f"{desc}\n🎉 **Won {_fmt_money(win)}**!"
+    elif net == 0:
+        result = f"{desc}\n🤝 **Bet returned.**"
+    else:
+        result = f"{desc}\n😢 **Lost {_fmt_money(bet)}**."
+    embed = discord.Embed(title=title, description=result, color=color, timestamp=discord.utils.utcnow())
+    embed.add_field(name="👛 Wallet", value=_fmt_money(data['wallet']), inline=True)
+    embed.set_footer(text=f"Bet: {_fmt_money(bet)} • TrapAI Casino")
+    await ctx.send(embed=embed)
+
+
+@bot.command(aliases=["bball"])
+async def basketball(ctx, bet: int = None):
+    """Shoot a bet on a basketball hoop. Usage: ,basketball <bet>"""
+    await _play_sports_bet(ctx, bet, "🏀 Basketball", "basketball", [
+        (0.15, 3.0, "🏀 **SWISH!** Nothing but net from downtown!", discord.Color.purple()),
+        (0.35, 1.5, "🏀 **It's in!** Good shot.", discord.Color.green()),
+        (0.50, 0.0, "🏀 **Airball!** Way off the mark.", discord.Color.red()),
+    ])
+
+
+@bot.command()
+async def archery(ctx, bet: int = None):
+    """Fire a bet at an archery target. Usage: ,archery <bet>"""
+    await _play_sports_bet(ctx, bet, "🏹 Archery", "archery", [
+        (0.10, 5.0, "🎯 **BULLSEYE!** Dead center!", discord.Color.purple()),
+        (0.25, 2.0, "🏹 **Inner ring!** Great shot.", discord.Color.green()),
+        (0.30, 1.0, "🏹 **Outer ring.** Bet returned.", discord.Color.blurple()),
+        (0.35, 0.0, "🏹 **Missed the target entirely!**", discord.Color.red()),
+    ])
+
+
+@bot.command(aliases=["pong"])
+async def cuppong(ctx, bet: int = None):
+    """Toss a bet into the cup. Usage: ,cuppong <bet>"""
+    await _play_sports_bet(ctx, bet, "🏓 Cup Pong", "cuppong", [
+        (0.25, 2.5, "🏓 **Perfect sink!** Straight in, no rim.", discord.Color.purple()),
+        (0.30, 1.5, "🏓 **Rattled in!** Off the rim but it counts.", discord.Color.green()),
+        (0.45, 0.0, "🏓 **Bounced right out.** Better luck next time.", discord.Color.red()),
+    ])
+
+
 # ── Rock Paper Scissors ──────────────────────────────────────
 @bot.command(aliases=["rps"])
 async def rockpaperscissors(ctx, choice: str = None):
@@ -17259,6 +17330,44 @@ async def eightball(ctx, *, question: str = None):
     await ctx.send(embed=embed)
 
 
+# ── 21 Questions ─────────────────────────────────────────────
+QUESTIONS_21 = [
+    "What's a fear you've never told anyone about?",
+    "What's the biggest risk you've ever taken?",
+    "What's something you believed as a kid that turned out to be false?",
+    "If you could relive one day of your life, which would it be?",
+    "What's a habit you're trying to break?",
+    "What's the best advice you've ever received?",
+    "What's something you're proud of that most people don't know about?",
+    "If money didn't matter, what would you do with your life?",
+    "What's a decision you regret the most?",
+    "Who has had the biggest influence on who you are today?",
+    "What's something you'd change about yourself if you could?",
+    "What's a moment that changed how you see the world?",
+    "What's your biggest goal for the next 5 years?",
+    "What's the kindest thing anyone's ever done for you?",
+    "What's a lie you told that you still think about?",
+    "What's something you want to be remembered for?",
+    "What's the hardest thing you've ever had to do?",
+    "What's a talent you have that nobody knows about?",
+    "What's something you're grateful for that you don't say out loud enough?",
+    "What's a question you wish people asked you more?",
+    "If you could give your younger self one piece of advice, what would it be?",
+]
+
+@bot.command(name="21questions", aliases=["21q", "deepquestion"])
+async def twentyonequestions(ctx):
+    """Drop a random deep/personal question to spark conversation. Usage: ,21questions"""
+    embed = discord.Embed(
+        title="❓ 21 Questions",
+        description=random.choice(QUESTIONS_21),
+        color=discord.Color.blurple(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_footer(text=f"Asked for {ctx.author.display_name} • TrapAI Games — no wrong answers")
+    await ctx.send(embed=embed)
+
+
 # ── Tic-Tac-Toe ──────────────────────────────────────────────
 class TicTacToeButton(discord.ui.Button):
     def __init__(self, row, col):
@@ -17423,7 +17532,7 @@ def _games_economy_embed(guild: discord.Guild) -> discord.Embed:
     embed.add_field(
         name="💵  Earn Money",
         value=(
-            "`,work`  ·  ⏳ 1 hour cooldown — pay depends on your job (see `,jobs`)\n"
+            "`,work`  ·  ⏳ 20 second cooldown — pay depends on your job (see `,jobs`)\n"
             "`,daily`  **$200–$500**  ·  ⏳ 24 hour cooldown\n"
             "`,weekly`  **$1,000–$2,500**  ·  ⏳ 7 day cooldown"
         ),
@@ -17528,6 +17637,15 @@ def _games_casino_embed(guild: discord.Guild) -> discord.Embed:
         ),
         inline=False
     )
+    embed.add_field(
+        name="🏀🏹🏓  Sports Bets",
+        value=(
+            "`,basketball <bet>` / `,bball` — swish for ×3, make it for ×1.5\n"
+            "`,archery <bet>` — bullseye pays ×5, inner ring ×2\n"
+            "`,cuppong <bet>` / `,pong` — perfect sink pays ×2.5"
+        ),
+        inline=False
+    )
     if guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
     embed.set_footer(text=f"TrapAI Casino  •  {guild.name}  •  Gamble responsibly")
@@ -17592,6 +17710,11 @@ def _games_fun_embed(guild: discord.Guild) -> discord.Embed:
             "Interactive button board — click to place your mark.\n"
             "2 minutes to finish the game or it times out."
         ),
+        inline=False
+    )
+    embed.add_field(
+        name="❓  21 Questions  —  `,21questions` / `,21q`",
+        value="Drops a random deep/personal question to spark real conversation. No wrong answers, no money involved.",
         inline=False
     )
     if guild.icon:
