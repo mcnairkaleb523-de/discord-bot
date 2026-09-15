@@ -358,8 +358,8 @@ _STYLE_AND_SCRIPT = """
   .cmd-icon { font-size: 1.3rem; }
   .cmd-card h3 { margin: 0; font-size: .95rem; font-weight: 700; color: #f2f3f5; }
   .cmd-tags { display: flex; flex-wrap: wrap; gap: .4rem; }
-  .cmd-tag { font-family: 'SFMono-Regular', Consolas, monospace; font-size: .72rem; background: rgba(255, 198, 41, .08);
-             color: var(--gold); border: 1px solid rgba(255, 198, 41, .18); border-radius: 6px; padding: .28rem .55rem; }
+  .cmd-tag { font-family: 'SFMono-Regular', Consolas, monospace; font-size: .72rem; background: rgba(155, 89, 182, .08);
+             color: var(--gold); border: 1px solid rgba(155, 89, 182, .18); border-radius: 6px; padding: .28rem .55rem; }
   .see-all-link { display: inline-block; margin-top: 1.8rem; color: var(--gold); font-weight: 700;
                    font-size: .9rem; text-decoration: none; transition: opacity .2s ease; }
   .see-all-link:hover { opacity: .8; }
@@ -372,7 +372,7 @@ _STYLE_AND_SCRIPT = """
                 max-width: 1000px; margin: 0 auto; }
   .trust-card { background: rgba(255, 255, 255, .03); border: 1px solid rgba(255, 255, 255, .06); border-radius: 14px;
                 padding: 1.6rem 1.4rem; text-align: left; transition: border-color .2s ease, transform .2s ease; }
-  .trust-card:hover { border-color: rgba(255, 198, 41, .35); transform: translateY(-2px); }
+  .trust-card:hover { border-color: rgba(155, 89, 182, .35); transform: translateY(-2px); }
   .trust-icon { font-size: 1.5rem; margin-bottom: .7rem; }
   .trust-card h3 { margin: 0 0 .4rem; font-size: .98rem; font-weight: 700; color: #f2f3f5; }
   .trust-card p { margin: 0; font-size: .85rem; line-height: 1.55; color: #8a8d94; }
@@ -458,7 +458,7 @@ _COMMANDS_PAGE_STYLE_AND_SCRIPT = """
     border: 1px solid rgba(255, 255, 255, .1); background: rgba(255, 255, 255, .04);
     color: #fff; font-size: .95rem; font-family: inherit;
   }
-  .search-input:focus { outline: none; border-color: var(--gold); box-shadow: 0 0 0 3px rgba(255, 198, 41, .15); }
+  .search-input:focus { outline: none; border-color: var(--gold); box-shadow: 0 0 0 3px rgba(155, 89, 182, .15); }
   .search-icon { position: absolute; left: 1rem; top: 50%; transform: translateY(-50%); opacity: .5; pointer-events: none; }
   .search-hint { font-size: .72rem; color: #5c5f66; margin-top: .6rem; }
   .search-hint kbd { font-family: monospace; background: rgba(255, 255, 255, .08); border-radius: 4px; padding: .05rem .35rem; }
@@ -470,7 +470,7 @@ _COMMANDS_PAGE_STYLE_AND_SCRIPT = """
     background: rgba(255, 255, 255, .04); border: 1px solid rgba(255, 255, 255, .08);
     border-radius: 20px; padding: .5rem 1rem; cursor: pointer; transition: all .15s ease; white-space: nowrap;
   }
-  .cat-tab:hover { border-color: rgba(255, 198, 41, .4); color: #fff; }
+  .cat-tab:hover { border-color: rgba(155, 89, 182, .4); color: #fff; }
   .cat-tab.active { background: var(--gold); color: #0b0b0d; border-color: var(--gold); }
   @media (max-width: 600px) {
     .cat-tabs { flex-wrap: nowrap; overflow-x: auto; justify-content: flex-start; -webkit-overflow-scrolling: touch;
@@ -485,7 +485,7 @@ _COMMANDS_PAGE_STYLE_AND_SCRIPT = """
     background: rgba(255, 255, 255, .03); border: 1px solid rgba(255, 255, 255, .07); border-radius: 14px;
     padding: 1.2rem; transition: border-color .15s ease, transform .15s ease;
   }
-  .cmd-page-card:hover { border-color: rgba(255, 198, 41, .3); transform: translateY(-2px); }
+  .cmd-page-card:hover { border-color: rgba(155, 89, 182, .3); transform: translateY(-2px); }
   .cmd-page-card.hidden { display: none; }
   .cmd-page-card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: .5rem; margin-bottom: .5rem; }
   .cmd-page-name { font-family: 'SFMono-Regular', Consolas, monospace; font-size: 1rem; font-weight: 700; color: var(--gold); }
@@ -1669,7 +1669,7 @@ _BILLING_PAGE_STYLE = """
     background: rgba(255, 255, 255, .04); border: 1px solid rgba(255, 255, 255, .1);
     border-radius: 20px; padding: .6rem 1.3rem; cursor: pointer; transition: all .15s ease;
   }
-  .product-tab:hover { border-color: rgba(255, 198, 41, .4); color: #fff; }
+  .product-tab:hover { border-color: rgba(155, 89, 182, .4); color: #fff; }
   .product-tab.active { background: var(--gold); color: #0b0b0d; border-color: var(--gold); }
   .product-desc { text-align: center; color: #8a8d94; font-size: .88rem; max-width: 520px; margin: 0 auto 1.5rem; }
 
@@ -1679,11 +1679,11 @@ _BILLING_PAGE_STYLE = """
     position: relative; background: rgba(255, 255, 255, .03); border: 2px solid rgba(255, 255, 255, .08);
     border-radius: 14px; padding: 1.4rem 1.2rem; cursor: pointer; transition: all .15s ease;
   }
-  .tier-card:hover { border-color: rgba(255, 198, 41, .35); transform: translateY(-2px); }
+  .tier-card:hover { border-color: rgba(155, 89, 182, .35); transform: translateY(-2px); }
   .tier-card input { position: absolute; opacity: 0; }
   .tier-card.best { border-color: var(--gold); }
   .tier-card input:checked + .tier-body { color: #fff; }
-  .tier-card:has(input:checked) { border-color: var(--gold); background: rgba(255, 198, 41, .06); }
+  .tier-card:has(input:checked) { border-color: var(--gold); background: rgba(155, 89, 182, .06); }
   .tier-best-badge {
     position: absolute; top: -11px; left: 50%; transform: translateX(-50%);
     background: var(--gold); color: #0b0b0d; font-size: .68rem; font-weight: 800;
