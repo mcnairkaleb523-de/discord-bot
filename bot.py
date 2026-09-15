@@ -1314,6 +1314,11 @@ CHAT_STATS: dict[int, dict[int, int]] = _load_depth(_load_data("chat_stats", {})
 # INVITE_CACHE[guild_id] = { code: uses } — session-only, re-derived from
 # the guild's live invites on_ready, doesn't need persistence.
 INVITE_CACHE: dict[int, dict[str, int]] = {}
+# VANITY_INVITE_CACHE[guild_id] = uses — the server's native vanity URL
+# (discord.gg/<code>, boost-level-3 only) is a completely separate API
+# object from the regular invites guild.invites() returns, with its own
+# use counter and no "inviter" field. Session-only, same as INVITE_CACHE.
+VANITY_INVITE_CACHE: dict[int, int] = {}
 # INVITE_DATA[guild_id][inviter_id] = { "uses": int, "logs": [str, ...] }
 INVITE_DATA: dict[int, dict[int, dict]] = _load_depth(_load_data("invite_data", {}), 2)
 
@@ -4385,6 +4390,14 @@ async def on_ready():
             INVITE_CACHE[guild.id] = {inv.code: inv.uses for inv in invites}
         except (discord.Forbidden, discord.HTTPException):
             pass
+        # The vanity URL (boost-level-3 only) is a separate API object with
+        # its own use counter, not included in guild.invites() at all.
+        if guild.vanity_url_code:
+            try:
+                vanity = await guild.vanity_invite()
+                VANITY_INVITE_CACHE[guild.id] = vanity.uses or 0
+            except (discord.Forbidden, discord.HTTPException):
+                pass
 
     # One-time startup work — on_ready can re-fire on gateway reconnects,
     # so guard resume logic to avoid double-scheduling jail/giveaway tasks.
@@ -4666,6 +4679,38 @@ async def on_member_join(member):
                 await inv_log_ch.send(embed=embed)
             except discord.HTTPException:
                 pass
+
+    elif guild.vanity_url_code:
+        # No regular invite use went up — check the vanity URL separately,
+        # since discord.gg/<vanity code> is a completely different API
+        # object from guild.invites() and never shows up in that list.
+        # There's no "inviter" for a vanity join (it's the server's own
+        # permanent link), so this only posts a log entry — nothing to
+        # credit on the per-inviter leaderboard.
+        try:
+            vanity = await guild.vanity_invite()
+        except (discord.Forbidden, discord.HTTPException):
+            vanity = None
+        if vanity:
+            old_vanity_uses = VANITY_INVITE_CACHE.get(guild.id, 0)
+            VANITY_INVITE_CACHE[guild.id] = vanity.uses or 0
+            if (vanity.uses or 0) > old_vanity_uses:
+                inv_log_ch = _resolve_log_channel(guild, "invites")
+                if inv_log_ch:
+                    embed = discord.Embed(
+                        title="📨 Invite Used",
+                        description="Joined via the server's **vanity invite** — no specific inviter to credit.",
+                        color=discord.Color.blurple(),
+                        timestamp=discord.utils.utcnow()
+                    )
+                    embed.add_field(name="👤 New Member", value=f"{member.mention} (`{member.id}`)", inline=False)
+                    embed.add_field(name="🔗 Invite Code", value=f"`discord.gg/{guild.vanity_url_code}`", inline=True)
+                    embed.set_thumbnail(url=member.display_avatar.url)
+                    embed.set_footer(text=f"TrapAI Invite Tracker • {guild.name}")
+                    try:
+                        await inv_log_ch.send(embed=embed)
+                    except discord.HTTPException:
+                        pass
 
 
 @bot.event
