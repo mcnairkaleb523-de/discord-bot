@@ -8949,8 +8949,36 @@ async def lock(ctx):
 @bot.command()
 @_permitted_check(manage_channels=True)
 async def unlock(ctx):
-    await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=True)
-    await ctx.send("🔓 Channel unlocked")
+    """
+    Unlock the channel — clears the send_messages deny ,lock set (rather
+    than force-allowing it, so a channel meant to stay read-only for other
+    reasons doesn't get force-opened), and also clears Unverified's own
+    view/send block on this specific channel (from ,setup or
+    ,lockunverified), so unverified members can actually use it too once
+    it's unlocked instead of still being blocked by that separate,
+    role-level override. Usage: ,unlock
+    """
+    guild = ctx.guild
+    channel = ctx.channel
+
+    ow = channel.overwrites_for(guild.default_role)
+    ow.send_messages = None
+    if ow.is_empty():
+        await channel.set_permissions(guild.default_role, overwrite=None)
+    else:
+        await channel.set_permissions(guild.default_role, overwrite=ow)
+
+    unverified_role = discord.utils.get(guild.roles, name=UNVERIFIED_ROLE)
+    if unverified_role:
+        uow = channel.overwrites_for(unverified_role)
+        uow.view_channel = None
+        uow.send_messages = None
+        if uow.is_empty():
+            await channel.set_permissions(unverified_role, overwrite=None)
+        else:
+            await channel.set_permissions(unverified_role, overwrite=uow)
+
+    await ctx.send("🔓 Channel unlocked (including for unverified members)")
     await log(ctx.guild, "mod", "Channel Unlocked", None, discord.Color.green(),
               fields=[("🛡 Moderator", f"{ctx.author.mention} (`{ctx.author.id}`)", True), ("🔓 Channel", ctx.channel.mention, True)],
               actor=ctx.author)
