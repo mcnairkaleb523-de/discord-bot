@@ -1045,7 +1045,7 @@ WHOLE_BOT_PREMIUM_ONLY_COMMANDS = {
     "balance", "jobs", "setjob", "daily", "weekly", "work", "rob", "give", "deposit", "withdraw",
     "leaderboard", "gamblers", "slots", "blackjack", "coinflip", "dice", "duel",
     "basketball", "archery", "cuppong", "8ball",
-    "trivia", "hangman", "wordle", "tictactoe", "connect4", "checkers", "numguess", "rockpaperscissors", "highlow",
+    "trivia", "hangman", "wordle", "tictactoe", "connect4", "checkers", "chess", "numguess", "rockpaperscissors", "highlow",
     "crash", "21questions", "games",
     # Birthdays (whole category)
     "birthday", "removebirthday", "setbirthday", "setbirthdaychannel",
@@ -3565,7 +3565,7 @@ HELP_CATEGORIES = [
     ('📊', 'Stats & Info', ['whois', 'chatstats', 'serverstats', 'invites', 'invitelogs', 'inviteleaderboard', 'setinvite', 'milestones', 'setmilestone', 'testmilestone', 'ping', 'exitsurveys']),
     ('✅', 'Vouch', ['vouch', 'unvouch', 'cancelvouch', 'pendingvouches', 'vouches', 'vouchleaderboard', 'vouchstats', 'vouchconfig']),
     ('🎉', 'Giveaways & Polls', ['giveaway', 'giveawayend', 'giveaways', 'poll', 'pollend']),
-    ('💰', 'Economy & Games', ['balance', 'jobs', 'setjob', 'daily', 'weekly', 'work', 'rob', 'give', 'deposit', 'withdraw', 'leaderboard', 'gamblers', 'slots', 'blackjack', 'coinflip', 'dice', 'duel', 'basketball', 'archery', 'cuppong', '8ball', 'trivia', 'hangman', 'wordle', 'tictactoe', 'connect4', 'checkers', 'numguess', 'rockpaperscissors', 'highlow', 'crash', '21questions', 'games', 'shop', 'buyrole', 'setroleshop']),
+    ('💰', 'Economy & Games', ['balance', 'jobs', 'setjob', 'daily', 'weekly', 'work', 'rob', 'give', 'deposit', 'withdraw', 'leaderboard', 'gamblers', 'slots', 'blackjack', 'coinflip', 'dice', 'duel', 'basketball', 'archery', 'cuppong', '8ball', 'trivia', 'hangman', 'wordle', 'tictactoe', 'connect4', 'checkers', 'chess', 'numguess', 'rockpaperscissors', 'highlow', 'crash', '21questions', 'games', 'shop', 'buyrole', 'setroleshop']),
     ('🎂', 'Birthdays', ['birthday', 'removebirthday', 'setbirthday', 'setbirthdaychannel', 'birthdaylist', 'settimezone']),
     ('🚀', 'Boosts & Vanity', ['setboostchannel', 'setvanitycode', 'setvanityrole', 'vanityconfig']),
     ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist', 'acceptstaff', 'denystaff', 'setstaffrules', 'staffleaderboard', 'staffstats', 'staffwarn', 'staffstrike', 'staffwarnings', 'staffstrikes', 'clearstaffwarnings', 'clearstaffstrikes']),
@@ -17900,6 +17900,126 @@ async def checkers(ctx, opponent: discord.Member = None):
         await ctx.send(embed=embed)
 
 
+# ── Chess ────────────────────────────────────────────────────
+# Full standard chess rules (castling, en passant, promotion, check/
+# checkmate/stalemate/draw detection) via the python-chess library
+# rather than a hand-rolled engine — chess's legal-move rules are
+# extensive enough that reimplementing them from scratch risks subtle
+# rule bugs a well-tested library doesn't have.
+try:
+    import chess as chess_lib
+    CHESS_AVAILABLE = True
+except ImportError:
+    chess_lib = None
+    CHESS_AVAILABLE = False
+
+
+def _chess_render(board) -> str:
+    return f"```\n{board.unicode(borders=False, empty_square='·')}\n```"
+
+
+def _chess_parse_move(board, text: str):
+    text = text.strip()
+    try:
+        return board.parse_san(text)
+    except ValueError:
+        pass
+    try:
+        move = chess_lib.Move.from_uci(text.lower())
+    except ValueError:
+        return None
+    return move if move in board.legal_moves else None
+
+
+@bot.command(name="chess")
+async def play_chess(ctx, opponent: discord.Member = None):
+    """
+    Challenge another member to Chess — full standard rules via a real
+    chess engine (castling, en passant, promotion, check/checkmate/
+    stalemate all enforced). Move using algebraic notation (`e4`, `Nf3`,
+    `O-O`) or UCI (`e2e4`, `e7e8q` for promotion). Say `resign` to forfeit.
+    Usage: ,chess @opponent
+    """
+    if not CHESS_AVAILABLE:
+        await ctx.send("❌ Chess isn't available on this bot right now — the `chess` library isn't installed.", delete_after=10)
+        return
+    if opponent is None or opponent == ctx.author or opponent.bot:
+        await ctx.send("❌ Usage: `,chess @opponent` (must be a real member, not a bot)", delete_after=6)
+        return
+
+    board = chess_lib.Board()
+    players = {chess_lib.WHITE: ctx.author, chess_lib.BLACK: opponent}
+
+    embed = discord.Embed(
+        title="♟️ Chess",
+        description=(
+            f"{_chess_render(board)}\n"
+            f"{ctx.author.mention} ⚪ vs {opponent.mention} ⚫\n\n"
+            "Move using algebraic (`e4`, `Nf3`, `O-O`) or UCI (`e2e4`) notation. Say `resign` to forfeit.\n\n"
+            f"It's {ctx.author.mention}'s turn!"
+        ),
+        color=discord.Color.blurple(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_footer(text="TrapAI Games — 5 minutes per move")
+    await ctx.send(embed=embed)
+
+    while True:
+        current_player = players[board.turn]
+
+        def check(m, expected=current_player):
+            content = m.content.strip()
+            return (m.author.id == expected.id and m.channel.id == ctx.channel.id and
+                    1 <= len(content) <= 8 and " " not in content)
+
+        try:
+            reply = await bot.wait_for("message", check=check, timeout=300)
+        except asyncio.TimeoutError:
+            await ctx.send(f"⏰ {current_player.mention} took too long — game ended.", delete_after=10)
+            return
+
+        text = reply.content.strip()
+        if text.lower() == "resign":
+            winner = opponent if current_player == ctx.author else ctx.author
+            embed = discord.Embed(
+                title="🏳️ Chess — Resignation",
+                description=f"{_chess_render(board)}\n\n{current_player.display_name} resigned. **{winner.display_name} wins!**",
+                color=discord.Color.green(),
+                timestamp=discord.utils.utcnow()
+            )
+            await ctx.send(embed=embed)
+            return
+
+        move = _chess_parse_move(board, text)
+        if move is None:
+            await ctx.send(f"❌ Not a legal move: `{text}`. Try algebraic (`e4`, `Nf3`) or UCI (`e2e4`).", delete_after=6)
+            continue
+
+        board.push(move)
+
+        outcome = board.outcome()
+        if outcome is not None:
+            if outcome.winner is not None:
+                winner = players[outcome.winner]
+                desc = f"{_chess_render(board)}\n\n♟️ Checkmate! **{winner.display_name} wins!**"
+            else:
+                reason = outcome.termination.name.replace("_", " ").title()
+                desc = f"{_chess_render(board)}\n\n🤝 **Draw** ({reason})"
+            embed = discord.Embed(title="🏆 Chess — Game Over", description=desc, color=discord.Color.green(), timestamp=discord.utils.utcnow())
+            await ctx.send(embed=embed)
+            return
+
+        next_player = players[board.turn]
+        check_note = " **Check!**" if board.is_check() else ""
+        embed = discord.Embed(
+            title="♟️ Chess",
+            description=f"{_chess_render(board)}\n\nIt's {next_player.mention}'s turn!{check_note}",
+            color=discord.Color.blurple(),
+            timestamp=discord.utils.utcnow()
+        )
+        await ctx.send(embed=embed)
+
+
 # ============================================================
 # ,games  — interactive multi-page game directory
 # ============================================================
@@ -18171,6 +18291,15 @@ def _games_fun_embed(guild: discord.Guild) -> discord.Embed:
             "Challenge another member to Checkers.\n"
             "Move by replying `<from> <to>`, e.g. `c3 b4`.\n"
             "Simplified rules — captures optional, single jumps only."
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="♟️  Chess  —  `,chess @user`",
+        value=(
+            "Challenge another member to full-rules Chess.\n"
+            "Move with algebraic (`e4`, `Nf3`, `O-O`) or UCI (`e2e4`) notation, or say `resign`.\n"
+            "Castling, en passant, promotion, and checkmate are all enforced."
         ),
         inline=False
     )
