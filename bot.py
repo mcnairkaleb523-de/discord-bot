@@ -1045,7 +1045,7 @@ WHOLE_BOT_PREMIUM_ONLY_COMMANDS = {
     "balance", "jobs", "setjob", "daily", "weekly", "work", "rob", "give", "deposit", "withdraw",
     "leaderboard", "gamblers", "slots", "blackjack", "coinflip", "dice", "duel",
     "basketball", "archery", "cuppong", "8ball",
-    "trivia", "hangman", "wordle", "tictactoe", "numguess", "rockpaperscissors", "highlow",
+    "trivia", "hangman", "wordle", "tictactoe", "connect4", "numguess", "rockpaperscissors", "highlow",
     "crash", "21questions", "games",
     # Birthdays (whole category)
     "birthday", "removebirthday", "setbirthday", "setbirthdaychannel",
@@ -3565,7 +3565,7 @@ HELP_CATEGORIES = [
     ('📊', 'Stats & Info', ['whois', 'chatstats', 'serverstats', 'invites', 'invitelogs', 'inviteleaderboard', 'setinvite', 'milestones', 'setmilestone', 'testmilestone', 'ping', 'exitsurveys']),
     ('✅', 'Vouch', ['vouch', 'unvouch', 'cancelvouch', 'pendingvouches', 'vouches', 'vouchleaderboard', 'vouchstats', 'vouchconfig']),
     ('🎉', 'Giveaways & Polls', ['giveaway', 'giveawayend', 'giveaways', 'poll', 'pollend']),
-    ('💰', 'Economy & Games', ['balance', 'jobs', 'setjob', 'daily', 'weekly', 'work', 'rob', 'give', 'deposit', 'withdraw', 'leaderboard', 'gamblers', 'slots', 'blackjack', 'coinflip', 'dice', 'duel', 'basketball', 'archery', 'cuppong', '8ball', 'trivia', 'hangman', 'wordle', 'tictactoe', 'numguess', 'rockpaperscissors', 'highlow', 'crash', '21questions', 'games', 'shop', 'buyrole', 'setroleshop']),
+    ('💰', 'Economy & Games', ['balance', 'jobs', 'setjob', 'daily', 'weekly', 'work', 'rob', 'give', 'deposit', 'withdraw', 'leaderboard', 'gamblers', 'slots', 'blackjack', 'coinflip', 'dice', 'duel', 'basketball', 'archery', 'cuppong', '8ball', 'trivia', 'hangman', 'wordle', 'tictactoe', 'connect4', 'numguess', 'rockpaperscissors', 'highlow', 'crash', '21questions', 'games', 'shop', 'buyrole', 'setroleshop']),
     ('🎂', 'Birthdays', ['birthday', 'removebirthday', 'setbirthday', 'setbirthdaychannel', 'birthdaylist', 'settimezone']),
     ('🚀', 'Boosts & Vanity', ['setboostchannel', 'setvanitycode', 'setvanityrole', 'vanityconfig']),
     ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist', 'acceptstaff', 'denystaff', 'setstaffrules', 'staffleaderboard', 'staffstats', 'staffwarn', 'staffstrike', 'staffwarnings', 'staffstrikes', 'clearstaffwarnings', 'clearstaffstrikes']),
@@ -17591,6 +17591,132 @@ async def tictactoe(ctx, opponent: discord.Member = None):
     await ctx.send(embed=embed, view=view)
 
 
+# ── Connect Four ─────────────────────────────────────────────
+# Only 7 buttons (one per column, drop-piece style) rather than 42 —
+# Discord views cap at 5 buttons per row / 25 total, so a full 6×7 grid
+# of individual cell buttons won't fit. The board itself is rendered as
+# emoji text in the embed instead.
+class ConnectFourView(discord.ui.View):
+    ROWS, COLS = 6, 7
+
+    def __init__(self, player_r, player_y):
+        super().__init__(timeout=180)
+        self.player_r = player_r
+        self.player_y = player_y
+        self.current = player_r
+        self.board = [[None] * self.COLS for _ in range(self.ROWS)]
+        self.message = None
+        for col in range(self.COLS):
+            self.add_item(self._make_button(col))
+
+    def _render(self):
+        symbols = {"R": "🔴", "Y": "🟡", None: "⚪"}
+        return "\n".join("".join(symbols[cell] for cell in row) for row in self.board)
+
+    def _drop(self, col):
+        for row in range(self.ROWS - 1, -1, -1):
+            if self.board[row][col] is None:
+                self.board[row][col] = "R" if self.current == self.player_r else "Y"
+                return row
+        return None
+
+    def _col_full(self, col):
+        return self.board[0][col] is not None
+
+    def _is_full(self):
+        return all(self.board[0][c] is not None for c in range(self.COLS))
+
+    def _check_winner(self, row, col, mark):
+        for dr, dc in ((0, 1), (1, 0), (1, 1), (1, -1)):
+            count = 1
+            r, c = row + dr, col + dc
+            while 0 <= r < self.ROWS and 0 <= c < self.COLS and self.board[r][c] == mark:
+                count += 1
+                r += dr; c += dc
+            r, c = row - dr, col - dc
+            while 0 <= r < self.ROWS and 0 <= c < self.COLS and self.board[r][c] == mark:
+                count += 1
+                r -= dr; c -= dc
+            if count >= 4:
+                return True
+        return False
+
+    def _make_button(self, col):
+        async def callback(interaction: discord.Interaction):
+            if interaction.user != self.current:
+                await interaction.response.send_message("❌ It's not your turn!", ephemeral=True)
+                return
+            row = self._drop(col)
+            if row is None:
+                await interaction.response.send_message("❌ That column is full.", ephemeral=True)
+                return
+            mark = "R" if self.current == self.player_r else "Y"
+            mark_emoji = "🔴" if mark == "R" else "🟡"
+
+            if self._check_winner(row, col, mark):
+                for child in self.children:
+                    child.disabled = True
+                embed = discord.Embed(
+                    title="🏆 Connect Four — Game Over",
+                    description=f"{self._render()}\n\n{mark_emoji} **{self.current.display_name} wins!**",
+                    color=discord.Color.green(),
+                    timestamp=discord.utils.utcnow()
+                )
+                await interaction.response.edit_message(embed=embed, view=self)
+                return
+
+            if self._is_full():
+                for child in self.children:
+                    child.disabled = True
+                embed = discord.Embed(
+                    title="🤝 Connect Four — Draw!",
+                    description=self._render(),
+                    color=discord.Color.blurple(),
+                    timestamp=discord.utils.utcnow()
+                )
+                await interaction.response.edit_message(embed=embed, view=self)
+                return
+
+            self.current = self.player_y if self.current == self.player_r else self.player_r
+            for i, child in enumerate(self.children):
+                child.disabled = self._col_full(i)
+            embed = discord.Embed(
+                title="🔴🟡 Connect Four",
+                description=(
+                    f"{self._render()}\n\n"
+                    f"It's {self.current.mention}'s turn! ({'🔴' if self.current == self.player_r else '🟡'})"
+                ),
+                color=discord.Color.blurple(),
+                timestamp=discord.utils.utcnow()
+            )
+            await interaction.response.edit_message(embed=embed, view=self)
+
+        button = discord.ui.Button(label=str(col + 1), style=discord.ButtonStyle.secondary, row=0 if col < 4 else 1)
+        button.callback = callback
+        return button
+
+
+@bot.command(aliases=["c4", "connectfour"])
+async def connect4(ctx, opponent: discord.Member = None):
+    """Challenge another member to Connect Four. Usage: ,connect4 @opponent"""
+    if opponent is None or opponent == ctx.author or opponent.bot:
+        await ctx.send("❌ Usage: `,connect4 @opponent` (must be a real member, not a bot)", delete_after=6)
+        return
+    view = ConnectFourView(ctx.author, opponent)
+    embed = discord.Embed(
+        title="🔴🟡 Connect Four",
+        description=(
+            f"{view._render()}\n\n"
+            f"{ctx.author.mention} 🔴 vs {opponent.mention} 🟡\n\n"
+            f"It's {ctx.author.mention}'s turn!"
+        ),
+        color=discord.Color.blurple(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_footer(text="TrapAI Games — click a column number to drop your piece")
+    view.message = await ctx.send(embed=embed, view=view)
+
+
 # ============================================================
 # ,games  — interactive multi-page game directory
 # ============================================================
@@ -17844,6 +17970,15 @@ def _games_fun_embed(guild: discord.Guild) -> discord.Embed:
             "Challenge another member to a 3×3 Tic-Tac-Toe match.\n"
             "Interactive button board — click to place your mark.\n"
             "2 minutes to finish the game or it times out."
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="🔴🟡  Connect Four  —  `,connect4 @user` / `,c4`",
+        value=(
+            "Challenge another member to Connect Four.\n"
+            "Click a column number to drop your piece — get 4 in a row to win.\n"
+            "3 minutes to finish the game or it times out."
         ),
         inline=False
     )
