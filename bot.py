@@ -3565,7 +3565,7 @@ HELP_CATEGORIES = [
     ('📊', 'Stats & Info', ['whois', 'chatstats', 'serverstats', 'invites', 'invitelogs', 'inviteleaderboard', 'setinvite', 'milestones', 'setmilestone', 'testmilestone', 'ping', 'exitsurveys']),
     ('✅', 'Vouch', ['vouch', 'unvouch', 'cancelvouch', 'pendingvouches', 'vouches', 'vouchleaderboard', 'vouchstats', 'vouchconfig']),
     ('🎉', 'Giveaways & Polls', ['giveaway', 'giveawayend', 'giveaways', 'poll', 'pollend']),
-    ('💰', 'Economy & Games', ['balance', 'jobs', 'setjob', 'daily', 'weekly', 'work', 'rob', 'give', 'deposit', 'withdraw', 'leaderboard', 'gamblers', 'slots', 'blackjack', 'coinflip', 'dice', 'duel', 'basketball', 'archery', 'cuppong', '8ball', 'trivia', 'hangman', 'wordle', 'tictactoe', 'connect4', 'checkers', 'chess', 'numguess', 'rockpaperscissors', 'highlow', 'crash', '21questions', 'games', 'shop', 'buyrole', 'setroleshop']),
+    ('💰', 'Economy & Games', ['balance', 'jobs', 'setjob', 'daily', 'weekly', 'work', 'rob', 'give', 'deposit', 'withdraw', 'leaderboard', 'gamblers', 'slots', 'blackjack', 'coinflip', 'dice', 'duel', 'basketball', 'archery', 'cuppong', '8ball', 'trivia', 'hangman', 'wordle', 'tictactoe', 'connect4', 'checkers', 'chess', 'numguess', 'rockpaperscissors', 'highlow', 'crash', '21questions', 'games', 'shop', 'buyrole', 'setroleshop', 'buyfgvc', 'setvcshop', 'storefront']),
     ('🎂', 'Birthdays', ['birthday', 'removebirthday', 'setbirthday', 'setbirthdaychannel', 'birthdaylist', 'settimezone']),
     ('🚀', 'Boosts & Vanity', ['setboostchannel', 'setvanitycode', 'setvanityrole', 'vanityconfig']),
     ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist', 'acceptstaff', 'denystaff', 'setstaffrules', 'staffleaderboard', 'staffstats', 'staffwarn', 'staffstrike', 'staffwarnings', 'staffstrikes', 'clearstaffwarnings', 'clearstaffstrikes']),
@@ -15808,9 +15808,20 @@ GAMBLE_WINS: dict[int, dict[int, int]] = _load_depth(_load_data("gamble_wins", {
 # nothing here grants moderation power.
 ROLE_SHOP: dict[int, dict[int, int]] = _load_depth(_load_data("role_shop", {}), 2)
 
+# VC_SHOP[guild_id] = price_cents — the price of a custom-named "FG VC"
+# (a permanent, server-visible voice channel named whatever the buyer
+# wants) via ,buyfgvc, managed with ,setvcshop. Same real-money-via-Stripe
+# pattern as ROLE_SHOP; fulfilled by oauth_server.py creating the channel
+# directly over the Discord REST API once payment confirms.
+VC_SHOP: dict[int, int] = _load_data("vc_shop", {})
+VC_SHOP = {int(k): v for k, v in VC_SHOP.items()}
+
 
 def _save_role_shop():
     _save_data("role_shop", _dump_depth(ROLE_SHOP, 2))
+
+def _save_vc_shop():
+    _save_data("vc_shop", {str(k): v for k, v in VC_SHOP.items()})
 
 def _eco(guild_id: int, user_id: int) -> dict:
     return ECONOMY.setdefault(guild_id, {}).setdefault(user_id, {"wallet": 0, "bank": 0})
@@ -16288,6 +16299,152 @@ async def setroleshop(ctx, action: str = None, role: discord.Role = None, price:
         await ctx.send(f"✅ {role.mention} removed from the shop.")
     else:
         await ctx.send("❌ Unknown action. Use `add`, `remove`, or `list`.", delete_after=8)
+
+
+@bot.command()
+@_permitted_check(administrator=True)
+async def setvcshop(ctx, price: str = None):
+    """
+    Set the price of a "FG VC" — a permanent, custom-named voice channel
+    members can buy for their friend group with real money (Stripe).
+    Usage:
+      ,setvcshop <price>   — e.g. `,setvcshop 4.99`
+      ,setvcshop off       — take FG VCs off sale
+      ,setvcshop           — show current price
+    """
+    guild = ctx.guild
+    if price is None:
+        current = VC_SHOP.get(guild.id)
+        await ctx.send(f"💰 FG VC price: **${current / 100:,.2f}**" if current else "📭 FG VCs aren't for sale yet. Use `,setvcshop <price>`.")
+        return
+    if price.lower() == "off":
+        VC_SHOP.pop(guild.id, None)
+        _save_vc_shop()
+        await ctx.send("✅ FG VCs are no longer for sale.")
+        return
+    try:
+        amount = float(price)
+    except ValueError:
+        await ctx.send("❌ Usage: `,setvcshop <price>` (e.g. `4.99`) or `,setvcshop off`.", delete_after=8)
+        return
+    if amount < 0.50:
+        await ctx.send("❌ Price must be at least `$0.50`.", delete_after=6)
+        return
+    if not BILLING_CONFIGURED:
+        await ctx.send("❌ Billing isn't configured on this bot yet — ask whoever runs it to finish setting up Stripe before listing FG VCs.", delete_after=12)
+        return
+    VC_SHOP[guild.id] = round(amount * 100)
+    _save_vc_shop()
+    await ctx.send(f"✅ FG VCs are now for sale for **${amount:,.2f}**.")
+
+
+@bot.command(aliases=["buyfg"])
+async def buyfgvc(ctx, *, channel_name: str = None):
+    """
+    Buy a permanent, custom-named "FG VC" (voice channel) for your friend
+    group with real money — DMs you a secure Stripe checkout link. The
+    channel is created automatically within moments of payment confirming.
+    Usage: ,buyfgvc <channel name>
+    """
+    price_cents = VC_SHOP.get(ctx.guild.id)
+    if price_cents is None:
+        await ctx.send("❌ FG VCs aren't for sale here. See `,storefront` for what's available.", delete_after=8)
+        return
+    if not channel_name or not channel_name.strip():
+        await ctx.send("❌ Usage: `,buyfgvc <channel name>` — e.g. `,buyfgvc The Gang VC`", delete_after=8)
+        return
+    channel_name = channel_name.strip()[:100]
+    if not BILLING_CONFIGURED:
+        await ctx.send("❌ Billing isn't configured on this bot yet — ask whoever runs it to finish setting up Stripe.", delete_after=12)
+        return
+
+    data, error = await _billing_api_post("/internal/vcshop/checkout-link", {
+        "guild_id": ctx.guild.id, "channel_name": channel_name,
+        "discord_user_id": ctx.author.id, "price_cents": price_cents,
+    })
+    if error:
+        await ctx.send(f"❌ Couldn't start checkout: {error}", delete_after=12)
+        return
+
+    checkout_url = data["url"]
+    embed = discord.Embed(
+        title=f'🎤 Checkout — "{channel_name}" FG VC',
+        description=(
+            f"Click below to buy **\"{channel_name}\"** for **${price_cents / 100:,.2f}** securely via Stripe.\n\n"
+            f"[Complete Checkout]({checkout_url})\n\n"
+            "The channel is created automatically the moment payment confirms."
+        ),
+        color=discord.Color.purple(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_footer(text="TrapAI never sees your card details — Stripe handles all payment info.")
+
+    try:
+        await ctx.author.send(embed=embed)
+        await ctx.send(f"📨 {ctx.author.mention} Check your DMs for your secure checkout link.")
+    except (discord.Forbidden, discord.HTTPException):
+        await ctx.send(embed=embed)  # DMs closed — post it here instead
+
+    await log(ctx.guild, "roles", "FG VC Checkout Started", None, discord.Color.purple(),
+              fields=[
+                  ("👤 Member", f"{ctx.author.mention} (`{ctx.author.id}`)", True),
+                  ("🎤 Channel", f'"{channel_name}"', True),
+                  ("💰 Price",  f"${price_cents / 100:,.2f}",                True),
+              ],
+              actor=ctx.author, target=ctx.author)
+
+
+@bot.command(aliases=["store"])
+async def storefront(ctx):
+    """Everything purchasable in/around this server, in one place. Usage: ,storefront"""
+    guild = ctx.guild
+    embed = discord.Embed(
+        title=f"🛒 {guild.name} Storefront",
+        description="Everything you can buy here — all real-money purchases go through secure Stripe checkout.",
+        color=discord.Color.purple(),
+        timestamp=discord.utils.utcnow()
+    )
+
+    role_listings = ROLE_SHOP.get(guild.id, {})
+    if role_listings:
+        lines = []
+        for role_id, price_cents in sorted(role_listings.items(), key=lambda kv: kv[1]):
+            role = guild.get_role(role_id)
+            if role:
+                lines.append(f"➡️ {role.mention} — **${price_cents / 100:,.2f}**")
+        embed.add_field(
+            name="🏷️ Roles — `,buyrole @role`",
+            value="\n".join(lines) if lines else "*Nothing for sale right now.*",
+            inline=False
+        )
+    else:
+        embed.add_field(name="🏷️ Roles", value="*Nothing for sale right now. Staff: `,setroleshop add @role <price>`*", inline=False)
+
+    vc_price = VC_SHOP.get(guild.id)
+    embed.add_field(
+        name="🎤 FG VCs — `,buyfgvc <name>`",
+        value=(f"A permanent, custom-named voice channel for your friend group — **${vc_price / 100:,.2f}**"
+               if vc_price else "*Not for sale right now. Staff: `,setvcshop <price>`*"),
+        inline=False
+    )
+
+    if BILLING_API_URL:
+        embed.add_field(
+            name="🤖 TrapAI For Your Own Server",
+            value=f"Want this bot in your own server? **[Get TrapAI here]({BILLING_API_URL}/checkout)**",
+            inline=False
+        )
+
+    embed.add_field(
+        name="🎫 Need Something Else?",
+        value="Open a ticket and staff will help you out — `,tickets` if a panel isn't already posted.",
+        inline=False
+    )
+
+    embed.set_footer(text="TrapAI never sees your card details — Stripe handles all payment info.")
+    if guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
+    await ctx.send(embed=embed)
 
 
 # ── Economy Leaderboard ──────────────────────────────────────

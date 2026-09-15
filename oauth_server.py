@@ -1387,6 +1387,32 @@ def _create_role_checkout_session_sync(guild_id: str, role_id: str, role_name: s
     )
 
 
+def _create_vc_checkout_session_sync(guild_id: str, channel_name: str, price_cents: int, discord_user_id: str, base_url: str):
+    """Same inline price_data pattern as _create_role_checkout_session_sync
+    — the price comes from bot.py's ,setvcshop, not a pre-created Stripe
+    Price. One-time payment for a permanent, custom-named 'FG VC'."""
+    metadata = {
+        "kind": "fg_vc_purchase",
+        "guild_id": str(guild_id), "discord_user_id": str(discord_user_id),
+        "channel_name": channel_name[:100],
+    }
+    return stripe.checkout.Session.create(
+        mode="payment",
+        line_items=[{
+            "price_data": {
+                "currency": "usd",
+                "product_data": {"name": f'"{channel_name}" FG VC'},
+                "unit_amount": price_cents,
+            },
+            "quantity": 1,
+        }],
+        success_url=f"{base_url}/checkout/success?session_id={{CHECKOUT_SESSION_ID}}",
+        cancel_url=f"{base_url}/checkout/cancel",
+        metadata=metadata,
+        client_reference_id=str(guild_id),
+    )
+
+
 def _product_tier_for_price_id(price_id: str):
     for key, pid in STRIPE_PRICE_IDS.items():
         if pid == price_id:
@@ -1458,10 +1484,83 @@ async def _handle_role_purchase_completed(obj: dict, session: ClientSession):
     ))
 
 
+FG_VC_CATEGORY_NAME = "🎤 FG VCs"
+
+
+async def _find_or_create_category(session: ClientSession, guild_id: str, name: str):
+    headers = {"Authorization": f"Bot {BOT_TOKEN}"}
+    async with session.get(f"{DISCORD_API}/guilds/{guild_id}/channels", headers=headers) as resp:
+        if resp.status != 200:
+            log.warning("Fetching channels for guild %s failed (%s): %s", guild_id, resp.status, await resp.text())
+            return None
+        channels = await resp.json()
+    for ch in channels:
+        if ch.get("type") == 4 and ch.get("name") == name:  # 4 = GUILD_CATEGORY
+            return ch["id"]
+    headers2 = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
+    async with session.post(f"{DISCORD_API}/guilds/{guild_id}/channels", headers=headers2, json={"name": name, "type": 4}) as resp2:
+        if resp2.status not in (200, 201):
+            log.warning("Creating category %s in guild %s failed (%s): %s", name, guild_id, resp2.status, await resp2.text())
+            return None
+        data = await resp2.json()
+        return data["id"]
+
+
+async def _create_fg_vc(session: ClientSession, guild_id: str, channel_name: str):
+    """Creates a permanent, custom-named voice channel — visible/joinable
+    server-wide, same cosmetic-perk spirit as the booster custom-role
+    system, not a permission-gated private room (that would need ongoing
+    invite-list management this bot doesn't otherwise provide)."""
+    category_id = await _find_or_create_category(session, guild_id, FG_VC_CATEGORY_NAME)
+    headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
+    payload = {"name": channel_name[:100], "type": 2}  # 2 = GUILD_VOICE
+    if category_id:
+        payload["parent_id"] = category_id
+    async with session.post(f"{DISCORD_API}/guilds/{guild_id}/channels", headers=headers, json=payload) as resp:
+        if resp.status not in (200, 201):
+            log.warning("Creating FG VC '%s' in guild %s failed (%s): %s", channel_name, guild_id, resp.status, await resp.text())
+            return None
+        data = await resp.json()
+        return data["id"]
+
+
+async def _handle_fg_vc_purchase_completed(obj: dict, session: ClientSession):
+    """Fulfillment for the FG VC shop (bot.py's ,buyfgvc) — creates the
+    voice channel straight over Discord's REST API via the bot token, no
+    live gateway connection or shared filesystem with bot.py needed. Runs
+    off checkout.session.completed only, per Stripe's own guidance."""
+    metadata = obj.get("metadata") or {}
+    guild_id = metadata.get("guild_id")
+    discord_user_id = metadata.get("discord_user_id")
+    channel_name = metadata.get("channel_name")
+    if not (guild_id and discord_user_id and channel_name):
+        log.warning("fg_vc_purchase checkout.session.completed missing metadata on session %s", obj.get("id"))
+        return
+
+    channel_id = await _create_fg_vc(session, guild_id, channel_name)
+
+    amount = obj.get("amount_total")
+    amount_str = f"${amount / 100:,.2f}" if isinstance(amount, int) else "your payment"
+    if channel_id:
+        await _send_dm(session, discord_user_id, (
+            f"✅ **Payment received — thank you!**\n\n"
+            f"Your FG VC purchase ({amount_str}) is complete — **\"{channel_name}\"** has been created in that server."
+        ))
+    else:
+        await _send_dm(session, discord_user_id, (
+            f"✅ **Payment received — thank you!**\n\n"
+            f"Your FG VC purchase ({amount_str}) is confirmed, but the channel couldn't be created automatically — "
+            f"a staff member will need to set it up manually. Sorry for the hassle!"
+        ))
+
+
 async def _handle_checkout_completed(obj: dict, session: ClientSession):
     metadata = obj.get("metadata") or {}
     if metadata.get("kind") == "role_purchase":
         await _handle_role_purchase_completed(obj, session)
+        return
+    if metadata.get("kind") == "fg_vc_purchase":
+        await _handle_fg_vc_purchase_completed(obj, session)
         return
     guild_id = metadata.get("guild_id")
     discord_user_id = metadata.get("discord_user_id")
@@ -2120,6 +2219,35 @@ async def handle_internal_role_checkout_link(request: web.Request) -> web.Respon
     return web.json_response({"url": session_obj.url})
 
 
+async def handle_internal_vc_checkout_link(request: web.Request) -> web.Response:
+    if not _check_internal_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if not STRIPE_SECRET_KEY:
+        return web.json_response({"error": "billing not configured"}, status=503)
+
+    body = await request.json()
+    guild_id = str(body.get("guild_id", ""))
+    channel_name = str(body.get("channel_name") or "")[:100].strip()
+    discord_user_id = str(body.get("discord_user_id", ""))
+    try:
+        price_cents = int(body.get("price_cents", 0))
+    except (TypeError, ValueError):
+        price_cents = 0
+
+    if not guild_id.isdigit() or not channel_name or not discord_user_id.isdigit() or price_cents < 50:
+        return web.json_response({"error": "guild_id, channel_name, discord_user_id, and price_cents (min 50) are required"}, status=400)
+
+    base_url = _resolve_base_url(request)
+    try:
+        session_obj = await asyncio.to_thread(
+            _create_vc_checkout_session_sync, guild_id, channel_name, price_cents, discord_user_id, base_url,
+        )
+    except Exception as e:
+        log.error("Failed to create FG VC checkout session via internal API: %s", e)
+        return web.json_response({"error": "failed to create checkout session"}, status=502)
+    return web.json_response({"url": session_obj.url})
+
+
 async def handle_internal_pullback(request: web.Request) -> web.Response:
     if not _check_internal_auth(request):
         return web.json_response({"error": "unauthorized"}, status=401)
@@ -2183,6 +2311,7 @@ def create_app() -> web.Application:
     app.router.add_get("/internal/subscription/{guild_id}", handle_internal_get_subscription)
     app.router.add_post("/internal/checkout-link", handle_internal_checkout_link)
     app.router.add_post("/internal/roleshop/checkout-link", handle_internal_role_checkout_link)
+    app.router.add_post("/internal/vcshop/checkout-link", handle_internal_vc_checkout_link)
     app.router.add_post("/internal/pullback", handle_internal_pullback)
     app.router.add_post("/internal/portal-link", handle_internal_portal_link)
     app.router.add_get("/", handle_landing_page)
