@@ -3508,7 +3508,7 @@ class VCAddModModal(discord.ui.Modal, title="🛡 Add VC Moderator"):
 # import relationship with this one — see its docstring).
 HELP_CATEGORIES = [
     ('🛡️', 'Moderation', ['kick', 'ban', 'massban', 'massunban', 'pullback', 'mute', 'unmute', 'timeout', 'warn', 'warnings', 'clearwarnings', 'modhistory', 'hardban', 'unhardban', 'hardbans', 'clear', 'purge', 'lock', 'unlock', 'hide', 'unhide', 'slowmode', 'nuke', 'lockdown', 'unlockdown', 'raidmode', 'nickname', 'strip', 'trapwarn', 'trapscan', 'restart']),
-    ('🔒', 'Jail & Anti-Raid', ['jail', 'unjail', 'setupjail', 'antiraid', 'raidwhitelist', 'wl']),
+    ('🔒', 'Jail & Anti-Raid', ['jail', 'unjail', 'setupjail', 'lockjailed', 'antiraid', 'raidwhitelist', 'wl']),
     ('🤖', 'Verification', ['verify', 'unverify', 'denyverify', 'sendverify', 'setverifybackup']),
     ('🏷️', 'Roles', ['role', 'roleall', 'massrole', 'massunrole', 'restoreallroles', 'autorole', 'setgifrole', 'protectedrole', 'br', 'roles']),
     ('🎤', 'Voice Channels', ['vclock', 'vcunlock', 'vchide', 'vcshow', 'vcname', 'vclimit', 'vcbitrate', 'vcregion', 'vckick', 'vcban', 'vcunban', 'vcpermit', 'vcmute', 'vcunmute', 'vcdeafen', 'vcundeafen', 'vctransfer', 'vcclaim', 'vcmod', 'vcremovemod', 'vcstats', 'setupvc', 'setunmutevc', 'd']),
@@ -7426,6 +7426,75 @@ async def setupjail(ctx, channel: discord.TextChannel = None):
         discord.Color.dark_red(),
         actor=ctx.author
     )
+
+
+@bot.command(name="lockjailed", aliases=["fixjail"])
+@_permitted_check(administrator=True)
+async def lockjailed(ctx):
+    """
+    Deny view access to the Jailed role on every channel in the server
+    except the jail chat channel (no VCs, no other text channels —
+    jail-logs stays hidden too). ,setupjail only denies categories that
+    existed at the moment it was run, so any channel added later (or
+    living outside a category entirely) never gets that overwrite and
+    stays visible to jailed members by default. Safe to re-run anytime
+    after adding new channels/VCs. Usage: ,lockjailed
+    """
+    guild = ctx.guild
+    jail_role = discord.utils.get(guild.roles, name=JAIL_ROLE)
+    if not jail_role:
+        await ctx.send(f"❌ Role **{JAIL_ROLE}** not found — run `,setupjail` first.", delete_after=10)
+        return
+
+    keep_visible_names = {"jail"}
+
+    await ctx.send(f"🔒 Locking down channel visibility for {jail_role.mention}...")
+
+    updated = 0
+    kept = 0
+    failed = 0
+    for channel in guild.channels:
+        if isinstance(channel, discord.CategoryChannel):
+            continue
+        if channel.name.lower() in keep_visible_names:
+            kept += 1
+            continue
+        is_voice = isinstance(channel, (discord.VoiceChannel, discord.StageChannel))
+        current = channel.overwrites_for(jail_role)
+        if current.view_channel is False and (not is_voice or current.connect is False):
+            continue  # already denied — no API call needed
+        try:
+            if is_voice:
+                await channel.set_permissions(
+                    jail_role, view_channel=False, connect=False,
+                    reason=f"Lock down Jailed visibility ({ctx.author})"
+                )
+            else:
+                await channel.set_permissions(
+                    jail_role, view_channel=False,
+                    reason=f"Lock down Jailed visibility ({ctx.author})"
+                )
+            updated += 1
+        except (discord.Forbidden, discord.HTTPException):
+            failed += 1
+
+    embed = discord.Embed(
+        title="🔒 Jail Lockdown Complete",
+        description=f"Denied view access on **{updated}** channel(s) for {jail_role.mention} (VCs also denied connect).",
+        color=discord.Color.dark_red(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(name="✅ Kept Visible", value=f"{kept} (#jail only)", inline=True)
+    if failed:
+        embed.add_field(name="⚠️ Failed", value=str(failed), inline=True)
+    embed.set_footer(text=f"TrapAI • {guild.name}")
+    await ctx.send(embed=embed)
+    await log(guild, "jail", "Jail Lockdown Run", None, discord.Color.dark_red(),
+              fields=[
+                  ("🛡 Moderator",        f"{ctx.author.mention} (`{ctx.author.id}`)", True),
+                  ("🔒 Channels Updated", str(updated),                                 True),
+              ],
+              actor=ctx.author)
 
 
 @bot.command(name="setlogchannel")
