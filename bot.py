@@ -13567,58 +13567,97 @@ def _parse_weekday(text: str):
 
 
 def _parse_time_hhmm(text: str):
-    m = re.match(r"^(\d{1,2}):(\d{2})$", text.strip())
-    if not m:
-        return None
-    h, mi = int(m.group(1)), int(m.group(2))
-    if not (0 <= h <= 23 and 0 <= mi <= 59):
-        return None
-    return h, mi
+    """Accepts 12-hour clock time with AM/PM ("6:00 PM", "6PM", "6:30am")
+    or 24-hour ("18:00") — the 12-hour form needs to tolerate a space
+    before AM/PM (how people actually type it), so this expects the
+    caller to have already stripped internal whitespace."""
+    text = text.strip().upper().replace(" ", "")
+    m = re.match(r"^(\d{1,2}):?(\d{2})?(AM|PM)$", text)
+    if m:
+        h = int(m.group(1))
+        mi = int(m.group(2)) if m.group(2) else 0
+        if not (1 <= h <= 12 and 0 <= mi <= 59):
+            return None
+        period = m.group(3)
+        if period == "AM":
+            h = 0 if h == 12 else h
+        else:
+            h = 12 if h == 12 else h + 12
+        return h, mi
+    m = re.match(r"^(\d{1,2}):(\d{2})$", text)
+    if m:
+        h, mi = int(m.group(1)), int(m.group(2))
+        if 0 <= h <= 23 and 0 <= mi <= 59:
+            return h, mi
+    return None
+
+
+def _format_time_12h(hour: int, minute: int) -> str:
+    period = "AM" if hour < 12 else "PM"
+    h12 = hour % 12 or 12
+    return f"{h12}:{minute:02d} {period}"
+
+
+_ROLE_MENTION_RE = re.compile(r"<@&(\d+)>")
+_CHANNEL_MENTION_RE = re.compile(r"<#(\d+)>")
 
 
 @bot.command()
 @_permitted_check(manage_guild=True)
-async def setstaffmeeting(ctx, weekday: str = None, time_str: str = None, channel: discord.TextChannel = None, role: discord.Role = None):
+async def setstaffmeeting(ctx, *, args: str = None):
     """
     Have the bot automatically post a weekly staff meeting reminder —
     fires once, at or after the scheduled time (UTC), every week.
     Usage:
-      ,setstaffmeeting <day> <HH:MM> [#channel] [@role]
-      e.g. ,setstaffmeeting monday 18:00 #staff-chat @Staff
+      ,setstaffmeeting <day> <time> [#channel] [@role]
+      e.g. ,setstaffmeeting monday 6:00 PM #staff-chat @Staff
+      Time can be 12-hour ("6:00 PM", "6PM") or 24-hour ("18:00") — always UTC.
       Defaults to the current channel if none given, and pings @here if
-      no role is given. Time is 24-hour UTC.
+      no role is given.
       ,setstaffmeeting off   — disable
       ,setstaffmeeting       — show current config
     """
     guild = ctx.guild
-    if weekday is None:
+    if args is None:
         cfg = STAFF_MEETING_CONFIG.get(guild.id)
         if not cfg:
-            await ctx.send("📭 No staff meeting scheduled. Use `,setstaffmeeting <day> <HH:MM> [#channel] [@role]`.")
+            await ctx.send("📭 No staff meeting scheduled. Use `,setstaffmeeting <day> <time> [#channel] [@role]`.")
             return
         ch = guild.get_channel(cfg["channel_id"])
         r = guild.get_role(cfg["role_id"]) if cfg.get("role_id") else None
         await ctx.send(
             f"📅 Staff meetings: every **{_WEEKDAY_DISPLAY[cfg['weekday']]}** at "
-            f"**{cfg['hour']:02d}:{cfg['minute']:02d} UTC** in "
+            f"**{_format_time_12h(cfg['hour'], cfg['minute'])} UTC** in "
             f"{ch.mention if ch else '*deleted channel*'}"
             + (f", pinging {r.mention}" if r else ", pinging @here")
         )
         return
 
-    if weekday.lower() == "off":
+    if args.strip().lower() == "off":
         had = STAFF_MEETING_CONFIG.pop(guild.id, None) is not None
         _save_staff_meeting_config()
         await ctx.send("✅ Automatic staff meeting reminders disabled." if had else "ℹ️ No staff meeting was scheduled.")
         return
 
-    day = _parse_weekday(weekday)
-    parsed_time = _parse_time_hhmm(time_str) if time_str else None
+    role_match = _ROLE_MENTION_RE.search(args)
+    role = guild.get_role(int(role_match.group(1))) if role_match else None
+    channel_match = _CHANNEL_MENTION_RE.search(args)
+    mentioned_channel = guild.get_channel(int(channel_match.group(1))) if channel_match else None
+
+    remainder = _CHANNEL_MENTION_RE.sub("", _ROLE_MENTION_RE.sub("", args)).strip()
+    usage_error = "❌ Usage: `,setstaffmeeting <day> <time> [#channel] [@role]` — e.g. `,setstaffmeeting monday 6:00 PM`"
+    parts = remainder.split(None, 1)
+    if len(parts) < 2:
+        await ctx.send(usage_error, delete_after=10)
+        return
+
+    day = _parse_weekday(parts[0])
+    parsed_time = _parse_time_hhmm(parts[1])
     if day is None or parsed_time is None:
-        await ctx.send("❌ Usage: `,setstaffmeeting <day> <HH:MM> [#channel] [@role]` — e.g. `,setstaffmeeting monday 18:00`", delete_after=10)
+        await ctx.send(usage_error, delete_after=10)
         return
     hour, minute = parsed_time
-    target_channel = channel or ctx.channel
+    target_channel = mentioned_channel or ctx.channel
 
     STAFF_MEETING_CONFIG[guild.id] = {
         "channel_id": target_channel.id,
@@ -13630,7 +13669,7 @@ async def setstaffmeeting(ctx, weekday: str = None, time_str: str = None, channe
     }
     _save_staff_meeting_config()
     await ctx.send(
-        f"✅ Staff meeting reminders set for every **{_WEEKDAY_DISPLAY[day]}** at **{hour:02d}:{minute:02d} UTC** "
+        f"✅ Staff meeting reminders set for every **{_WEEKDAY_DISPLAY[day]}** at **{_format_time_12h(hour, minute)} UTC** "
         f"in {target_channel.mention}" + (f", pinging {role.mention}" if role else ", pinging @here") + "."
     )
 
