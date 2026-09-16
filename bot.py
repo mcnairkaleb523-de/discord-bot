@@ -871,6 +871,66 @@ BILLING_API_URL = os.getenv("BILLING_API_URL", "").rstrip("/")
 INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET")
 BILLING_CONFIGURED = bool(BILLING_API_URL and INTERNAL_API_SECRET)
 
+# ── AI chat — @mention the bot anywhere to talk to it ──────────
+# OPENAI_API_KEY — from platform.openai.com. Leave unset to run with this
+# disabled entirely (mentioning the bot just does nothing extra).
+# OPENAI_MODEL — defaults to a small/cheap model; override to use a
+# different one without a code change.
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_CHAT_ENABLED = bool(OPENAI_API_KEY)
+
+# CHAT_HISTORY[(guild_id, user_id)] = [{"role": "user"/"assistant", "content": str}, ...]
+# In-memory only, deliberately not persisted — short-term conversational
+# context, not a moderation record. Capped length, resets on restart.
+CHAT_HISTORY: dict[tuple[int, int], list] = {}
+
+_CHAT_SYSTEM_PROMPT = (
+    "You are TrapAI, a Discord bot with a real personality, not a corporate "
+    "assistant. You talk like an actual person hanging out in the server: "
+    "casual, funny, a little cocky. You can roast people, clap back, and "
+    "curse when someone's being dumb or trying to test you — respond like a "
+    "witty, smart-mouthed friend, not customer support. Keep replies short, "
+    "like real chat messages (1-3 sentences usually), not essays. Never use "
+    "slurs or hate speech, never make real threats, and never sexualize "
+    "minors — everything else is fair game."
+)
+
+
+async def _ask_ai(guild_id: int, user_id: int, user_message: str):
+    """Returns the AI's reply, or None if unconfigured/it fails — callers
+    treat None as "say nothing" rather than erroring out in chat."""
+    if not OPENAI_CHAT_ENABLED:
+        return None
+    history = CHAT_HISTORY.setdefault((guild_id, user_id), [])
+    history.append({"role": "user", "content": user_message[:1000]})
+    del history[:-10]
+
+    messages = [{"role": "system", "content": _CHAT_SYSTEM_PROMPT}] + history
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+    payload = {"model": OPENAI_MODEL, "messages": messages, "max_tokens": 300, "temperature": 0.9}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=20)
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+    except aiohttp.ClientError:
+        return None
+
+    try:
+        reply = data["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError, TypeError):
+        return None
+    if not reply:
+        return None
+    history.append({"role": "assistant", "content": reply})
+    del history[:-10]
+    return reply[:1900]
+
 # Two products: "ticket_bot" is just the ticket/support system, sold as a
 # subscription (Starter/Pro/Premium) or a one-time Lifetime purchase.
 # "whole_bot" is the full bot -- every command, not just tickets -- sold
@@ -6202,6 +6262,21 @@ async def on_message(message):
         is_spamming = await handle_spam(message)
         if is_spamming:
             return
+
+    # ── Talk to the bot: reply with real AI when directly @mentioned ──
+    if not is_command and OPENAI_CHAT_ENABLED and bot.user in message.mentions and not message.mention_everyone:
+        clean_content = message.content
+        for mention_str in (f"<@{bot.user.id}>", f"<@!{bot.user.id}>"):
+            clean_content = clean_content.replace(mention_str, "")
+        clean_content = clean_content.strip()
+        if clean_content and not _on_cooldown(message.guild.id, message.author.id, "aichat", 5):
+            async with message.channel.typing():
+                reply = await _ask_ai(message.guild.id, message.author.id, clean_content)
+            if reply:
+                try:
+                    await message.reply(reply, mention_author=False)
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
 
     await bot.process_commands(message)
 
