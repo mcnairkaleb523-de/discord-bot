@@ -5603,7 +5603,9 @@ async def on_presence_update(before, after):
                       f"{after.mention} is repping the server in their status and received {role.mention}.",
                       discord.Color.green(), target=after)
         except (discord.Forbidden, discord.HTTPException):
-            pass
+            await log(guild, "vanity", "⚠️ Vanity Role Grant Failed",
+                      f"{after.mention} is repping the server, but I couldn't give them {role.mention}.\n\n{_role_forbidden_reason(guild)}",
+                      discord.Color.red(), target=after)
     elif already and not has_it:
         try:
             await after.remove_roles(role, reason="No longer repping the server in status")
@@ -5611,7 +5613,9 @@ async def on_presence_update(before, after):
                       f"{after.mention} is no longer repping the server in their status — {role.mention} removed.",
                       discord.Color.orange(), target=after)
         except (discord.Forbidden, discord.HTTPException):
-            pass
+            await log(guild, "vanity", "⚠️ Vanity Role Removal Failed",
+                      f"{after.mention} stopped repping the server, but I couldn't remove {role.mention}.\n\n{_role_forbidden_reason(guild)}",
+                      discord.Color.red(), target=after)
 
 
 async def _vanity_sweep_loop():
@@ -5629,6 +5633,7 @@ async def _vanity_sweep_loop():
                 continue
             if not _resolve_vanity_code(guild) and not REP_TAG.get(guild.id):
                 continue
+            sweep_failed = False
             for member in guild.members:
                 if member.bot:
                     continue
@@ -5640,7 +5645,11 @@ async def _vanity_sweep_loop():
                     elif already and not has_it:
                         await member.remove_roles(role, reason="No longer repping the server in status (periodic sweep)")
                 except (discord.Forbidden, discord.HTTPException):
-                    pass
+                    sweep_failed = True
+            if sweep_failed:
+                await log(guild, "vanity", "⚠️ Vanity Role Sweep Failed",
+                          f"Couldn't grant/remove {role.mention} for one or more members during the periodic sweep.\n\n{_role_forbidden_reason(guild)}",
+                          discord.Color.red())
         await asyncio.sleep(900)
 
 
