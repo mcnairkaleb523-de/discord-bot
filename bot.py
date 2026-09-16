@@ -1053,7 +1053,7 @@ WHOLE_BOT_PREMIUM_ONLY_COMMANDS = {
     # Boosts & Vanity, incl. custom booster roles (whole category)
     "setboostchannel", "setvanitycode", "setreptag", "setvanityrole", "vanityconfig", "br", "setupdatechannel",
     # Staff Tools (whole category)
-    "staffpsa", "task", "tasklist", "acceptstaff", "denystaff", "setstaffrules", "staffleaderboard", "staffstats",
+    "staffpsa", "task", "tasklist", "acceptstaff", "denystaff", "setstaffrules", "setstaffmeeting", "staffleaderboard", "staffstats",
     "staffwarn", "staffstrike", "staffwarnings", "staffstrikes", "clearstaffwarnings", "clearstaffstrikes",
     # Advanced admin/setup
     "backup", "restore", "listbackups", "deletebackup", "exportconfig",
@@ -3586,7 +3586,7 @@ HELP_CATEGORIES = [
     ('💰', 'Economy & Games', ['balance', 'jobs', 'setjob', 'daily', 'weekly', 'work', 'rob', 'give', 'deposit', 'withdraw', 'leaderboard', 'gamblers', 'slots', 'blackjack', 'coinflip', 'dice', 'duel', 'basketball', 'archery', 'cuppong', '8ball', 'trivia', 'hangman', 'wordle', 'tictactoe', 'connect4', 'checkers', 'chess', 'numguess', 'rockpaperscissors', 'highlow', 'crash', '21questions', 'games', 'shop', 'buyrole', 'setroleshop', 'buyfgvc', 'setvcshop', 'storefront']),
     ('🎂', 'Birthdays', ['birthday', 'removebirthday', 'setbirthday', 'setbirthdaychannel', 'birthdaylist', 'settimezone']),
     ('🚀', 'Boosts & Vanity', ['setboostchannel', 'setvanitycode', 'setreptag', 'setvanityrole', 'vanityconfig']),
-    ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist', 'acceptstaff', 'denystaff', 'setstaffrules', 'staffleaderboard', 'staffstats', 'staffwarn', 'staffstrike', 'staffwarnings', 'staffstrikes', 'clearstaffwarnings', 'clearstaffstrikes']),
+    ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist', 'acceptstaff', 'denystaff', 'setstaffrules', 'setstaffmeeting', 'staffleaderboard', 'staffstats', 'staffwarn', 'staffstrike', 'staffwarnings', 'staffstrikes', 'clearstaffwarnings', 'clearstaffstrikes']),
     ('⚙️', 'Admin & Setup', ['setup', 'lockunverified', 'backup', 'restore', 'listbackups', 'deletebackup', 'exportconfig', 'setlogchannel', 'setwelcome', 'disablewelcome', 'sendwelcome', 'welcome', 'sendinvite', 'announce', 'setpermittedrole', 'setbotbio', 'setupdatechannel', 'resendupdate']),
     ('🎲', 'Fun & Utility', ['snipe', 'clearsnipe', 'editsnipe', 'quote', 'rules', 'cmds', 'help']),
 ]
@@ -4369,6 +4369,64 @@ async def _birthday_loop():
         await asyncio.sleep(60)
 
 
+async def _check_staff_meetings():
+    """Runs every minute. Fires as soon as the current UTC time reaches
+    (not just exactly equals) the scheduled weekday+time, then dedupes on
+    calendar date — robust to the loop's tick being delayed, unlike an
+    exact-minute-match would be."""
+    now = discord.utils.utcnow()
+    today_str = now.strftime("%Y-%m-%d")
+    changed = False
+
+    for guild in bot.guilds:
+        cfg = STAFF_MEETING_CONFIG.get(guild.id)
+        if not cfg:
+            continue
+        if now.weekday() != cfg["weekday"]:
+            continue
+        if cfg.get("last_sent") == today_str:
+            continue
+        if (now.hour, now.minute) < (cfg["hour"], cfg["minute"]):
+            continue
+
+        channel = guild.get_channel(cfg["channel_id"])
+        if not channel:
+            continue
+        role = guild.get_role(cfg["role_id"]) if cfg.get("role_id") else None
+        ping = role.mention if role else "@here"
+
+        embed = discord.Embed(
+            title="📅 Staff Meeting Reminder",
+            description=f"It's time for this week's staff meeting in **{guild.name}**!",
+            color=discord.Color.blurple(),
+            timestamp=discord.utils.utcnow()
+        )
+        embed.set_footer(text="TrapAI • Weekly Staff Meeting")
+        try:
+            await channel.send(
+                content=ping, embed=embed,
+                allowed_mentions=discord.AllowedMentions(roles=[role] if role else False, everyone=False)
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            continue
+
+        cfg["last_sent"] = today_str
+        changed = True
+
+    if changed:
+        _save_staff_meeting_config()
+
+
+async def _staff_meeting_loop():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            await _check_staff_meetings()
+        except Exception:
+            pass
+        await asyncio.sleep(60)
+
+
 # ============================================================
 # EVENTS
 # ============================================================
@@ -4439,6 +4497,7 @@ async def on_ready():
         asyncio.create_task(_autosave_loop())
         asyncio.create_task(_birthday_loop())
         asyncio.create_task(_vanity_sweep_loop())
+        asyncio.create_task(_staff_meeting_loop())
 
         # Post the latest changelog entry to any guild that hasn't seen it
         # yet — covers every kind of restart (Railway redeploy after a
@@ -13447,6 +13506,19 @@ def _resolve_staff_rules(guild_id: int) -> str:
     return STAFF_RULES.get(guild_id) or _DEFAULT_STAFF_RULES
 
 
+# STAFF_MEETING_CONFIG[guild_id] = {"channel_id", "role_id" (nullable),
+# "weekday" (0=Monday..6=Sunday), "hour", "minute" (both UTC, 24h),
+# "last_sent" ("YYYY-MM-DD" or None)} — set via ,setstaffmeeting. Checked
+# every minute by _staff_meeting_loop(); "last_sent" dedupes so a reminder
+# only ever fires once per calendar day even if checked many times after
+# the scheduled minute has passed.
+STAFF_MEETING_CONFIG: dict[int, dict] = _load_depth(_load_data("staff_meeting_config", {}), 1)
+
+
+def _save_staff_meeting_config():
+    _save_data("staff_meeting_config", _dump_depth(STAFF_MEETING_CONFIG, 1))
+
+
 @bot.command()
 @_permitted_check(administrator=True)
 async def setstaffrules(ctx, *, text: str = None):
@@ -13475,6 +13547,92 @@ async def setstaffrules(ctx, *, text: str = None):
     )
     embed.set_footer(text=f"Set by {ctx.author} • Shown to new staff via ,acceptstaff")
     await ctx.send(embed=embed)
+
+
+_WEEKDAY_NAMES = {
+    "monday": 0, "mon": 0, "tuesday": 1, "tue": 1, "tues": 1,
+    "wednesday": 2, "wed": 2, "thursday": 3, "thu": 3, "thur": 3, "thurs": 3,
+    "friday": 4, "fri": 4, "saturday": 5, "sat": 5, "sunday": 6, "sun": 6,
+}
+_WEEKDAY_DISPLAY = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+
+def _parse_weekday(text: str):
+    text = text.strip().lower()
+    if text in _WEEKDAY_NAMES:
+        return _WEEKDAY_NAMES[text]
+    if text.isdigit() and 0 <= int(text) <= 6:
+        return int(text)
+    return None
+
+
+def _parse_time_hhmm(text: str):
+    m = re.match(r"^(\d{1,2}):(\d{2})$", text.strip())
+    if not m:
+        return None
+    h, mi = int(m.group(1)), int(m.group(2))
+    if not (0 <= h <= 23 and 0 <= mi <= 59):
+        return None
+    return h, mi
+
+
+@bot.command()
+@_permitted_check(manage_guild=True)
+async def setstaffmeeting(ctx, weekday: str = None, time_str: str = None, channel: discord.TextChannel = None, role: discord.Role = None):
+    """
+    Have the bot automatically post a weekly staff meeting reminder —
+    fires once, at or after the scheduled time (UTC), every week.
+    Usage:
+      ,setstaffmeeting <day> <HH:MM> [#channel] [@role]
+      e.g. ,setstaffmeeting monday 18:00 #staff-chat @Staff
+      Defaults to the current channel if none given, and pings @here if
+      no role is given. Time is 24-hour UTC.
+      ,setstaffmeeting off   — disable
+      ,setstaffmeeting       — show current config
+    """
+    guild = ctx.guild
+    if weekday is None:
+        cfg = STAFF_MEETING_CONFIG.get(guild.id)
+        if not cfg:
+            await ctx.send("📭 No staff meeting scheduled. Use `,setstaffmeeting <day> <HH:MM> [#channel] [@role]`.")
+            return
+        ch = guild.get_channel(cfg["channel_id"])
+        r = guild.get_role(cfg["role_id"]) if cfg.get("role_id") else None
+        await ctx.send(
+            f"📅 Staff meetings: every **{_WEEKDAY_DISPLAY[cfg['weekday']]}** at "
+            f"**{cfg['hour']:02d}:{cfg['minute']:02d} UTC** in "
+            f"{ch.mention if ch else '*deleted channel*'}"
+            + (f", pinging {r.mention}" if r else ", pinging @here")
+        )
+        return
+
+    if weekday.lower() == "off":
+        had = STAFF_MEETING_CONFIG.pop(guild.id, None) is not None
+        _save_staff_meeting_config()
+        await ctx.send("✅ Automatic staff meeting reminders disabled." if had else "ℹ️ No staff meeting was scheduled.")
+        return
+
+    day = _parse_weekday(weekday)
+    parsed_time = _parse_time_hhmm(time_str) if time_str else None
+    if day is None or parsed_time is None:
+        await ctx.send("❌ Usage: `,setstaffmeeting <day> <HH:MM> [#channel] [@role]` — e.g. `,setstaffmeeting monday 18:00`", delete_after=10)
+        return
+    hour, minute = parsed_time
+    target_channel = channel or ctx.channel
+
+    STAFF_MEETING_CONFIG[guild.id] = {
+        "channel_id": target_channel.id,
+        "role_id": role.id if role else None,
+        "weekday": day,
+        "hour": hour,
+        "minute": minute,
+        "last_sent": None,
+    }
+    _save_staff_meeting_config()
+    await ctx.send(
+        f"✅ Staff meeting reminders set for every **{_WEEKDAY_DISPLAY[day]}** at **{hour:02d}:{minute:02d} UTC** "
+        f"in {target_channel.mention}" + (f", pinging {role.mention}" if role else ", pinging @here") + "."
+    )
 
 
 @bot.command()
