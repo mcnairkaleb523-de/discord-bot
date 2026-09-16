@@ -3576,7 +3576,7 @@ HELP_CATEGORIES = [
     ('🛡️', 'Moderation', ['kick', 'ban', 'massban', 'massunban', 'pullback', 'mute', 'unmute', 'timeout', 'warn', 'warnings', 'clearwarnings', 'modhistory', 'hardban', 'unhardban', 'hardbans', 'clear', 'purge', 'lock', 'unlock', 'hide', 'unhide', 'slowmode', 'nuke', 'lockdown', 'unlockdown', 'raidmode', 'nickname', 'strip', 'trapwarn', 'trapscan', 'restart']),
     ('🔒', 'Jail & Anti-Raid', ['jail', 'unjail', 'worktime', 'setupjail', 'lockjailed', 'antiraid', 'raidwhitelist', 'wl']),
     ('🤖', 'Verification', ['verify', 'unverify', 'denyverify', 'sendverify', 'setverifybackup']),
-    ('🏷️', 'Roles', ['role', 'roleall', 'massrole', 'massunrole', 'restoreallroles', 'autorole', 'setgifrole', 'protectedrole', 'br', 'roles', 'createrolemenu', 'addrole', 'removerole']),
+    ('🏷️', 'Roles', ['role', 'roleall', 'massrole', 'massunrole', 'restoreallroles', 'autorole', 'setgifrole', 'protectedrole', 'br', 'roles', 'createrolemenu', 'addrole', 'removerole', 'rolemenus']),
     ('🎤', 'Voice Channels', ['vclock', 'vcunlock', 'vchide', 'vcshow', 'vcname', 'vclimit', 'vcbitrate', 'vcregion', 'vckick', 'vcban', 'vcunban', 'vcpermit', 'vcmute', 'vcunmute', 'vcdeafen', 'vcundeafen', 'vctransfer', 'vcclaim', 'vcmod', 'vcremovemod', 'vcstats', 'setupvc', 'setunmutevc', 'd']),
     ('🎫', 'Tickets', ['sendtickets', 'addticketcategory', 'removeticketcategory', 'ticketcategories', 'setticketformat', 'claimticket', 'closeticket']),
     ('💳', 'Billing', ['subscribe', 'managesubscription', 'subscriptionstatus']),
@@ -15287,6 +15287,38 @@ async def removerole(ctx, message_ref: str, emoji: str):
                 pass
 
     await ctx.send(f"✅ Removed {emoji_key} from the panel.", delete_after=8)
+
+
+@bot.command(aliases=["listrolemenus"])
+@_permitted_check(manage_roles=True)
+async def rolemenus(ctx):
+    """
+    List every self-role panel in this server with a clickable jump link
+    and its current emoji → role mappings — use this to get the right
+    message ID for ,addrole/,removerole instead of guessing.
+    Usage: ,rolemenus
+    """
+    guild = ctx.guild
+    panels = REACTION_ROLES.get(guild.id, {})
+    if not panels:
+        await ctx.send("📭 No self-role panels created yet. Use `,createrolemenu` first.")
+        return
+
+    embed = discord.Embed(
+        title="🎭 Self-Role Panels",
+        color=discord.Color.blurple(),
+        timestamp=discord.utils.utcnow()
+    )
+    for message_id, mapping in panels.items():
+        message = await _find_guild_message(guild, message_id)
+        location = f"[Jump to message]({message.jump_url})" if message else "*⚠️ message not found — may have been deleted*"
+        embed.add_field(
+            name=f"ID: {message_id}",
+            value=f"{location}\n{_reaction_role_panel_lines(guild, mapping)}",
+            inline=False
+        )
+    embed.set_footer(text=f"TrapAI Self-Roles • {guild.name}")
+    await ctx.send(embed=embed)
 
 
 @bot.event
