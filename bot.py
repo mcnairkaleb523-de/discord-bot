@@ -1325,6 +1325,30 @@ def _log_mod_action(guild_id: int, user_id: int, action: str, moderator, reason:
 # CHAT_STATS[guild_id][user_id] = message_count (all-time, persisted)
 CHAT_STATS: dict[int, dict[int, int]] = _load_depth(_load_data("chat_stats", {}), 2)
 
+# ── AFK ──────────────────────────────────────────────────────
+# AFK_USERS[guild_id][user_id] = {"reason": str, "since": float (epoch),
+# "old_nick": str|None} — set via ,afk, cleared automatically the next
+# time that member sends any message (handled in on_message).
+AFK_USERS: dict[int, dict[int, dict]] = _load_depth(_load_data("afk_users", {}), 2)
+
+
+def _save_afk_users():
+    _save_data("afk_users", _dump_depth(AFK_USERS, 2))
+
+
+def _format_afk_duration(seconds: float) -> str:
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours}h {minutes}m" if minutes else f"{hours}h"
+    days, hours = divmod(hours, 24)
+    return f"{days}d {hours}h" if hours else f"{days}d"
+
 # ── Invite tracking ────────────────────────────────────────
 # INVITE_CACHE[guild_id] = { code: uses } — session-only, re-derived from
 # the guild's live invites on_ready, doesn't need persistence.
@@ -3588,7 +3612,7 @@ HELP_CATEGORIES = [
     ('🚀', 'Boosts & Vanity', ['setboostchannel', 'setvanitycode', 'setreptag', 'setvanityrole', 'vanityconfig']),
     ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist', 'acceptstaff', 'denystaff', 'setstaffrules', 'setstaffmeeting', 'staffleaderboard', 'staffstats', 'staffwarn', 'staffstrike', 'staffwarnings', 'staffstrikes', 'clearstaffwarnings', 'clearstaffstrikes']),
     ('⚙️', 'Admin & Setup', ['setup', 'lockunverified', 'backup', 'restore', 'listbackups', 'deletebackup', 'exportconfig', 'setlogchannel', 'setwelcome', 'disablewelcome', 'sendwelcome', 'welcome', 'sendinvite', 'announce', 'setpermittedrole', 'setbotbio', 'setupdatechannel', 'resendupdate']),
-    ('🎲', 'Fun & Utility', ['snipe', 'clearsnipe', 'editsnipe', 'quote', 'rules', 'cmds', 'help']),
+    ('🎲', 'Fun & Utility', ['snipe', 'clearsnipe', 'editsnipe', 'quote', 'rules', 'cmds', 'help', 'afk']),
 ]
 
 
@@ -6117,6 +6141,33 @@ async def on_message(message):
     guild_stats = CHAT_STATS.setdefault(message.guild.id, {})
     guild_stats[message.author.id] = guild_stats.get(message.author.id, 0) + 1
 
+    # ── AFK: clear the author's own AFK the moment they talk again ──
+    afk_entry = AFK_USERS.get(message.guild.id, {}).pop(message.author.id, None)
+    if afk_entry:
+        _save_afk_users()
+        try:
+            await message.author.edit(nick=afk_entry.get("old_nick"), reason="No longer AFK")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+        try:
+            await message.channel.send(f"👋 Welcome back, {message.author.mention} — I removed your AFK status.", delete_after=8)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    # ── AFK: let the sender know if they mentioned someone who's AFK ──
+    if message.mentions:
+        guild_afk = AFK_USERS.get(message.guild.id, {})
+        notes = [
+            f"💤 {mentioned.mention} is AFK ({_format_afk_duration(time.time() - entry['since'])} ago) — {entry['reason']}"
+            for mentioned in message.mentions
+            if (entry := guild_afk.get(mentioned.id))
+        ]
+        if notes:
+            try:
+                await message.channel.send("\n".join(notes[:5]), delete_after=15)
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+
     # Always process commands first — never let automod swallow bot commands
     # Staff (manage_messages+) and command invocations are exempt from automod.
     # Checked via a real context resolution (ctx.valid), NOT a bare prefix-string
@@ -6189,6 +6240,37 @@ async def _run_automod(message: discord.Message) -> bool:
             pass
         return True
     return False
+
+
+@bot.command()
+async def afk(ctx, *, reason: str = "AFK"):
+    """
+    Mark yourself as AFK — anyone who @mentions you gets told you're away
+    (and why), and it clears automatically the next time you send a
+    message. Best-effort prefixes your nickname with "[AFK]" too (skipped
+    silently if the bot can't manage your nickname).
+    Usage: ,afk [reason]
+    """
+    guild_id = ctx.guild.id
+    reason = reason.strip()[:200] or "AFK"
+    AFK_USERS.setdefault(guild_id, {})[ctx.author.id] = {
+        "reason": reason, "since": time.time(), "old_nick": ctx.author.nick,
+    }
+    _save_afk_users()
+
+    new_nick = f"[AFK] {ctx.author.display_name}"[:32]
+    try:
+        await ctx.author.edit(nick=new_nick, reason="Marked as AFK")
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
+    embed = discord.Embed(
+        title="💤 You're now AFK",
+        description=f"**Reason:** {reason}\n\nI'll let people know if they mention you, and clear this automatically once you send a message.",
+        color=discord.Color.blurple(),
+        timestamp=discord.utils.utcnow()
+    )
+    await ctx.send(embed=embed)
 
 
 # ============================================================
