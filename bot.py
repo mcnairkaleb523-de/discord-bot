@@ -1040,7 +1040,7 @@ WHOLE_BOT_PREMIUM_ONLY_COMMANDS = {
     "vouch", "unvouch", "cancelvouch", "pendingvouches", "vouches",
     "vouchleaderboard", "vouchstats", "vouchconfig",
     # Giveaways & Polls (whole category)
-    "giveaway", "giveawayend", "giveaways", "poll", "pollend",
+    "giveaway", "giveawayend", "giveaways", "setgiveawayrole", "poll", "pollend",
     # Economy & Games (whole category)
     "balance", "jobs", "setjob", "daily", "weekly", "work", "rob", "give", "deposit", "withdraw",
     "leaderboard", "gamblers", "slots", "blackjack", "coinflip", "dice", "duel",
@@ -3582,7 +3582,7 @@ HELP_CATEGORIES = [
     ('💳', 'Billing', ['subscribe', 'managesubscription', 'subscriptionstatus']),
     ('📊', 'Stats & Info', ['whois', 'chatstats', 'serverstats', 'invites', 'invitelogs', 'inviteleaderboard', 'setinvite', 'milestones', 'setmilestone', 'testmilestone', 'ping', 'exitsurveys']),
     ('✅', 'Vouch', ['vouch', 'unvouch', 'cancelvouch', 'pendingvouches', 'vouches', 'vouchleaderboard', 'vouchstats', 'vouchconfig']),
-    ('🎉', 'Giveaways & Polls', ['giveaway', 'giveawayend', 'giveaways', 'poll', 'pollend']),
+    ('🎉', 'Giveaways & Polls', ['giveaway', 'giveawayend', 'giveaways', 'setgiveawayrole', 'poll', 'pollend']),
     ('💰', 'Economy & Games', ['balance', 'jobs', 'setjob', 'daily', 'weekly', 'work', 'rob', 'give', 'deposit', 'withdraw', 'leaderboard', 'gamblers', 'slots', 'blackjack', 'coinflip', 'dice', 'duel', 'basketball', 'archery', 'cuppong', '8ball', 'trivia', 'hangman', 'wordle', 'tictactoe', 'connect4', 'checkers', 'chess', 'numguess', 'rockpaperscissors', 'highlow', 'crash', '21questions', 'games', 'shop', 'buyrole', 'setroleshop', 'buyfgvc', 'setvcshop', 'storefront']),
     ('🎂', 'Birthdays', ['birthday', 'removebirthday', 'setbirthday', 'setbirthdaychannel', 'birthdaylist', 'settimezone']),
     ('🚀', 'Boosts & Vanity', ['setboostchannel', 'setvanitycode', 'setreptag', 'setvanityrole', 'vanityconfig']),
@@ -12505,6 +12505,15 @@ import random as _random
 # GIVEAWAYS[message_id] = { guild_id, channel_id, host_id, prize, winners, ends_at, entries: set }
 GIVEAWAYS: dict[int, dict] = _load_giveaways()
 
+# GIVEAWAY_PING_ROLE[guild_id] = role_id — pinged whenever ,giveaway starts
+# a new one, set via ,setgiveawayrole. Pair this with a self-role (see
+# ,createrolemenu) so members can opt in/out of it themselves.
+GIVEAWAY_PING_ROLE: dict[int, int] = _load_depth(_load_data("giveaway_ping_role", {}), 1)
+
+
+def _save_giveaway_ping_role():
+    _save_data("giveaway_ping_role", _dump_depth(GIVEAWAY_PING_ROLE, 1))
+
 
 def _parse_gw_duration(raw: str) -> int | None:
     raw = raw.strip().lower()
@@ -12630,7 +12639,13 @@ async def giveaway(ctx, duration: str, winners: int, *, prize: str):
     if ctx.guild.icon:
         embed.set_thumbnail(url=ctx.guild.icon.url)
 
-    msg = await ctx.send(embed=embed, view=GiveawayView())
+    ping_role_id = GIVEAWAY_PING_ROLE.get(ctx.guild.id)
+    ping_role = ctx.guild.get_role(ping_role_id) if ping_role_id else None
+    msg = await ctx.send(
+        content=ping_role.mention if ping_role else None,
+        embed=embed, view=GiveawayView(),
+        allowed_mentions=discord.AllowedMentions(roles=[ping_role] if ping_role else False)
+    )
 
     GIVEAWAYS[msg.id] = {
         "guild_id": ctx.guild.id, "channel_id": ctx.channel.id,
@@ -12682,6 +12697,43 @@ async def giveaways(ctx):
         )
     embed.set_footer(text=f"TrapAI Giveaway System • {ctx.guild.name}")
     await ctx.send(embed=embed)
+
+
+@bot.command()
+@_permitted_check(manage_guild=True)
+async def setgiveawayrole(ctx, *, arg: str = None):
+    """
+    Set a role to ping every time ,giveaway starts a new one. Pair this
+    with a self-role (,createrolemenu) so members can opt in/out
+    themselves instead of it being forced on everyone.
+    Usage:
+      ,setgiveawayrole @role — set it
+      ,setgiveawayrole off   — clear it
+      ,setgiveawayrole       — show current setting
+    """
+    guild = ctx.guild
+    if arg is None:
+        current_id = GIVEAWAY_PING_ROLE.get(guild.id)
+        current = guild.get_role(current_id) if current_id else None
+        await ctx.send(
+            f"🔔 Giveaway ping role: {current.mention}" if current else
+            "📭 No giveaway ping role set. Use `,setgiveawayrole @role`."
+        )
+        return
+    if arg.strip().lower() == "off":
+        had = GIVEAWAY_PING_ROLE.pop(guild.id, None) is not None
+        _save_giveaway_ping_role()
+        await ctx.send("✅ Giveaway ping role cleared." if had else "ℹ️ No giveaway ping role was set.")
+        return
+
+    try:
+        role = await commands.RoleConverter().convert(ctx, arg.strip())
+    except commands.RoleNotFound:
+        await ctx.send("❌ Usage: `,setgiveawayrole @role` or `,setgiveawayrole off`.", delete_after=8)
+        return
+    GIVEAWAY_PING_ROLE[guild.id] = role.id
+    _save_giveaway_ping_role()
+    await ctx.send(f"✅ {role.mention} will now be pinged every time a giveaway starts.")
 
 
 # ============================================================
