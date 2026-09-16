@@ -3576,7 +3576,7 @@ HELP_CATEGORIES = [
     ('🛡️', 'Moderation', ['kick', 'ban', 'massban', 'massunban', 'pullback', 'mute', 'unmute', 'timeout', 'warn', 'warnings', 'clearwarnings', 'modhistory', 'hardban', 'unhardban', 'hardbans', 'clear', 'purge', 'lock', 'unlock', 'hide', 'unhide', 'slowmode', 'nuke', 'lockdown', 'unlockdown', 'raidmode', 'nickname', 'strip', 'trapwarn', 'trapscan', 'restart']),
     ('🔒', 'Jail & Anti-Raid', ['jail', 'unjail', 'worktime', 'setupjail', 'lockjailed', 'antiraid', 'raidwhitelist', 'wl']),
     ('🤖', 'Verification', ['verify', 'unverify', 'denyverify', 'sendverify', 'setverifybackup']),
-    ('🏷️', 'Roles', ['role', 'roleall', 'massrole', 'massunrole', 'restoreallroles', 'autorole', 'setgifrole', 'protectedrole', 'br', 'roles']),
+    ('🏷️', 'Roles', ['role', 'roleall', 'massrole', 'massunrole', 'restoreallroles', 'autorole', 'setgifrole', 'protectedrole', 'br', 'roles', 'createrolemenu', 'addrole', 'removerole']),
     ('🎤', 'Voice Channels', ['vclock', 'vcunlock', 'vchide', 'vcshow', 'vcname', 'vclimit', 'vcbitrate', 'vcregion', 'vckick', 'vcban', 'vcunban', 'vcpermit', 'vcmute', 'vcunmute', 'vcdeafen', 'vcundeafen', 'vctransfer', 'vcclaim', 'vcmod', 'vcremovemod', 'vcstats', 'setupvc', 'setunmutevc', 'd']),
     ('🎫', 'Tickets', ['sendtickets', 'addticketcategory', 'removeticketcategory', 'ticketcategories', 'setticketformat', 'claimticket', 'closeticket']),
     ('💳', 'Billing', ['subscribe', 'managesubscription', 'subscriptionstatus']),
@@ -15074,6 +15074,218 @@ async def autorole(ctx, action: str = None, role: discord.Role = None):
             "❌ Unknown action. Use `add`, `remove`, `clear`, or just `,autorole` to view.",
             delete_after=8
         )
+
+
+# ============================================================
+# SELF-ROLES — reaction-based role picker (Carl-bot style)
+# ============================================================
+# REACTION_ROLES[guild_id][message_id][emoji_key] = {"role_id": int, "label": str|None}
+# emoji_key is always str(discord.PartialEmoji) so unicode emoji ("🎮")
+# and custom guild emoji ("<:name:id>") both work as dict keys the exact
+# same way Discord's own raw reaction payloads report them.
+REACTION_ROLES: dict[int, dict[int, dict]] = _load_depth(_load_data("reaction_roles", {}), 2)
+
+
+def _save_reaction_roles():
+    _save_data("reaction_roles", _dump_depth(REACTION_ROLES, 2))
+
+
+def _parse_message_ref(text: str):
+    m = re.search(r"(\d{17,20})$", text.strip())
+    return int(m.group(1)) if m else None
+
+
+def _reaction_role_panel_lines(guild: discord.Guild, mapping: dict) -> str:
+    lines = []
+    for emoji_key, info in mapping.items():
+        role = guild.get_role(info["role_id"])
+        if not role:
+            continue
+        lines.append(f"{emoji_key} → {role.mention}" + (f" — {info['label']}" if info.get("label") else ""))
+    return "\n".join(lines) if lines else "*No roles added yet — use `,addrole` to add some.*"
+
+
+async def _find_guild_message(guild: discord.Guild, message_id: int):
+    for channel in guild.text_channels:
+        try:
+            return await channel.fetch_message(message_id)
+        except (discord.NotFound, discord.Forbidden):
+            continue
+    return None
+
+
+@bot.command(aliases=["rolemenu"])
+@_permitted_check(manage_roles=True)
+async def createrolemenu(ctx, *, title: str = "🎭 Self Roles"):
+    """
+    Post a self-role panel — members react with an emoji to get that
+    role, and remove their reaction to remove it (age roles, gender
+    roles, giveaway ping roles, whatever you want). Add options
+    afterward with ,addrole.
+    Usage: ,createrolemenu <title>
+    """
+    embed = discord.Embed(
+        title=title,
+        description="React below to grab a role! React again to remove it.\n\n*No roles added yet — use `,addrole` to add some.*",
+        color=discord.Color.blurple(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_footer(text=f"TrapAI Self-Roles • {ctx.guild.name}")
+    msg = await ctx.send(embed=embed)
+    REACTION_ROLES.setdefault(ctx.guild.id, {})[msg.id] = {}
+    _save_reaction_roles()
+    await ctx.send(
+        f"✅ Self-role panel created — message ID `{msg.id}`.\n"
+        f"Add roles with `,addrole {msg.id} <emoji> @role [label]`.",
+        delete_after=20
+    )
+
+
+@bot.command()
+@_permitted_check(manage_roles=True)
+async def addrole(ctx, message_ref: str, emoji: str, role: discord.Role, *, label: str = None):
+    """
+    Add an emoji → role mapping to a self-role panel created with
+    ,createrolemenu — reacting with that emoji grants the role.
+    Usage: ,addrole <message link/ID> <emoji> @role [label]
+    e.g. ,addrole 123456789012345678 🧑 @Male gender role
+    """
+    guild = ctx.guild
+    message_id = _parse_message_ref(message_ref)
+    mapping = REACTION_ROLES.get(guild.id, {}).get(message_id) if message_id else None
+    if mapping is None:
+        await ctx.send("❌ That's not a known self-role message. Create one with `,createrolemenu` first.", delete_after=8)
+        return
+    if role.managed:
+        await ctx.send(f"❌ {role.mention} is a managed role and can't be self-assigned.", delete_after=8)
+        return
+    if role >= guild.me.top_role:
+        await ctx.send(_role_forbidden_reason(guild))
+        return
+
+    try:
+        partial = discord.PartialEmoji.from_str(emoji)
+    except (TypeError, ValueError):
+        await ctx.send("❌ That doesn't look like a valid emoji.", delete_after=6)
+        return
+
+    message = await _find_guild_message(guild, message_id)
+    if message is None:
+        await ctx.send("❌ Couldn't find that message — was it deleted?", delete_after=8)
+        return
+    try:
+        await message.add_reaction(partial)
+    except discord.HTTPException:
+        await ctx.send("❌ I couldn't react with that emoji — is it from another server, or did I mistype it?", delete_after=10)
+        return
+
+    emoji_key = str(partial)
+    mapping[emoji_key] = {"role_id": role.id, "label": label}
+    _save_reaction_roles()
+
+    if message.embeds:
+        embed = message.embeds[0]
+        embed.description = "React below to grab a role! React again to remove it.\n\n" + _reaction_role_panel_lines(guild, mapping)
+        try:
+            await message.edit(embed=embed)
+        except discord.HTTPException:
+            pass
+
+    await ctx.send(f"✅ {emoji_key} now grants {role.mention}.", delete_after=8)
+
+
+@bot.command()
+@_permitted_check(manage_roles=True)
+async def removerole(ctx, message_ref: str, emoji: str):
+    """
+    Remove an emoji → role mapping from a self-role panel.
+    Usage: ,removerole <message link/ID> <emoji>
+    """
+    guild = ctx.guild
+    message_id = _parse_message_ref(message_ref)
+    mapping = REACTION_ROLES.get(guild.id, {}).get(message_id) if message_id else None
+    if mapping is None:
+        await ctx.send("❌ That's not a known self-role message.", delete_after=8)
+        return
+    try:
+        partial = discord.PartialEmoji.from_str(emoji)
+    except (TypeError, ValueError):
+        await ctx.send("❌ That doesn't look like a valid emoji.", delete_after=6)
+        return
+    emoji_key = str(partial)
+    if emoji_key not in mapping:
+        await ctx.send("❌ That emoji isn't mapped on this panel.", delete_after=6)
+        return
+
+    mapping.pop(emoji_key)
+    _save_reaction_roles()
+
+    message = await _find_guild_message(guild, message_id)
+    if message:
+        try:
+            await message.clear_reaction(partial)
+        except discord.HTTPException:
+            pass
+        if message.embeds:
+            embed = message.embeds[0]
+            embed.description = "React below to grab a role! React again to remove it.\n\n" + _reaction_role_panel_lines(guild, mapping)
+            try:
+                await message.edit(embed=embed)
+            except discord.HTTPException:
+                pass
+
+    await ctx.send(f"✅ Removed {emoji_key} from the panel.", delete_after=8)
+
+
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    if payload.guild_id is None or payload.user_id == bot.user.id:
+        return
+    mapping = REACTION_ROLES.get(payload.guild_id, {}).get(payload.message_id)
+    if not mapping:
+        return
+    info = mapping.get(str(payload.emoji))
+    if not info:
+        return
+    guild = bot.get_guild(payload.guild_id)
+    if guild is None:
+        return
+    role = guild.get_role(info["role_id"])
+    member = payload.member or guild.get_member(payload.user_id)
+    if not role or not member:
+        return
+    try:
+        await member.add_roles(role, reason="Self-role reaction")
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
+
+@bot.event
+async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+    if payload.guild_id is None:
+        return
+    mapping = REACTION_ROLES.get(payload.guild_id, {}).get(payload.message_id)
+    if not mapping:
+        return
+    info = mapping.get(str(payload.emoji))
+    if not info:
+        return
+    guild = bot.get_guild(payload.guild_id)
+    if guild is None:
+        return
+    role = guild.get_role(info["role_id"])
+    member = guild.get_member(payload.user_id)
+    if member is None:
+        try:
+            member = await guild.fetch_member(payload.user_id)
+        except discord.NotFound:
+            return
+    if payload.user_id == bot.user.id or not role or not member:
+        return
+    try:
+        await member.remove_roles(role, reason="Self-role reaction removed")
+    except (discord.Forbidden, discord.HTTPException):
+        pass
 
 
 # ============================================================
