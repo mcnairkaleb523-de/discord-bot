@@ -872,13 +872,13 @@ INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET")
 BILLING_CONFIGURED = bool(BILLING_API_URL and INTERNAL_API_SECRET)
 
 # ── AI chat — @mention the bot anywhere to talk to it ──────────
-# OPENAI_API_KEY — from platform.openai.com. Leave unset to run with this
-# disabled entirely (mentioning the bot just does nothing extra).
-# OPENAI_MODEL — defaults to a small/cheap model; override to use a
-# different one without a code change.
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-OPENAI_CHAT_ENABLED = bool(OPENAI_API_KEY)
+# ANTHROPIC_API_KEY — from console.anthropic.com. Leave unset to run with
+# this disabled entirely (mentioning the bot just does nothing extra).
+# ANTHROPIC_MODEL — override to use a different Claude model without a
+# code change (e.g. a cheaper one for higher chat volume).
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5")
+AI_CHAT_ENABLED = bool(ANTHROPIC_API_KEY)
 
 # CHAT_HISTORY[(guild_id, user_id)] = [{"role": "user"/"assistant", "content": str}, ...]
 # In-memory only, deliberately not persisted — short-term conversational
@@ -900,34 +900,43 @@ _CHAT_SYSTEM_PROMPT = (
 async def _ask_ai(guild_id: int, user_id: int, user_message: str):
     """Returns the AI's reply, or None if unconfigured/it fails — callers
     treat None as "say nothing" rather than erroring out in chat."""
-    if not OPENAI_CHAT_ENABLED:
+    if not AI_CHAT_ENABLED:
         return None
     history = CHAT_HISTORY.setdefault((guild_id, user_id), [])
     history.append({"role": "user", "content": user_message[:1000]})
     del history[:-10]
 
-    messages = [{"role": "system", "content": _CHAT_SYSTEM_PROMPT}] + history
-    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": OPENAI_MODEL, "messages": messages, "max_tokens": 300, "temperature": 0.9}
+    headers = {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": ANTHROPIC_MODEL,
+        "system": _CHAT_SYSTEM_PROMPT,
+        "messages": history,
+        "max_tokens": 300,
+        "temperature": 0.9,
+    }
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                "https://api.openai.com/v1/chat/completions",
+                "https://api.anthropic.com/v1/messages",
                 headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=20)
             ) as resp:
                 if resp.status != 200:
                     body = await resp.text()
-                    print(f"[ai-chat] OpenAI request failed ({resp.status}): {body[:500]}")
+                    print(f"[ai-chat] Anthropic request failed ({resp.status}): {body[:500]}")
                     return None
                 data = await resp.json()
     except aiohttp.ClientError as e:
-        print(f"[ai-chat] OpenAI request errored: {e!r}")
+        print(f"[ai-chat] Anthropic request errored: {e!r}")
         return None
 
     try:
-        reply = data["choices"][0]["message"]["content"].strip()
+        reply = data["content"][0]["text"].strip()
     except (KeyError, IndexError, TypeError):
-        print(f"[ai-chat] Unexpected OpenAI response shape: {data!r}")
+        print(f"[ai-chat] Unexpected Anthropic response shape: {data!r}")
         return None
     if not reply:
         return None
@@ -6268,7 +6277,7 @@ async def on_message(message):
             return
 
     # ── Talk to the bot: reply with real AI when directly @mentioned ──
-    if not is_command and OPENAI_CHAT_ENABLED and bot.user in message.mentions and not message.mention_everyone:
+    if not is_command and AI_CHAT_ENABLED and bot.user in message.mentions and not message.mention_everyone:
         clean_content = message.content
         for mention_str in (f"<@{bot.user.id}>", f"<@!{bot.user.id}>"):
             clean_content = clean_content.replace(mention_str, "")
