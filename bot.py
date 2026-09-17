@@ -916,14 +916,18 @@ async def _ask_ai(guild_id: int, user_id: int, user_message: str):
                 headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=20)
             ) as resp:
                 if resp.status != 200:
+                    body = await resp.text()
+                    print(f"[ai-chat] OpenAI request failed ({resp.status}): {body[:500]}")
                     return None
                 data = await resp.json()
-    except aiohttp.ClientError:
+    except aiohttp.ClientError as e:
+        print(f"[ai-chat] OpenAI request errored: {e!r}")
         return None
 
     try:
         reply = data["choices"][0]["message"]["content"].strip()
     except (KeyError, IndexError, TypeError):
+        print(f"[ai-chat] Unexpected OpenAI response shape: {data!r}")
         return None
     if not reply:
         return None
