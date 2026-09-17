@@ -918,7 +918,6 @@ async def _ask_ai(guild_id: int, user_id: int, user_message: str):
         "system": _CHAT_SYSTEM_PROMPT,
         "messages": history,
         "max_tokens": 300,
-        "temperature": 0.9,
     }
     try:
         async with aiohttp.ClientSession() as session:
