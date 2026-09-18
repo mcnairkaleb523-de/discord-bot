@@ -1461,6 +1461,29 @@ def _is_staff_member(member: discord.Member) -> bool:
     Messages or Administrator permission."""
     return member.guild_permissions.manage_messages or member.guild_permissions.administrator
 
+
+# Built-in perks automatically granted to whoever currently holds the
+# Staff of the Month or Most Active Staff role — no extra setup needed
+# beyond ,setstaffofmonthrole / ,setmostactiverole.
+STAFF_AWARD_ECONOMY_MULTIPLIER = 2.0
+STAFF_AWARD_GIVEAWAY_WEIGHT = 3.0
+STAFF_AWARD_WORK_COOLDOWN = 10  # vs the normal 20s
+_STAFF_AWARD_PERKS_BLURB = (
+    "• **2x earnings** from `,work`, `,daily`, and `,weekly`\n"
+    "• **Half cooldown** on `,work`\n"
+    "• **3x better odds** in every `,giveaway`"
+)
+
+
+def _has_staff_award_role(member: discord.Member) -> bool:
+    """True if this member currently holds the Staff of the Month or
+    Most Active Staff role in their guild."""
+    role_ids = {STAFF_OF_MONTH_ROLE.get(member.guild.id), MOST_ACTIVE_STAFF_ROLE.get(member.guild.id)}
+    role_ids.discard(None)
+    if not role_ids:
+        return False
+    return any(r.id in role_ids for r in member.roles)
+
 # ── AFK ──────────────────────────────────────────────────────
 # AFK_USERS[guild_id][user_id] = {"reason": str, "since": float (epoch),
 # "old_nick": str|None} — set via ,afk, cleared automatically the next
@@ -11135,12 +11158,9 @@ async def _crown_staff_awards(guild: discord.Guild):
     await _crown_field(STAFF_OF_MONTH_ROLE, som_id, "👑 Staff of the Month", mod_totals.get(som_id, 0), "moderation actions")
     await _crown_field(MOST_ACTIVE_STAFF_ROLE, mas_id, "💬 Most Active Staff", activity_totals.get(mas_id, 0), "messages")
 
-    perks = STAFF_PERKS_TEXT.get(guild.id)
-    embed.add_field(
-        name="🎁 Perks",
-        value=perks if perks else "*No perks configured yet — set some with `,setstaffperks`.*",
-        inline=False
-    )
+    extra_perks = STAFF_PERKS_TEXT.get(guild.id)
+    perks_value = _STAFF_AWARD_PERKS_BLURB + (f"\n{extra_perks}" if extra_perks else "")
+    embed.add_field(name="🎁 Perks", value=perks_value, inline=False)
     embed.set_footer(text=f"TrapAI Staff Awards • {guild.name}")
     return embed
 
@@ -11251,20 +11271,22 @@ async def setstaffawardschannel(ctx, channel: discord.TextChannel = None):
 @_permitted_check(administrator=True)
 async def setstaffperks(ctx, *, text: str = None):
     """
-    Set the perks text shown in the Staff Awards announcement (e.g.
-    "custom color role, priority ticket claims, 2x XP"). Run with no
-    text to clear it. Usage: ,setstaffperks <text>
+    Set EXTRA perks text shown under the built-in ones (2x work/daily/
+    weekly earnings, half ,work cooldown, 3x giveaway odds — those
+    always apply automatically, no setup needed). Use this for anything
+    beyond that, e.g. "custom color role, priority ticket claims". Run
+    with no text to clear it. Usage: ,setstaffperks <text>
     """
     guild = ctx.guild
     if text is None:
         STAFF_PERKS_TEXT.pop(guild.id, None)
         _save_staff_perks_text()
-        await ctx.send("↩️ Staff perks text cleared.")
+        await ctx.send("↩️ Extra staff perks text cleared.")
         return
     text = text[:1000]
     STAFF_PERKS_TEXT[guild.id] = text
     _save_staff_perks_text()
-    await ctx.send(f"✅ Perks text set:\n{text}")
+    await ctx.send(f"✅ Extra perks text set:\n{text}")
 
 
 @bot.command(aliases=["staffawards"])
@@ -13005,7 +13027,16 @@ async def _end_giveaway(guild: discord.Guild, channel_id: int, msg_id: int):
 
     entries  = list(data["entries"])
     n_win    = min(data["winners"], len(entries))
-    winners  = _random.sample(entries, n_win) if entries else []
+    if entries:
+        # Weighted draw without replacement (Efraimidis-Spirakis): Staff
+        # Award holders get 3x better odds, everyone else is even.
+        def _entry_weight(uid):
+            member = guild.get_member(uid)
+            return STAFF_AWARD_GIVEAWAY_WEIGHT if member and _has_staff_award_role(member) else 1.0
+        keyed   = sorted(((_random.random() ** (1.0 / _entry_weight(uid)), uid) for uid in entries), reverse=True)
+        winners = [uid for _, uid in keyed[:n_win]]
+    else:
+        winners = []
     host     = guild.get_member(data["host_id"])
 
     if winners:
@@ -16976,7 +17007,9 @@ async def setjob(ctx, *, name: str = None):
 # ── Work ─────────────────────────────────────────────────────
 @bot.command()
 async def work(ctx):
-    cd = _on_cooldown(ctx.guild.id, ctx.author.id, "work", 20)
+    bonus = _has_staff_award_role(ctx.author)
+    cooldown_secs = STAFF_AWARD_WORK_COOLDOWN if bonus else 20
+    cd = _on_cooldown(ctx.guild.id, ctx.author.id, "work", cooldown_secs)
     if cd:
         await ctx.send(f"⏳ You're tired. Come back in **{cd}s**.", delete_after=8)
         return
@@ -16991,8 +17024,12 @@ async def work(ctx):
         gigs = ["walked a dog", "sold some lemonade", "did a random odd job", "ran an errand for a neighbor"]
         title = "💼 Work Complete"
         desc = f"You **{random.choice(gigs)}** and earned **{_fmt_money(earned)}**.\n*Get a real job with `,jobs` to earn a lot more.*"
+    if bonus:
+        earned = int(earned * STAFF_AWARD_ECONOMY_MULTIPLIER)
     _add_earned(ctx.guild.id, ctx.author.id, earned)
     embed = discord.Embed(title=title, description=desc, color=discord.Color.green(), timestamp=discord.utils.utcnow())
+    if bonus:
+        embed.add_field(name="🎁 Staff Award Bonus", value=f"{STAFF_AWARD_ECONOMY_MULTIPLIER}x earnings applied!", inline=False)
     next_job, remaining = _next_locked_job(ctx.guild.id, ctx.author.id)
     if next_job:
         embed.add_field(
@@ -17002,7 +17039,7 @@ async def work(ctx):
         )
     else:
         embed.add_field(name="🏆 Career Maxed", value="You've unlocked every job on the ladder!", inline=False)
-    embed.set_footer(text="Come back in 20 seconds • TrapAI Economy")
+    embed.set_footer(text=f"Come back in {cooldown_secs} seconds • TrapAI Economy")
     await ctx.send(embed=embed)
 
 
@@ -17016,6 +17053,9 @@ async def daily(ctx):
         await ctx.send(f"⏳ Daily already claimed. Come back in **{h}h {m}m**.", delete_after=8)
         return
     earned = random.randint(200, 500)
+    bonus = _has_staff_award_role(ctx.author)
+    if bonus:
+        earned = int(earned * STAFF_AWARD_ECONOMY_MULTIPLIER)
     _add_earned(ctx.guild.id, ctx.author.id, earned)
     embed = discord.Embed(
         title="📅 Daily Reward",
@@ -17023,6 +17063,8 @@ async def daily(ctx):
         color=discord.Color.purple(),
         timestamp=discord.utils.utcnow()
     )
+    if bonus:
+        embed.add_field(name="🎁 Staff Award Bonus", value=f"{STAFF_AWARD_ECONOMY_MULTIPLIER}x earnings applied!", inline=False)
     embed.set_footer(text="Resets every 24 hours • TrapAI Economy")
     await ctx.send(embed=embed)
 
@@ -17037,6 +17079,9 @@ async def weekly(ctx):
         await ctx.send(f"⏳ Weekly already claimed. Come back in **{d}d {h}h**.", delete_after=8)
         return
     earned = random.randint(1000, 2500)
+    bonus = _has_staff_award_role(ctx.author)
+    if bonus:
+        earned = int(earned * STAFF_AWARD_ECONOMY_MULTIPLIER)
     _add_earned(ctx.guild.id, ctx.author.id, earned)
     embed = discord.Embed(
         title="📆 Weekly Reward",
@@ -17044,6 +17089,8 @@ async def weekly(ctx):
         color=discord.Color.purple(),
         timestamp=discord.utils.utcnow()
     )
+    if bonus:
+        embed.add_field(name="🎁 Staff Award Bonus", value=f"{STAFF_AWARD_ECONOMY_MULTIPLIER}x earnings applied!", inline=False)
     embed.set_footer(text="Resets every 7 days • TrapAI Economy")
     await ctx.send(embed=embed)
 
