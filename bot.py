@@ -1125,7 +1125,7 @@ WHOLE_BOT_PREMIUM_ONLY_COMMANDS = {
     "birthday", "removebirthday", "setbirthday", "setbirthdaychannel",
     "birthdaylist", "settimezone",
     # Boosts & Vanity, incl. custom booster roles (whole category)
-    "setboostchannel", "setvanitycode", "setreptag", "setvanityrole", "vanityconfig", "br", "setupdatechannel",
+    "setboostchannel", "setvanitycode", "setvanityrole", "vanityconfig", "br", "setupdatechannel",
     # Staff Tools (whole category)
     "staffpsa", "task", "tasklist", "acceptstaff", "denystaff", "setstaffrules", "setstaffmeeting", "staffleaderboard", "staffstats",
     "staffwarn", "staffstrike", "staffwarnings", "staffstrikes", "clearstaffwarnings", "clearstaffstrikes",
@@ -1638,13 +1638,10 @@ def _resolve_gif_exempt_role(guild: discord.Guild):
     return discord.utils.get(guild.roles, name=VERIFIED_ROLE)
 
 # ── Vanity URL role tracking ──────────────────────────────────
-# VANITY_ROLE[guild_id] = role_id — role granted while a member's custom
-# status contains this server's vanity invite link.
+# VANITY_ROLE[guild_id] = role_id — this server's designated rep-reward
+# role, for reference only. Staff grant/remove it manually now; there is
+# no automatic status-based tracking.
 VANITY_ROLE: dict[int, int] = _load_depth(_load_data("vanity_role", {}), 1)
-# REP_TAG[guild_id] = "/Glock" — an extra, easier-to-type marker (besides
-# the full discord.gg/<code> link) that also counts as "repping" the
-# server in a member's custom status. Set via ,setreptag.
-REP_TAG: dict[int, str] = _load_depth(_load_data("rep_tag", {}), 1)
 
 # VANITY_CODE_OVERRIDE[guild_id] = "code" — manual override for servers that
 # don't have Discord's native boosted vanity URL (guild.vanity_url_code).
@@ -1657,10 +1654,6 @@ def _save_vanity_role():
 
 def _save_vanity_code_override():
     _save_data("vanity_code_override", _dump_depth(VANITY_CODE_OVERRIDE, 1))
-
-
-def _save_rep_tag():
-    _save_data("rep_tag", _dump_depth(REP_TAG, 1))
 
 
 def _resolve_vanity_code(guild: discord.Guild):
@@ -1678,26 +1671,6 @@ def _resolve_invite_link(guild: discord.Guild) -> str:
     Returns "" if no vanity code is set or detected."""
     code = _resolve_vanity_code(guild)
     return f"https://discord.gg/{code}" if code else ""
-
-
-def _status_reps_server(member: discord.Member, guild: discord.Guild) -> bool:
-    """True if the member's custom status contains either the full
-    discord.gg/<code> vanity link or the shorter configured rep tag
-    (e.g. "/Glock") — either one counts as repping the server."""
-    code = _resolve_vanity_code(guild)
-    tag = REP_TAG.get(guild.id)
-    if not code and not tag:
-        return False
-    targets = []
-    if code:
-        targets.append(f"discord.gg/{code}".lower())
-    if tag:
-        targets.append(tag.lower())
-    for act in member.activities:
-        name = getattr(act, "name", None)
-        if name and any(t in name.lower() for t in targets):
-            return True
-    return False
 
 # ── Welcome config ───────────────────────────────────────────
 # WELCOME_CONFIG[guild_id] = { "channel_id": int, "enabled": bool }
@@ -3683,7 +3656,7 @@ HELP_CATEGORIES = [
     ('🎉', 'Giveaways & Polls', ['giveaway', 'giveawayend', 'giveaways', 'setgiveawayrole', 'poll', 'pollend']),
     ('💰', 'Economy & Games', ['balance', 'jobs', 'setjob', 'daily', 'weekly', 'work', 'rob', 'give', 'deposit', 'withdraw', 'leaderboard', 'gamblers', 'slots', 'blackjack', 'coinflip', 'dice', 'duel', 'basketball', 'archery', 'cuppong', '8ball', 'trivia', 'hangman', 'wordle', 'tictactoe', 'connect4', 'checkers', 'chess', 'numguess', 'rockpaperscissors', 'highlow', 'crash', '21questions', 'games', 'shop', 'buyrole', 'setroleshop', 'buyfgvc', 'setvcshop', 'storefront']),
     ('🎂', 'Birthdays', ['birthday', 'removebirthday', 'setbirthday', 'setbirthdaychannel', 'birthdaylist', 'settimezone']),
-    ('🚀', 'Boosts & Vanity', ['setboostchannel', 'setvanitycode', 'setreptag', 'setvanityrole', 'vanityconfig']),
+    ('🚀', 'Boosts & Vanity', ['setboostchannel', 'setvanitycode', 'setvanityrole', 'vanityconfig']),
     ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist', 'acceptstaff', 'denystaff', 'setstaffrules', 'setstaffmeeting', 'staffleaderboard', 'staffstats', 'staffwarn', 'staffstrike', 'staffwarnings', 'staffstrikes', 'clearstaffwarnings', 'clearstaffstrikes']),
     ('⚙️', 'Admin & Setup', ['setup', 'lockunverified', 'backup', 'restore', 'listbackups', 'deletebackup', 'exportconfig', 'setlogchannel', 'setwelcome', 'disablewelcome', 'sendwelcome', 'welcome', 'sendinvite', 'announce', 'setpermittedrole', 'setbotbio', 'setupdatechannel', 'resendupdate']),
     ('🎲', 'Fun & Utility', ['snipe', 'clearsnipe', 'editsnipe', 'quote', 'rules', 'cmds', 'help', 'afk']),
@@ -4594,7 +4567,6 @@ async def on_ready():
         _startup_resumed = True
         asyncio.create_task(_autosave_loop())
         asyncio.create_task(_birthday_loop())
-        asyncio.create_task(_vanity_sweep_loop())
         asyncio.create_task(_staff_meeting_loop())
 
         # Post the latest changelog entry to any guild that hasn't seen it
@@ -5737,79 +5709,6 @@ async def clearsnipe(ctx):
     await ctx.send("🧹 Snipe cache cleared for this channel.", delete_after=6)
 
 
-@bot.event
-async def on_presence_update(before, after):
-    guild = after.guild
-    if guild is None or after.bot:
-        return
-    role_id = VANITY_ROLE.get(guild.id)
-    if not role_id:
-        return
-    role = guild.get_role(role_id)
-    if not role:
-        return
-    if not _resolve_vanity_code(guild) and not REP_TAG.get(guild.id):
-        return
-
-    has_it  = _status_reps_server(after, guild)
-    already = role in after.roles
-    if has_it and not already:
-        try:
-            await after.add_roles(role, reason="Repping the server in status")
-            await log(guild, "vanity", "Vanity Role Granted",
-                      f"{after.mention} is repping the server in their status and received {role.mention}.",
-                      discord.Color.green(), target=after)
-        except (discord.Forbidden, discord.HTTPException):
-            await log(guild, "vanity", "⚠️ Vanity Role Grant Failed",
-                      f"{after.mention} is repping the server, but I couldn't give them {role.mention}.\n\n{_role_forbidden_reason(guild)}",
-                      discord.Color.red(), target=after)
-    elif already and not has_it:
-        try:
-            await after.remove_roles(role, reason="No longer repping the server in status")
-            await log(guild, "vanity", "Vanity Role Removed",
-                      f"{after.mention} is no longer repping the server in their status — {role.mention} removed.",
-                      discord.Color.orange(), target=after)
-        except (discord.Forbidden, discord.HTTPException):
-            await log(guild, "vanity", "⚠️ Vanity Role Removal Failed",
-                      f"{after.mention} stopped repping the server, but I couldn't remove {role.mention}.\n\n{_role_forbidden_reason(guild)}",
-                      discord.Color.red(), target=after)
-
-
-async def _vanity_sweep_loop():
-    """Periodic full sweep as a safety net — catches any member whose status
-    already had the vanity link before the bot started, or any presence
-    update the gateway happened to miss."""
-    await bot.wait_until_ready()
-    while not bot.is_closed():
-        for guild in bot.guilds:
-            role_id = VANITY_ROLE.get(guild.id)
-            if not role_id:
-                continue
-            role = guild.get_role(role_id)
-            if not role:
-                continue
-            if not _resolve_vanity_code(guild) and not REP_TAG.get(guild.id):
-                continue
-            sweep_failed = False
-            for member in guild.members:
-                if member.bot:
-                    continue
-                has_it  = _status_reps_server(member, guild)
-                already = role in member.roles
-                try:
-                    if has_it and not already:
-                        await member.add_roles(role, reason="Repping the server in status (periodic sweep)")
-                    elif already and not has_it:
-                        await member.remove_roles(role, reason="No longer repping the server in status (periodic sweep)")
-                except (discord.Forbidden, discord.HTTPException):
-                    sweep_failed = True
-            if sweep_failed:
-                await log(guild, "vanity", "⚠️ Vanity Role Sweep Failed",
-                          f"Couldn't grant/remove {role.mention} for one or more members during the periodic sweep.\n\n{_role_forbidden_reason(guild)}",
-                          discord.Color.red())
-        await asyncio.sleep(900)
-
-
 async def _find_recent_mod(guild, action, *, member=None, channel=None, attr=None, expected=None, window=6):
     """
     Best-effort audit-log lookup for who performed a recent action
@@ -6241,6 +6140,17 @@ async def on_message(message):
                 await message.channel.send("\n".join(notes[:5]), delete_after=15)
             except (discord.Forbidden, discord.HTTPException):
                 pass
+
+    # ── Nudge toward the rep role if they can't actually see their GIF ──
+    # A file-attachment GIF without attach_files never reaches the bot at
+    # all (Discord blocks the send client-side) — this only ever fires for
+    # the realistic case, a GIF link/native-picker GIF without embed_links,
+    # which still sends fine as plain text, just with no preview.
+    if _is_gif_message(message) and not message.channel.permissions_for(message.author).embed_links:
+        try:
+            await message.reply("get rep the server to get yo pic perms dummy 😭", mention_author=True)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
 
     # Always process commands first — never let automod swallow bot commands
     # Staff (manage_messages+) and command invocations are exempt from automod.
@@ -12462,9 +12372,10 @@ async def setgifrole(ctx, role: discord.Role = None):
 @_permitted_check(administrator=True)
 async def setvanityrole(ctx, role: discord.Role = None):
     """
-    Set the role auto-granted to members who put this server's vanity
-    invite link (discord.gg/<code>) in their custom status. Scoped to
-    THIS server only. Run with no argument to disable the feature here.
+    Mark this server's designated rep-reward role, for reference in
+    ,vanityconfig. Staff grant and remove it manually — there is no
+    automatic status-based tracking. Scoped to THIS server only. Run
+    with no argument to clear it.
     Usage: ,setvanityrole @role
     """
     guild = ctx.guild
@@ -12472,21 +12383,19 @@ async def setvanityrole(ctx, role: discord.Role = None):
         VANITY_ROLE.pop(guild.id, None)
         _save_vanity_role()
         embed = discord.Embed(
-            title="↩️ Vanity Role Disabled",
-            description="Vanity URL role tracking is now **off** for this server.",
+            title="↩️ Vanity Role Cleared",
+            description="No rep-reward role is designated for this server anymore.",
             color=discord.Color.orange(),
             timestamp=discord.utils.utcnow()
         )
     else:
         VANITY_ROLE[guild.id] = role.id
         _save_vanity_role()
-        code = _resolve_vanity_code(guild)
-        code_note = f"`discord.gg/{code}`" if code else "*(no vanity code set or detected — set one with `,setvanitycode`)*"
         embed = discord.Embed(
             title="✅ Vanity Role Set",
             description=(
-                f"Members with **{code_note}** in their custom status will now automatically "
-                f"receive {role.mention}, and lose it when it's removed."
+                f"{role.mention} is now marked as this server's rep-reward role. "
+                f"Staff still have to grant and remove it manually — this is just for reference."
             ),
             color=discord.Color.green(),
             timestamp=discord.utils.utcnow()
@@ -12536,39 +12445,13 @@ async def setvanitycode(ctx, code: str = None):
 
 @bot.command()
 @_permitted_check(manage_guild=True)
-async def setreptag(ctx, *, tag: str = None):
-    """
-    Set an extra, easier-to-type marker (besides the full discord.gg/<code>
-    link) that also counts as repping the server in a member's custom
-    status — e.g. "/Glock". Either one being present grants the vanity
-    reward role set with ,setvanityrole. Run with no argument to clear it.
-    Usage: ,setreptag /Glock
-    """
-    guild = ctx.guild
-    if tag is None:
-        REP_TAG.pop(guild.id, None)
-        _save_rep_tag()
-        await ctx.send("↩️ Rep tag cleared — only the full `discord.gg/<code>` link counts now.")
-        return
-    tag = tag.strip()
-    if not tag:
-        await ctx.send("❌ Usage: `,setreptag /Glock`", delete_after=8)
-        return
-    REP_TAG[guild.id] = tag
-    _save_rep_tag()
-    await ctx.send(f"✅ Members with **{tag}** in their status now also count as repping the server.")
-
-
-@bot.command()
-@_permitted_check(manage_guild=True)
 async def vanityconfig(ctx):
-    """Show this server's current vanity role tracking configuration. Usage: ,vanityconfig"""
+    """Show this server's current vanity role configuration. Usage: ,vanityconfig"""
     guild = ctx.guild
     role_id = VANITY_ROLE.get(guild.id)
     role = guild.get_role(role_id) if role_id else None
     code = _resolve_vanity_code(guild)
     override = VANITY_CODE_OVERRIDE.get(guild.id)
-    rep_tag = REP_TAG.get(guild.id)
 
     embed = discord.Embed(
         title="💎 Vanity Role Configuration",
@@ -12577,7 +12460,6 @@ async def vanityconfig(ctx):
     )
     embed.add_field(name="🎭 Reward Role", value=role.mention if role else "*Not set — use `,setvanityrole`*", inline=True)
     embed.add_field(name="🔗 Tracked Code", value=f"`discord.gg/{code}`" if code else "*None found or set*", inline=True)
-    embed.add_field(name="🏷️ Rep Tag", value=f"`{rep_tag}`" if rep_tag else "*Not set — use `,setreptag`*", inline=True)
     embed.add_field(
         name="📌 Source",
         value=("Manual override (`,setvanitycode`)" if override else
