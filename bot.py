@@ -458,6 +458,19 @@ def _save_all_state() -> None:
     _save_staff_awards_channel()
     _save_staff_perks_text()
     _save_last_staff_award_month()
+    _save_hall_of_fame_role()
+    _save_sotm_title()
+    _save_mvp_title()
+    _save_sotm_lounge()
+    _save_mvp_lounge()
+    _save_titled_nick_base()
+    _save_hall_of_fame_log()
+    _save_mvp_role()
+    _save_mvp_activity()
+    _save_mvp_awards_channel()
+    _save_last_mvp_award_week()
+    _save_last_mvp_winner()
+    _save_mvp_streak()
     _save_vc_stats()
     _save_temp_vcs()
     _save_birthdays()
@@ -1137,6 +1150,8 @@ WHOLE_BOT_PREMIUM_ONLY_COMMANDS = {
     "staffpsa", "task", "tasklist", "acceptstaff", "denystaff", "setstaffrules", "setstaffmeeting", "staffleaderboard", "staffstats",
     "staffwarn", "staffstrike", "staffwarnings", "staffstrikes", "clearstaffwarnings", "clearstaffstrikes",
     "setstaffofmonthrole", "setmostactiverole", "setstaffawardschannel", "setstaffperks", "crownstaff",
+    "setmvprole", "setmvpawardschannel", "crownmvp", "sethalloffamerole", "setsotmtitle", "setmvptitle",
+    "setsotmlounge", "setmvplounge", "halloffame",
     # Advanced admin/setup
     "backup", "restore", "listbackups", "deletebackup", "exportconfig",
     # Niche fun/utility
@@ -1471,7 +1486,25 @@ STAFF_AWARD_WORK_COOLDOWN = 10  # vs the normal 20s
 _STAFF_AWARD_PERKS_BLURB = (
     "• **2x earnings** from `,work`, `,daily`, and `,weekly`\n"
     "• **Half cooldown** on `,work`\n"
-    "• **3x better odds** in every `,giveaway`"
+    "• **3x better odds** in every `,giveaway`\n"
+    "• 🏛️ **Permanent Hall of Fame role** *(Staff of the Month only — never removed)*\n"
+    "• 📛 **Special nickname title** while holding the role\n"
+    "• 🎙️ **Private lounge** (VC + chat) *(Staff of the Month only, if set up)*\n"
+    "• 💵 $20–$50 reward, depending on budget *(staff will reach out)*\n"
+    "• 🎁 Free item from the server shop\n"
+    "• 🎬 Gets to pick the next server event\n"
+    "• ⭐ Priority consideration for promotion\n"
+    "• 📜 Added to `,halloffame` forever"
+)
+_MVP_PERKS_BLURB = (
+    "• 🎨 **MVP role color** for the week\n"
+    "• 📛 **Custom nickname title** for the week\n"
+    "• 🎙️ **Private MVP lounge** (VC + chat), if set up\n"
+    "• 💵 **$15–20 gift card** reward *(staff will reach out)*\n"
+    "• 📣 Shoutout in announcements + priority in staff requests\n"
+    "• 🎬 Gets to pick the next movie night\n"
+    "• 🔥 **Win streak bonus** — extra in-server cash the more weeks in a row you win\n"
+    "• 📜 Added to `,halloffame` forever"
 )
 
 
@@ -1483,6 +1516,187 @@ def _has_staff_award_role(member: discord.Member) -> bool:
     if not role_ids:
         return False
     return any(r.id in role_ids for r in member.roles)
+
+
+# ── Staff of the Month "big" perks: Hall of Fame, lounge, title ──
+# HALL_OF_FAME_ROLE[guild_id] = role_id — granted to every Staff of the
+# Month winner PERMANENTLY (never removed, unlike the monthly role).
+HALL_OF_FAME_ROLE: dict[int, int] = _load_depth(_load_data("hall_of_fame_role", {}), 1)
+# SOTM_TITLE / MVP_TITLE[guild_id] = "👑" / "🏆" — nickname tag prepended
+# while the member holds that role. Defaults used when unset.
+SOTM_TITLE: dict[int, str] = _load_depth(_load_data("sotm_title", {}), 1)
+MVP_TITLE: dict[int, str] = _load_depth(_load_data("mvp_title", {}), 1)
+# SOTM_LOUNGE / MVP_LOUNGE[guild_id] = {"text": channel_id, "voice": channel_id}
+# Private channels the bot hands off between winners each period —
+# staff create the channels and lock them down from @everyone first;
+# the bot only manages the current winner's explicit member overwrite.
+SOTM_LOUNGE: dict[int, dict] = _load_depth(_load_data("sotm_lounge", {}), 1)
+MVP_LOUNGE: dict[int, dict] = _load_depth(_load_data("mvp_lounge", {}), 1)
+# TITLED_NICK_BASE[guild_id][user_id] = nickname (or None) from before
+# any title styling began — restored once no title applies anymore.
+TITLED_NICK_BASE: dict[int, dict[int, str]] = _load_depth(_load_data("titled_nick_base", {}), 2)
+# HALL_OF_FAME_LOG[guild_id] = [{"kind": "sotm"/"mvp", "user_id", "period", "count", "time"}, ...]
+HALL_OF_FAME_LOG: dict[int, list] = {
+    int(gid): _dt_from_iso(entries) for gid, entries in _load_data("hall_of_fame_log", {}).items()
+}
+
+# ── Staff MVP (weekly) ────────────────────────────────────────
+# MVP_ROLE[guild_id] = role_id — crowned each ISO week to whoever sent
+# the most staff-activity messages that week. Independent of the
+# monthly Most Active Staff role/counter.
+MVP_ROLE: dict[int, int] = _load_depth(_load_data("mvp_role", {}), 1)
+# MVP_ACTIVITY[guild_id][user_id] = message_count for the CURRENT week
+# only — reset every time a new week is crowned.
+MVP_ACTIVITY: dict[int, dict[int, int]] = _load_depth(_load_data("mvp_activity", {}), 2)
+# MVP_AWARDS_CHANNEL[guild_id] = channel_id — falls back to the Staff
+# Awards channel, then the update channel.
+MVP_AWARDS_CHANNEL: dict[int, int] = _load_depth(_load_data("mvp_awards_channel", {}), 1)
+# LAST_MVP_AWARD_WEEK[guild_id] = "YYYY-Www" (ISO week) — last week this
+# server crowned an MVP, so the loop fires exactly once per rollover.
+LAST_MVP_AWARD_WEEK: dict[int, str] = _load_depth(_load_data("last_mvp_award_week", {}), 1)
+# LAST_MVP_WINNER[guild_id] = user_id of last week's MVP, MVP_STREAK[guild_id]
+# = {user_id: consecutive weeks won} — only the current winner has a
+# nonzero entry; used for the streak economy bonus.
+LAST_MVP_WINNER: dict[int, int] = _load_depth(_load_data("last_mvp_winner", {}), 1)
+MVP_STREAK: dict[int, dict[int, int]] = _load_depth(_load_data("mvp_streak", {}), 2)
+
+
+def _save_hall_of_fame_role():
+    _save_data("hall_of_fame_role", _dump_depth(HALL_OF_FAME_ROLE, 1))
+
+
+def _save_sotm_title():
+    _save_data("sotm_title", _dump_depth(SOTM_TITLE, 1))
+
+
+def _save_mvp_title():
+    _save_data("mvp_title", _dump_depth(MVP_TITLE, 1))
+
+
+def _save_sotm_lounge():
+    _save_data("sotm_lounge", _dump_depth(SOTM_LOUNGE, 1))
+
+
+def _save_mvp_lounge():
+    _save_data("mvp_lounge", _dump_depth(MVP_LOUNGE, 1))
+
+
+def _save_titled_nick_base():
+    _save_data("titled_nick_base", _dump_depth(TITLED_NICK_BASE, 2))
+
+
+def _save_hall_of_fame_log():
+    _save_data("hall_of_fame_log", {str(gid): _dt_to_iso(entries) for gid, entries in HALL_OF_FAME_LOG.items()})
+
+
+def _save_mvp_role():
+    _save_data("mvp_role", _dump_depth(MVP_ROLE, 1))
+
+
+def _save_mvp_activity():
+    _save_data("mvp_activity", _dump_depth(MVP_ACTIVITY, 2))
+
+
+def _save_mvp_awards_channel():
+    _save_data("mvp_awards_channel", _dump_depth(MVP_AWARDS_CHANNEL, 1))
+
+
+def _save_last_mvp_award_week():
+    _save_data("last_mvp_award_week", _dump_depth(LAST_MVP_AWARD_WEEK, 1))
+
+
+def _save_last_mvp_winner():
+    _save_data("last_mvp_winner", _dump_depth(LAST_MVP_WINNER, 1))
+
+
+def _save_mvp_streak():
+    _save_data("mvp_streak", _dump_depth(MVP_STREAK, 2))
+
+
+def _log_hall_of_fame(guild_id: int, kind: str, user_id: int, period: str, count: int):
+    HALL_OF_FAME_LOG.setdefault(guild_id, []).append({
+        "kind": kind, "user_id": user_id, "period": period, "count": count,
+        "time": discord.utils.utcnow(),
+    })
+    _save_hall_of_fame_log()
+
+
+async def _refresh_titled_nickname(member: discord.Member, *, has_sotm: bool = None, has_mvp: bool = None):
+    """Rebuilds member's nickname to show whichever title tags (SOTM /
+    MVP) they currently hold, restoring their pre-styling nickname once
+    neither applies anymore. Cosmetic only — failures are ignored.
+
+    add_roles()/remove_roles() only fire the HTTP call — they don't
+    update member.roles locally (that only happens later via a gateway
+    MEMBER_UPDATE), so callers that just granted/revoked SOTM or MVP
+    this same run MUST pass has_sotm/has_mvp explicitly instead of
+    relying on the (stale) cache for that one dimension. Leave a
+    parameter as None to fall back to checking member.roles for it."""
+    guild = member.guild
+    if has_sotm is None:
+        som_role_id = STAFF_OF_MONTH_ROLE.get(guild.id)
+        has_sotm = bool(som_role_id and any(r.id == som_role_id for r in member.roles))
+    if has_mvp is None:
+        mvp_role_id = MVP_ROLE.get(guild.id)
+        has_mvp = bool(mvp_role_id and any(r.id == mvp_role_id for r in member.roles))
+
+    tags = []
+    if has_sotm:
+        tags.append(SOTM_TITLE.get(guild.id) or "👑")
+    if has_mvp:
+        tags.append(MVP_TITLE.get(guild.id) or "🏆")
+
+    base_map = TITLED_NICK_BASE.setdefault(guild.id, {})
+    if tags:
+        if member.id not in base_map:
+            base_map[member.id] = member.nick
+            _save_titled_nick_base()
+        base = base_map[member.id] or member.name
+        new_nick = f"{' '.join(tags)} {base}"[:32]
+        if member.nick != new_nick:
+            try:
+                await member.edit(nick=new_nick, reason="Staff award title")
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+    elif member.id in base_map:
+        restore = base_map.pop(member.id)
+        _save_titled_nick_base()
+        try:
+            await member.edit(nick=restore, reason="Staff award title removed")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+
+async def _assign_lounge_access(guild: discord.Guild, lounge_cfg: dict, old_members: list, new_member):
+    """lounge_cfg = {"text": channel_id, "voice": channel_id}, either key
+    optional. Revokes each old member's explicit overwrite there and
+    grants new_member view/send (text) or view/connect (voice)."""
+    if not lounge_cfg:
+        return
+    text_ch  = guild.get_channel(lounge_cfg.get("text")) if lounge_cfg.get("text") else None
+    voice_ch = guild.get_channel(lounge_cfg.get("voice")) if lounge_cfg.get("voice") else None
+    new_id = new_member.id if new_member else None
+
+    for old_member in old_members or []:
+        if old_member.id == new_id:
+            continue
+        for ch in (text_ch, voice_ch):
+            if ch:
+                try:
+                    await ch.set_permissions(old_member, overwrite=None)
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+    if new_member:
+        if text_ch:
+            try:
+                await text_ch.set_permissions(new_member, view_channel=True, send_messages=True, read_message_history=True)
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+        if voice_ch:
+            try:
+                await voice_ch.set_permissions(new_member, view_channel=True, connect=True)
+            except (discord.Forbidden, discord.HTTPException):
+                pass
 
 # ── AFK ──────────────────────────────────────────────────────
 # AFK_USERS[guild_id][user_id] = {"reason": str, "since": float (epoch),
@@ -3755,7 +3969,7 @@ HELP_CATEGORIES = [
     ('💰', 'Economy & Games', ['balance', 'jobs', 'setjob', 'daily', 'weekly', 'work', 'rob', 'give', 'deposit', 'withdraw', 'leaderboard', 'gamblers', 'slots', 'blackjack', 'coinflip', 'dice', 'duel', 'basketball', 'archery', 'cuppong', '8ball', 'trivia', 'hangman', 'wordle', 'tictactoe', 'connect4', 'checkers', 'chess', 'numguess', 'rockpaperscissors', 'highlow', 'crash', '21questions', 'games', 'shop', 'buyrole', 'setroleshop', 'buyfgvc', 'setvcshop', 'storefront']),
     ('🎂', 'Birthdays', ['birthday', 'removebirthday', 'setbirthday', 'setbirthdaychannel', 'birthdaylist', 'settimezone']),
     ('🚀', 'Boosts & Vanity', ['setboostchannel', 'setvanitycode', 'setvanityrole', 'vanityconfig']),
-    ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist', 'acceptstaff', 'denystaff', 'setstaffrules', 'setstaffmeeting', 'staffleaderboard', 'staffstats', 'staffwarn', 'staffstrike', 'staffwarnings', 'staffstrikes', 'clearstaffwarnings', 'clearstaffstrikes', 'setstaffofmonthrole', 'setmostactiverole', 'setstaffawardschannel', 'setstaffperks', 'crownstaff']),
+    ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist', 'acceptstaff', 'denystaff', 'setstaffrules', 'setstaffmeeting', 'staffleaderboard', 'staffstats', 'staffwarn', 'staffstrike', 'staffwarnings', 'staffstrikes', 'clearstaffwarnings', 'clearstaffstrikes', 'setstaffofmonthrole', 'setmostactiverole', 'setstaffawardschannel', 'setstaffperks', 'crownstaff', 'setmvprole', 'setmvpawardschannel', 'crownmvp', 'sethalloffamerole', 'setsotmtitle', 'setmvptitle', 'setsotmlounge', 'setmvplounge', 'halloffame']),
     ('⚙️', 'Admin & Setup', ['setup', 'lockunverified', 'backup', 'restore', 'listbackups', 'deletebackup', 'exportconfig', 'setlogchannel', 'setwelcome', 'disablewelcome', 'sendwelcome', 'welcome', 'sendinvite', 'announce', 'setpermittedrole', 'setbotbio', 'setupdatechannel', 'resendupdate']),
     ('🎲', 'Fun & Utility', ['snipe', 'clearsnipe', 'editsnipe', 'quote', 'rules', 'cmds', 'help', 'afk']),
 ]
@@ -4667,6 +4881,7 @@ async def on_ready():
         asyncio.create_task(_birthday_loop())
         asyncio.create_task(_staff_meeting_loop())
         asyncio.create_task(_staff_awards_loop())
+        asyncio.create_task(_mvp_awards_loop())
 
         # Post the latest changelog entry to any guild that hasn't seen it
         # yet — covers every kind of restart (Railway redeploy after a
@@ -6213,10 +6428,12 @@ async def on_message(message):
     guild_stats = CHAT_STATS.setdefault(message.guild.id, {})
     guild_stats[message.author.id] = guild_stats.get(message.author.id, 0) + 1
 
-    # Track staff activity for this award period (Most Active Staff)
+    # Track staff activity for this award period (Most Active Staff / MVP)
     if _is_staff_member(message.author):
         staff_stats = STAFF_ACTIVITY.setdefault(message.guild.id, {})
         staff_stats[message.author.id] = staff_stats.get(message.author.id, 0) + 1
+        mvp_stats = MVP_ACTIVITY.setdefault(message.guild.id, {})
+        mvp_stats[message.author.id] = mvp_stats.get(message.author.id, 0) + 1
 
     # ── AFK: clear the author's own AFK the moment they talk again ──
     afk_entry = AFK_USERS.get(message.guild.id, {}).pop(message.author.id, None)
@@ -11126,10 +11343,11 @@ async def _crown_staff_awards(guild: discord.Guild):
 
     som_id = max(mod_totals, key=lambda uid: (mod_totals[uid], -uid)) if mod_totals else None
     mas_id = max(activity_totals, key=lambda uid: (activity_totals[uid], -uid)) if activity_totals else None
+    period = _current_award_month()
 
     embed = discord.Embed(title="🏆 Staff Awards", color=discord.Color.gold(), timestamp=discord.utils.utcnow())
 
-    async def _crown_field(role_map, winner_id, field_name, count, unit):
+    async def _crown_field(role_map, winner_id, field_name, count, unit, *, sotm_extras=False):
         role_id = role_map.get(guild.id)
         role = guild.get_role(role_id) if role_id else None
         winner = guild.get_member(winner_id) if winner_id else None
@@ -11137,8 +11355,9 @@ async def _crown_staff_awards(guild: discord.Guild):
             embed.add_field(name=field_name, value="*No qualifying activity this period.*", inline=False)
             return
         value = f"{winner.mention} — **{count}** {unit}"
+        old_holders = list(role.members) if role else []
         if role:
-            for old_holder in list(role.members):
+            for old_holder in old_holders:
                 if old_holder.id != winner.id:
                     try:
                         await old_holder.remove_roles(role, reason="Staff awards — new winner crowned")
@@ -11153,9 +11372,27 @@ async def _crown_staff_awards(guild: discord.Guild):
                     value += f"\n🎁 Awarded {role.mention}"
             else:
                 value += f"\n🎁 Keeps {role.mention}"
+
+        if sotm_extras:
+            hof_role_id = HALL_OF_FAME_ROLE.get(guild.id)
+            hof_role = guild.get_role(hof_role_id) if hof_role_id else None
+            if hof_role and hof_role not in winner.roles:
+                try:
+                    await winner.add_roles(hof_role, reason="Staff of the Month — permanent Hall of Fame induction")
+                except (discord.Forbidden, discord.HTTPException):
+                    value += f"\n⚠️ Couldn't grant {hof_role.mention} — {_role_forbidden_reason(guild)}"
+                else:
+                    value += f"\n🏛️ Inducted into {hof_role.mention} (permanent)"
+            await _assign_lounge_access(guild, SOTM_LOUNGE.get(guild.id), old_holders, winner)
+            for old_holder in old_holders:
+                if old_holder.id != winner.id:
+                    await _refresh_titled_nickname(old_holder, has_sotm=False)
+            await _refresh_titled_nickname(winner, has_sotm=True)
+            _log_hall_of_fame(guild.id, "sotm", winner.id, period, count)
+
         embed.add_field(name=field_name, value=value, inline=False)
 
-    await _crown_field(STAFF_OF_MONTH_ROLE, som_id, "👑 Staff of the Month", mod_totals.get(som_id, 0), "moderation actions")
+    await _crown_field(STAFF_OF_MONTH_ROLE, som_id, "👑 Staff of the Month", mod_totals.get(som_id, 0), "moderation actions", sotm_extras=True)
     await _crown_field(MOST_ACTIVE_STAFF_ROLE, mas_id, "💬 Most Active Staff", activity_totals.get(mas_id, 0), "messages")
 
     extra_perks = STAFF_PERKS_TEXT.get(guild.id)
@@ -11301,6 +11538,309 @@ async def crownstaff(ctx):
     if embed is None:
         await ctx.send("📭 No moderation actions or staff activity recorded yet — nothing to crown.")
         return
+    await ctx.send(embed=embed)
+
+
+# ── Staff MVP (weekly) ────────────────────────────────────────
+def _current_award_week() -> str:
+    return discord.utils.utcnow().strftime("%G-W%V")
+
+
+async def _crown_mvp_award(guild: discord.Guild):
+    """Picks this week's Staff MVP (most staff-activity messages sent
+    this week), swaps the MVP role, tracks the win streak (with an
+    in-server cash bonus), hands off the private lounge + nickname
+    title, and returns the announcement embed — or None if nobody
+    qualifies yet."""
+    activity_totals = dict(MVP_ACTIVITY.get(guild.id, {}))
+    if not activity_totals:
+        return None
+
+    winner_id = max(activity_totals, key=lambda uid: (activity_totals[uid], -uid))
+    winner = guild.get_member(winner_id)
+    count = activity_totals[winner_id]
+    period = _current_award_week()
+
+    embed = discord.Embed(title="🏆 Staff MVP of the Week", color=discord.Color.orange(), timestamp=discord.utils.utcnow())
+    if not winner:
+        embed.add_field(name="🏆 Staff MVP", value="*No qualifying activity this week.*", inline=False)
+        embed.add_field(name="🎁 Perks", value=_MVP_PERKS_BLURB, inline=False)
+        embed.set_footer(text=f"TrapAI Staff MVP • {guild.name}")
+        return embed
+
+    value = f"{winner.mention} — **{count}** messages"
+
+    role_id = MVP_ROLE.get(guild.id)
+    role = guild.get_role(role_id) if role_id else None
+    old_holders = list(role.members) if role else []
+    if role:
+        for old_holder in old_holders:
+            if old_holder.id != winner.id:
+                try:
+                    await old_holder.remove_roles(role, reason="Staff MVP — new winner crowned")
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+        if role not in winner.roles:
+            try:
+                await winner.add_roles(role, reason="Staff MVP winner")
+            except (discord.Forbidden, discord.HTTPException):
+                value += f"\n⚠️ Couldn't grant {role.mention} — {_role_forbidden_reason(guild)}"
+            else:
+                value += f"\n🎁 Awarded {role.mention}"
+        else:
+            value += f"\n🎁 Keeps {role.mention}"
+
+    prev_winner = LAST_MVP_WINNER.get(guild.id)
+    streak = MVP_STREAK.get(guild.id, {}).get(winner.id, 0) + 1 if prev_winner == winner.id else 1
+    MVP_STREAK[guild.id] = {winner.id: streak}
+    LAST_MVP_WINNER[guild.id] = winner.id
+    _save_mvp_streak()
+    _save_last_mvp_winner()
+
+    bonus = 500 * streak
+    _add_earned(guild.id, winner.id, bonus)
+    value += f"\n🔥 **{streak}-week streak!** Bonus: {_fmt_money(bonus)}" if streak > 1 else f"\n💰 Streak bonus: {_fmt_money(bonus)}"
+
+    await _assign_lounge_access(guild, MVP_LOUNGE.get(guild.id), old_holders, winner)
+    for old_holder in old_holders:
+        if old_holder.id != winner.id:
+            await _refresh_titled_nickname(old_holder, has_mvp=False)
+    await _refresh_titled_nickname(winner, has_mvp=True)
+    _log_hall_of_fame(guild.id, "mvp", winner.id, period, count)
+
+    embed.add_field(name="🏆 Staff MVP", value=value, inline=False)
+    embed.add_field(name="🎁 Perks", value=_MVP_PERKS_BLURB, inline=False)
+    embed.set_footer(text=f"TrapAI Staff MVP • {guild.name}")
+    return embed
+
+
+async def _check_mvp_awards():
+    """Runs periodically. Crowns each guild exactly once per ISO week,
+    right when the week actually rolls over."""
+    week = _current_award_week()
+    changed = False
+    for guild in bot.guilds:
+        last = LAST_MVP_AWARD_WEEK.get(guild.id)
+        if last is None:
+            LAST_MVP_AWARD_WEEK[guild.id] = week
+            changed = True
+            continue
+        if last == week:
+            continue
+
+        embed = await _crown_mvp_award(guild)
+        if embed:
+            channel_id = MVP_AWARDS_CHANNEL.get(guild.id) or STAFF_AWARDS_CHANNEL.get(guild.id)
+            channel = guild.get_channel(channel_id) if channel_id else None
+            channel = channel or _resolve_update_channel(guild)
+            if channel:
+                try:
+                    await channel.send(embed=embed)
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+
+        MVP_ACTIVITY[guild.id] = {}
+        LAST_MVP_AWARD_WEEK[guild.id] = week
+        changed = True
+
+    if changed:
+        _save_last_mvp_award_week()
+        _save_mvp_activity()
+
+
+async def _mvp_awards_loop():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            await _check_mvp_awards()
+        except Exception:
+            pass
+        await asyncio.sleep(3600)
+
+
+@bot.command()
+@_permitted_check(administrator=True)
+async def setmvprole(ctx, role: discord.Role = None):
+    """
+    Set the role crowned each week to Staff MVP (most staff-activity
+    messages sent that week) — independent of Most Active Staff, which
+    stays monthly. Run with no argument to clear it. Usage: ,setmvprole @role
+    """
+    guild = ctx.guild
+    if role is None:
+        MVP_ROLE.pop(guild.id, None)
+        _save_mvp_role()
+        await ctx.send("↩️ Staff MVP role cleared.")
+        return
+    MVP_ROLE[guild.id] = role.id
+    _save_mvp_role()
+    await ctx.send(f"✅ {role.mention} will now be crowned to whoever wins **Staff MVP** each week.")
+
+
+@bot.command()
+@_permitted_check(administrator=True)
+async def setmvpawardschannel(ctx, channel: discord.TextChannel = None):
+    """
+    Set where the weekly Staff MVP announcement posts. Falls back to the
+    Staff Awards channel, then the update channel, if never set.
+    Usage: ,setmvpawardschannel #channel
+    """
+    guild = ctx.guild
+    if channel is None:
+        MVP_AWARDS_CHANNEL.pop(guild.id, None)
+        _save_mvp_awards_channel()
+        await ctx.send("↩️ Staff MVP channel cleared — falling back to Staff Awards / update channel.")
+        return
+    MVP_AWARDS_CHANNEL[guild.id] = channel.id
+    _save_mvp_awards_channel()
+    await ctx.send(f"✅ Staff MVP will now post in {channel.mention}.")
+
+
+@bot.command(aliases=["mvpawards"])
+@_permitted_check(manage_guild=True)
+async def crownmvp(ctx):
+    """
+    Manually run the Staff MVP pick right now instead of waiting for the
+    weekly auto-crown, and post the announcement here. Usage: ,crownmvp
+    """
+    embed = await _crown_mvp_award(ctx.guild)
+    if embed is None:
+        await ctx.send("📭 No staff activity recorded yet this week — nothing to crown.")
+        return
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+@_permitted_check(administrator=True)
+async def sethalloffamerole(ctx, role: discord.Role = None):
+    """
+    Set the PERMANENT role granted to every Staff of the Month winner —
+    never removed, stacks up as a lifetime badge. Run with no argument
+    to clear it (existing holders keep the role; only future winners
+    stop receiving it). Usage: ,sethalloffamerole @role
+    """
+    guild = ctx.guild
+    if role is None:
+        HALL_OF_FAME_ROLE.pop(guild.id, None)
+        _save_hall_of_fame_role()
+        await ctx.send("↩️ Hall of Fame role cleared — existing holders keep it, no new winners will.")
+        return
+    HALL_OF_FAME_ROLE[guild.id] = role.id
+    _save_hall_of_fame_role()
+    await ctx.send(f"✅ Every future Staff of the Month winner will be permanently inducted into {role.mention}.")
+
+
+@bot.command()
+@_permitted_check(administrator=True)
+async def setsotmtitle(ctx, *, tag: str = None):
+    """
+    Set the nickname tag shown while a member holds Staff of the Month
+    (default 👑). Run with no argument to reset to the default.
+    Usage: ,setsotmtitle 👑
+    """
+    guild = ctx.guild
+    if tag is None:
+        SOTM_TITLE.pop(guild.id, None)
+        _save_sotm_title()
+        await ctx.send("↩️ Staff of the Month nickname title reset to the default 👑.")
+        return
+    SOTM_TITLE[guild.id] = tag.strip()[:16]
+    _save_sotm_title()
+    await ctx.send(f"✅ Staff of the Month's nickname will now show **{tag.strip()[:16]}**.")
+
+
+@bot.command()
+@_permitted_check(administrator=True)
+async def setmvptitle(ctx, *, tag: str = None):
+    """
+    Set the nickname tag shown while a member holds Staff MVP (default
+    🏆). Run with no argument to reset to the default. Usage: ,setmvptitle 🏆
+    """
+    guild = ctx.guild
+    if tag is None:
+        MVP_TITLE.pop(guild.id, None)
+        _save_mvp_title()
+        await ctx.send("↩️ Staff MVP nickname title reset to the default 🏆.")
+        return
+    MVP_TITLE[guild.id] = tag.strip()[:16]
+    _save_mvp_title()
+    await ctx.send(f"✅ Staff MVP's nickname will now show **{tag.strip()[:16]}**.")
+
+
+@bot.command()
+@_permitted_check(administrator=True)
+async def setsotmlounge(ctx, text: discord.TextChannel = None, voice: discord.VoiceChannel = None):
+    """
+    Set the private lounge channels handed off to whoever's currently
+    Staff of the Month. Lock both channels down from @everyone yourself
+    first — the bot only ever grants the current winner an explicit
+    override and clears the previous winner's. Run with no arguments to
+    clear both. Usage: ,setsotmlounge #text-channel voice-channel-name
+    """
+    guild = ctx.guild
+    if text is None and voice is None:
+        SOTM_LOUNGE.pop(guild.id, None)
+        _save_sotm_lounge()
+        await ctx.send("↩️ Staff of the Month lounge cleared.")
+        return
+    cfg = SOTM_LOUNGE.setdefault(guild.id, {})
+    if text is not None:
+        cfg["text"] = text.id
+    if voice is not None:
+        cfg["voice"] = voice.id
+    _save_sotm_lounge()
+    parts = [c.mention for c in (text, voice) if c]
+    await ctx.send(f"✅ Staff of the Month lounge set: {', '.join(parts)}.")
+
+
+@bot.command()
+@_permitted_check(administrator=True)
+async def setmvplounge(ctx, text: discord.TextChannel = None, voice: discord.VoiceChannel = None):
+    """
+    Set the private lounge channels handed off to whoever's currently
+    Staff MVP. Same rules as ,setsotmlounge — lock both channels from
+    @everyone yourself first. Run with no arguments to clear both.
+    Usage: ,setmvplounge #text-channel voice-channel-name
+    """
+    guild = ctx.guild
+    if text is None and voice is None:
+        MVP_LOUNGE.pop(guild.id, None)
+        _save_mvp_lounge()
+        await ctx.send("↩️ Staff MVP lounge cleared.")
+        return
+    cfg = MVP_LOUNGE.setdefault(guild.id, {})
+    if text is not None:
+        cfg["text"] = text.id
+    if voice is not None:
+        cfg["voice"] = voice.id
+    _save_mvp_lounge()
+    parts = [c.mention for c in (text, voice) if c]
+    await ctx.send(f"✅ Staff MVP lounge set: {', '.join(parts)}.")
+
+
+@bot.command()
+async def halloffame(ctx):
+    """Show past Staff of the Month and Staff MVP winners. Usage: ,halloffame"""
+    entries = HALL_OF_FAME_LOG.get(ctx.guild.id, [])
+    if not entries:
+        await ctx.send("📭 No Hall of Fame history yet — run `,crownstaff` / `,crownmvp` or wait for the auto-crown.")
+        return
+
+    def _fmt_entries(kind, unit):
+        rows = [e for e in entries if e["kind"] == kind][-10:][::-1]
+        if not rows:
+            return "*None yet.*"
+        lines = []
+        for e in rows:
+            member = ctx.guild.get_member(e["user_id"])
+            name = member.mention if member else f"`{e['user_id']}` (left server)"
+            lines.append(f"**{e['period']}** — {name} ({e['count']} {unit})")
+        return "\n".join(lines)
+
+    embed = discord.Embed(title="🏛️ Staff Hall of Fame", color=discord.Color.gold(), timestamp=discord.utils.utcnow())
+    embed.add_field(name="👑 Staff of the Month", value=_fmt_entries("sotm", "actions"), inline=False)
+    embed.add_field(name="🏆 Staff MVP", value=_fmt_entries("mvp", "messages"), inline=False)
+    embed.set_footer(text=f"TrapAI Hall of Fame • {ctx.guild.name}")
     await ctx.send(embed=embed)
 
 
