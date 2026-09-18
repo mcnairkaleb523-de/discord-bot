@@ -3331,7 +3331,7 @@ class VCControlView(discord.ui.View):
         vc = await self._check(interaction)
         if not vc:
             return
-        await vc.set_permissions(interaction.guild.default_role, view_channel=False)
+        await _vc_merge_permissions(vc, interaction.guild.default_role, view_channel=False)
         embed = discord.Embed(description="👻 VC **hidden** from everyone.", color=discord.Color.dark_grey())
         await interaction.response.send_message(embed=embed, ephemeral=True)
         await _vc_announce(interaction.guild, vc, f"👻 **{interaction.user.display_name}** hid the VC.")
@@ -3341,7 +3341,7 @@ class VCControlView(discord.ui.View):
         vc = await self._check(interaction)
         if not vc:
             return
-        await vc.set_permissions(interaction.guild.default_role, view_channel=True)
+        await _vc_merge_permissions(vc, interaction.guild.default_role, view_channel=True)
         embed = discord.Embed(description="👀 VC is now **visible** to everyone.", color=discord.Color.blurple())
         await interaction.response.send_message(embed=embed, ephemeral=True)
         await _vc_announce(interaction.guild, vc, f"👀 **{interaction.user.display_name}** made the VC visible.")
@@ -3508,14 +3508,34 @@ async def _vc_announce(guild: discord.Guild, vc: discord.VoiceChannel, message: 
 # so callers can format the error however fits their context (embed vs.
 # ephemeral interaction reply).
 
+async def _vc_merge_permissions(channel, target, **perms):
+    """channel.set_permissions(target, **perms) REPLACES that target's
+    ENTIRE overwrite with only the bits passed — it does not merge. Since
+    a temp VC's own voice channel doubles as its text chat, Lock/Unlock,
+    Hide/Show, Permit/Kick/Ban/Mute and ownership transfer all touch
+    overwrites on the SAME channel, and every one of them used to wipe
+    out whatever bits the others had set (e.g. locking after hiding
+    silently un-hid it; permitting an existing mod stripped their mod
+    overwrite bits, including send_messages for a member who'd been
+    granted it another way). Fetch-mutate-reapply instead so each call
+    only ever touches the specific bits it means to change."""
+    ow = channel.overwrites_for(target)
+    for key, value in perms.items():
+        setattr(ow, key, value)
+    if ow.is_empty():
+        await channel.set_permissions(target, overwrite=None)
+    else:
+        await channel.set_permissions(target, overwrite=ow)
+
+
 async def _vc_lock(ch):
-    await ch.set_permissions(ch.guild.default_role, connect=False)
+    await _vc_merge_permissions(ch, ch.guild.default_role, connect=False)
     vc_locked.add(ch.id)
     _save_temp_vcs()
 
 
 async def _vc_unlock(ch):
-    await ch.set_permissions(ch.guild.default_role, connect=True)
+    await _vc_merge_permissions(ch, ch.guild.default_role, connect=True)
     vc_locked.discard(ch.id)
     _save_temp_vcs()
 
@@ -3528,7 +3548,7 @@ async def _vc_kick_member(ch, actor, member):
     if not member.voice or member.voice.channel != ch:
         return "❌ That user is not in your VC."
     await member.move_to(None)
-    await ch.set_permissions(member, connect=False)
+    await _vc_merge_permissions(ch, member, connect=False)
     vc_kicked.setdefault(ch.id, set()).add(member.id)
     _save_temp_vcs()
     return None
@@ -3560,7 +3580,7 @@ async def _vc_unban_member(ch, guild_id, member):
 
 
 async def _vc_permit_member(ch, guild_id, member):
-    await ch.set_permissions(member, connect=True, view_channel=True)
+    await _vc_merge_permissions(ch, member, connect=True, view_channel=True)
     # A permit lifts any standing ban too — see the text-command version
     # of ,vcpermit for why this matters.
     vc_banned.get(ch.id, set()).discard(member.id)
@@ -3577,7 +3597,16 @@ async def _vc_transfer_ownership(ch, guild, member):
     old_owner = guild.get_member(old_owner_id) if old_owner_id else None
     temp_vc_owners[ch.id] = member.id
     _save_temp_vcs()
-    await ch.set_permissions(member, manage_channels=True, manage_permissions=True, move_members=True, connect=True, speak=True)
+    # One merged overwrite with every owner bit — a temp VC's own text
+    # chat lives in this same channel object, so a second, separate
+    # set_permissions() call here (as this used to do) would silently
+    # wipe out whichever bits the first call had just set, since
+    # set_permissions() replaces rather than merges.
+    await _vc_merge_permissions(
+        ch, member,
+        manage_channels=True, manage_permissions=True, move_members=True,
+        connect=True, speak=True, view_channel=True, send_messages=True, read_message_history=True,
+    )
     # Revoke the previous owner's channel-admin overwrite — otherwise
     # they'd keep native Discord control even though the bot now
     # considers someone else the owner.
@@ -3586,11 +3615,6 @@ async def _vc_transfer_ownership(ch, guild, member):
             await ch.set_permissions(old_owner, overwrite=None)
         except (discord.Forbidden, discord.HTTPException):
             pass
-    text_id = temp_vc_text_channels.get(ch.id)
-    if text_id:
-        text_ch = guild.get_channel(text_id)
-        if text_ch:
-            await text_ch.set_permissions(member, view_channel=True, send_messages=True, read_message_history=True)
     return None
 
 
@@ -3600,7 +3624,7 @@ async def _vc_add_mod(ch, guild_id, actor, member):
     vc_mods.setdefault(ch.id, set()).add(member.id)
     vc_owner_mods.setdefault(guild_id, {}).setdefault(actor.id, set()).add(member.id)
     _save_temp_vcs()
-    await ch.set_permissions(member, move_members=True, mute_members=True, deafen_members=True, manage_channels=True)
+    await _vc_merge_permissions(ch, member, move_members=True, mute_members=True, deafen_members=True, manage_channels=True)
     return None
 
 
@@ -7398,7 +7422,7 @@ async def vchide(ctx):
     if not ch:
         await ctx.send("❌ You must be in a VC you own or moderate.")
         return
-    await ch.set_permissions(ctx.guild.default_role, view_channel=False)
+    await _vc_merge_permissions(ch, ctx.guild.default_role, view_channel=False)
     await ctx.send(embed=_vc_embed("👻 VC Hidden", f"**{ch.name}** is now invisible to everyone."))
     await _vc_announce(ctx.guild, ch, f"👻 **{ctx.author.display_name}** hid the VC.")
 
@@ -7409,7 +7433,7 @@ async def vcshow(ctx):
     if not ch:
         await ctx.send("❌ You must be in a VC you own or moderate.")
         return
-    await ch.set_permissions(ctx.guild.default_role, view_channel=True)
+    await _vc_merge_permissions(ch, ctx.guild.default_role, view_channel=True)
     await ctx.send(embed=_vc_embed("👀 VC Visible", f"**{ch.name}** is now visible to everyone.", discord.Color.blurple()))
     await _vc_announce(ctx.guild, ch, f"👀 **{ctx.author.display_name}** made the VC visible.")
 
@@ -7611,21 +7635,7 @@ async def vcclaim(ctx):
         await ctx.send(f"❌ {old_owner.mention} is still here — ask them to use `,vctransfer`, or claim it after they leave.")
         return
 
-    temp_vc_owners[ch.id] = ctx.author.id
-    _save_temp_vcs()
-    await ch.set_permissions(ctx.author, manage_channels=True, manage_permissions=True, move_members=True, connect=True, speak=True)
-    # Revoke the old owner's channel-admin overwrite — see VCTransferModal
-    # for why this matters (otherwise they keep native Discord control).
-    if old_owner and old_owner.id != ctx.author.id:
-        try:
-            await ch.set_permissions(old_owner, overwrite=None)
-        except (discord.Forbidden, discord.HTTPException):
-            pass
-    text_id = temp_vc_text_channels.get(ch.id)
-    if text_id:
-        text_ch = ctx.guild.get_channel(text_id)
-        if text_ch:
-            await text_ch.set_permissions(ctx.author, view_channel=True, send_messages=True, read_message_history=True)
+    await _vc_transfer_ownership(ch, ctx.guild, ctx.author)
 
     await ctx.send(embed=_vc_embed("👑 Ownership Claimed", f"{ctx.author.mention} claimed ownership of **{ch.name}** — the previous owner left.", discord.Color.purple()))
     await _vc_announce(ctx.guild, ch, f"👑 **{ctx.author.display_name}** claimed ownership — the previous owner left the VC.")
