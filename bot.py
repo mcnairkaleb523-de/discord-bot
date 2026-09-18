@@ -6242,17 +6242,6 @@ async def on_message(message):
             except (discord.Forbidden, discord.HTTPException):
                 pass
 
-    # ── Nudge toward the rep role if they can't actually see their GIF ──
-    # A file-attachment GIF without attach_files never reaches the bot at
-    # all (Discord blocks the send client-side) — this only ever fires for
-    # the realistic case, a GIF link/native-picker GIF without embed_links,
-    # which still sends fine as plain text, just with no preview.
-    if _is_gif_message(message) and not message.channel.permissions_for(message.author).embed_links:
-        try:
-            await message.reply("get rep the server to get yo pic perms dummy 😭", mention_author=True)
-        except (discord.Forbidden, discord.HTTPException):
-            pass
-
     # Always process commands first — never let automod swallow bot commands
     # Staff (manage_messages+) and command invocations are exempt from automod.
     # Checked via a real context resolution (ctx.valid), NOT a bare prefix-string
