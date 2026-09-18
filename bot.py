@@ -419,6 +419,7 @@ def _save_all_state() -> None:
     _save_vouch_config()
     _save_role_vouch_pending()
     _save_protected_roles()
+    _save_high_staff_roles()
     _save_permitted_roles()
     _save_staff_rules()
     _save_staff_ticket_claims()
@@ -451,6 +452,12 @@ def _save_all_state() -> None:
     _save_tasks()
     _save_giveaways()
     _save_chat_stats()
+    _save_staff_activity()
+    _save_staff_of_month_role()
+    _save_most_active_staff_role()
+    _save_staff_awards_channel()
+    _save_staff_perks_text()
+    _save_last_staff_award_month()
     _save_vc_stats()
     _save_temp_vcs()
     _save_birthdays()
@@ -1129,6 +1136,7 @@ WHOLE_BOT_PREMIUM_ONLY_COMMANDS = {
     # Staff Tools (whole category)
     "staffpsa", "task", "tasklist", "acceptstaff", "denystaff", "setstaffrules", "setstaffmeeting", "staffleaderboard", "staffstats",
     "staffwarn", "staffstrike", "staffwarnings", "staffstrikes", "clearstaffwarnings", "clearstaffstrikes",
+    "setstaffofmonthrole", "setmostactiverole", "setstaffawardschannel", "setstaffperks", "crownstaff",
     # Advanced admin/setup
     "backup", "restore", "listbackups", "deletebackup", "exportconfig",
     # Niche fun/utility
@@ -1399,6 +1407,60 @@ def _log_mod_action(guild_id: int, user_id: int, action: str, moderator, reason:
 # CHAT_STATS[guild_id][user_id] = message_count (all-time, persisted)
 CHAT_STATS: dict[int, dict[int, int]] = _load_depth(_load_data("chat_stats", {}), 2)
 
+# ── Staff of the Month / Most Active Staff ──────────────────
+# STAFF_ACTIVITY[guild_id][user_id] = message_count sent by that staff
+# member during the CURRENT award period only — reset every time a new
+# month is crowned (see _check_staff_awards). Only staff (Manage
+# Messages or Administrator) get counted here at all.
+STAFF_ACTIVITY: dict[int, dict[int, int]] = _load_depth(_load_data("staff_activity", {}), 2)
+# STAFF_OF_MONTH_ROLE[guild_id] = role_id — crowned each period to
+# whoever logged the most moderation actions (bans, jails, kicks,
+# timeouts, mutes, warns, hardbans, strips) in the trailing 30 days.
+STAFF_OF_MONTH_ROLE: dict[int, int] = _load_depth(_load_data("staff_of_month_role", {}), 1)
+# MOST_ACTIVE_STAFF_ROLE[guild_id] = role_id — crowned each period to
+# whoever sent the most messages while holding staff permissions.
+MOST_ACTIVE_STAFF_ROLE: dict[int, int] = _load_depth(_load_data("most_active_staff_role", {}), 1)
+# STAFF_AWARDS_CHANNEL[guild_id] = channel_id — where the monthly
+# announcement posts. Falls back to the update channel if unset.
+STAFF_AWARDS_CHANNEL: dict[int, int] = _load_depth(_load_data("staff_awards_channel", {}), 1)
+# STAFF_PERKS_TEXT[guild_id] = "..." — shown in the announcement so
+# everyone knows what the winners actually get. Set via ,setstaffperks.
+STAFF_PERKS_TEXT: dict[int, str] = _load_depth(_load_data("staff_perks_text", {}), 1)
+# LAST_STAFF_AWARD_MONTH[guild_id] = "YYYY-MM" — the last calendar month
+# this server was crowned for, so the periodic loop fires exactly once
+# per month rollover instead of every time it ticks.
+LAST_STAFF_AWARD_MONTH: dict[int, str] = _load_depth(_load_data("last_staff_award_month", {}), 1)
+
+
+def _save_staff_activity():
+    _save_data("staff_activity", _dump_depth(STAFF_ACTIVITY, 2))
+
+
+def _save_staff_of_month_role():
+    _save_data("staff_of_month_role", _dump_depth(STAFF_OF_MONTH_ROLE, 1))
+
+
+def _save_most_active_staff_role():
+    _save_data("most_active_staff_role", _dump_depth(MOST_ACTIVE_STAFF_ROLE, 1))
+
+
+def _save_staff_awards_channel():
+    _save_data("staff_awards_channel", _dump_depth(STAFF_AWARDS_CHANNEL, 1))
+
+
+def _save_staff_perks_text():
+    _save_data("staff_perks_text", _dump_depth(STAFF_PERKS_TEXT, 1))
+
+
+def _save_last_staff_award_month():
+    _save_data("last_staff_award_month", _dump_depth(LAST_STAFF_AWARD_MONTH, 1))
+
+
+def _is_staff_member(member: discord.Member) -> bool:
+    """Baseline staff definition for award eligibility: native Manage
+    Messages or Administrator permission."""
+    return member.guild_permissions.manage_messages or member.guild_permissions.administrator
+
 # ── AFK ──────────────────────────────────────────────────────
 # AFK_USERS[guild_id][user_id] = {"reason": str, "since": float (epoch),
 # "old_nick": str|None} — set via ,afk, cleared automatically the next
@@ -1483,6 +1545,19 @@ VOUCH_CONFIG: dict[int, dict] = _load_depth(_load_data("vouch_config", {}), 1)
 PROTECTED_ROLES: dict[int, set] = {
     int(gid): set(role_ids) for gid, role_ids in _load_data("protected_roles", {}).items()
 }
+
+# ── High-staff roles (,lock exemption) ───────────────────────
+# HIGH_STAFF_ROLES[guild_id] = {role_id, ...}
+# The only roles still allowed to talk in a channel locked with ,lock —
+# everyone else, including lower-rank staff without one of these roles,
+# gets blocked by the @everyone deny. Managed via ,highstaffrole.
+HIGH_STAFF_ROLES: dict[int, set] = {
+    int(gid): set(role_ids) for gid, role_ids in _load_data("high_staff_roles", {}).items()
+}
+
+
+def _save_high_staff_roles():
+    _save_data("high_staff_roles", {str(gid): list(role_ids) for gid, role_ids in HIGH_STAFF_ROLES.items()})
 
 # ── Permitted-role system ────────────────────────────────────
 # PERMITTED_ROLES[guild_id][command_qualified_name] = {role_id, ...}
@@ -3644,7 +3719,7 @@ class VCAddModModal(discord.ui.Modal, title="🛡 Add VC Moderator"):
 # manually with COMMAND_CATALOG in oauth_server.py (that file has no
 # import relationship with this one — see its docstring).
 HELP_CATEGORIES = [
-    ('🛡️', 'Moderation', ['kick', 'ban', 'massban', 'massunban', 'pullback', 'mute', 'unmute', 'timeout', 'warn', 'warnings', 'clearwarnings', 'modhistory', 'hardban', 'unhardban', 'hardbans', 'clear', 'purge', 'lock', 'unlock', 'hide', 'unhide', 'slowmode', 'nuke', 'lockdown', 'unlockdown', 'raidmode', 'nickname', 'strip', 'trapwarn', 'trapscan', 'restart']),
+    ('🛡️', 'Moderation', ['kick', 'ban', 'massban', 'massunban', 'pullback', 'mute', 'unmute', 'timeout', 'warn', 'warnings', 'clearwarnings', 'modhistory', 'hardban', 'unhardban', 'hardbans', 'clear', 'purge', 'lock', 'unlock', 'highstaffrole', 'hide', 'unhide', 'slowmode', 'nuke', 'lockdown', 'unlockdown', 'raidmode', 'nickname', 'strip', 'trapwarn', 'trapscan', 'restart']),
     ('🔒', 'Jail & Anti-Raid', ['jail', 'unjail', 'worktime', 'setupjail', 'lockjailed', 'antiraid', 'raidwhitelist', 'wl']),
     ('🤖', 'Verification', ['verify', 'unverify', 'denyverify', 'sendverify', 'setverifybackup']),
     ('🏷️', 'Roles', ['role', 'roleall', 'massrole', 'massunrole', 'restoreallroles', 'autorole', 'setgifrole', 'protectedrole', 'br', 'roles', 'createrolemenu', 'addrole', 'removerole', 'rolemenus']),
@@ -3657,7 +3732,7 @@ HELP_CATEGORIES = [
     ('💰', 'Economy & Games', ['balance', 'jobs', 'setjob', 'daily', 'weekly', 'work', 'rob', 'give', 'deposit', 'withdraw', 'leaderboard', 'gamblers', 'slots', 'blackjack', 'coinflip', 'dice', 'duel', 'basketball', 'archery', 'cuppong', '8ball', 'trivia', 'hangman', 'wordle', 'tictactoe', 'connect4', 'checkers', 'chess', 'numguess', 'rockpaperscissors', 'highlow', 'crash', '21questions', 'games', 'shop', 'buyrole', 'setroleshop', 'buyfgvc', 'setvcshop', 'storefront']),
     ('🎂', 'Birthdays', ['birthday', 'removebirthday', 'setbirthday', 'setbirthdaychannel', 'birthdaylist', 'settimezone']),
     ('🚀', 'Boosts & Vanity', ['setboostchannel', 'setvanitycode', 'setvanityrole', 'vanityconfig']),
-    ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist', 'acceptstaff', 'denystaff', 'setstaffrules', 'setstaffmeeting', 'staffleaderboard', 'staffstats', 'staffwarn', 'staffstrike', 'staffwarnings', 'staffstrikes', 'clearstaffwarnings', 'clearstaffstrikes']),
+    ('📋', 'Staff Tools', ['staffpsa', 'task', 'tasklist', 'acceptstaff', 'denystaff', 'setstaffrules', 'setstaffmeeting', 'staffleaderboard', 'staffstats', 'staffwarn', 'staffstrike', 'staffwarnings', 'staffstrikes', 'clearstaffwarnings', 'clearstaffstrikes', 'setstaffofmonthrole', 'setmostactiverole', 'setstaffawardschannel', 'setstaffperks', 'crownstaff']),
     ('⚙️', 'Admin & Setup', ['setup', 'lockunverified', 'backup', 'restore', 'listbackups', 'deletebackup', 'exportconfig', 'setlogchannel', 'setwelcome', 'disablewelcome', 'sendwelcome', 'welcome', 'sendinvite', 'announce', 'setpermittedrole', 'setbotbio', 'setupdatechannel', 'resendupdate']),
     ('🎲', 'Fun & Utility', ['snipe', 'clearsnipe', 'editsnipe', 'quote', 'rules', 'cmds', 'help', 'afk']),
 ]
@@ -4568,6 +4643,7 @@ async def on_ready():
         asyncio.create_task(_autosave_loop())
         asyncio.create_task(_birthday_loop())
         asyncio.create_task(_staff_meeting_loop())
+        asyncio.create_task(_staff_awards_loop())
 
         # Post the latest changelog entry to any guild that hasn't seen it
         # yet — covers every kind of restart (Railway redeploy after a
@@ -6113,6 +6189,11 @@ async def on_message(message):
     # Track chat stats
     guild_stats = CHAT_STATS.setdefault(message.guild.id, {})
     guild_stats[message.author.id] = guild_stats.get(message.author.id, 0) + 1
+
+    # Track staff activity for this award period (Most Active Staff)
+    if _is_staff_member(message.author):
+        staff_stats = STAFF_ACTIVITY.setdefault(message.guild.id, {})
+        staff_stats[message.author.id] = staff_stats.get(message.author.id, 0) + 1
 
     # ── AFK: clear the author's own AFK the moment they talk again ──
     afk_entry = AFK_USERS.get(message.guild.id, {}).pop(message.author.id, None)
@@ -9145,10 +9226,82 @@ async def clear(ctx, amount: int):
 
 
 @bot.command()
+@_permitted_check(administrator=True)
+async def highstaffrole(ctx, action: str = None, role: discord.Role = None):
+    """
+    Manage which roles count as "high rank" — the only ones still allowed
+    to talk in a channel locked with ,lock. Everyone else, including
+    lower-rank staff without one of these roles, gets blocked.
+
+    Usage:
+      ,highstaffrole list          — see all high-staff roles
+      ,highstaffrole add @role     — mark a role as high-staff
+      ,highstaffrole remove @role  — unmark a role
+    """
+    guild = ctx.guild
+    high = HIGH_STAFF_ROLES.setdefault(guild.id, set())
+
+    if action is None or action.lower() == "list":
+        embed = discord.Embed(
+            title="👑 High-Staff Roles",
+            description="These roles can still talk in any channel locked with `,lock`.",
+            color=discord.Color.blurple(),
+            timestamp=discord.utils.utcnow()
+        )
+        if high:
+            lines = [f"👑 {r.mention} (`{rid}`)" if (r := guild.get_role(rid)) else f"👑 *deleted role* (`{rid}`)" for rid in high]
+            embed.add_field(name=f"Roles ({len(high)})", value="\n".join(lines), inline=False)
+        else:
+            embed.add_field(name="No high-staff roles set", value="Use `,highstaffrole add @role` to add one.", inline=False)
+        embed.set_footer(text=f"TrapAI • {guild.name}")
+        await ctx.send(embed=embed)
+        return
+
+    if role is None:
+        await ctx.send("❌ Provide a role. Example: `,highstaffrole add @Head Staff`", delete_after=8)
+        return
+
+    if action.lower() == "add":
+        if role.id in high:
+            await ctx.send(f"❌ **{role.name}** is already a high-staff role.", delete_after=6)
+            return
+        high.add(role.id)
+        _save_high_staff_roles()
+        await ctx.send(f"✅ {role.mention} can now talk through any `,lock`.")
+    elif action.lower() == "remove":
+        if role.id not in high:
+            await ctx.send(f"❌ **{role.name}** isn't a high-staff role.", delete_after=6)
+            return
+        high.discard(role.id)
+        _save_high_staff_roles()
+        await ctx.send(f"✅ {role.mention} is no longer exempt from `,lock`.")
+    else:
+        await ctx.send("❌ Usage: `,highstaffrole list|add|remove [@role]`", delete_after=8)
+
+
+@bot.command()
 @_permitted_check(manage_channels=True)
 async def lock(ctx):
-    await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=False)
-    await ctx.send("🔒 Channel locked")
+    """
+    Lock the channel — only high-staff roles (set with ,highstaffrole)
+    can still send messages here; everyone else, including lower-rank
+    staff, is blocked. Usage: ,lock
+    """
+    guild, channel = ctx.guild, ctx.channel
+    await channel.set_permissions(guild.default_role, send_messages=False)
+
+    high_roles = []
+    for role_id in HIGH_STAFF_ROLES.get(guild.id, set()):
+        role = guild.get_role(role_id)
+        if role:
+            await channel.set_permissions(role, send_messages=True)
+            high_roles.append(role)
+
+    if high_roles:
+        exempt_note = " — exempt: " + ", ".join(r.mention for r in high_roles)
+    else:
+        exempt_note = " — no high-staff roles set, use `,highstaffrole add @role` to exempt one"
+    await ctx.send(f"🔒 Channel locked{exempt_note}")
     await log(ctx.guild, "mod", "Channel Locked", None, discord.Color.red(),
               fields=[("🛡 Moderator", f"{ctx.author.mention} (`{ctx.author.id}`)", True), ("🔐 Channel", ctx.channel.mention, True)],
               actor=ctx.author)
@@ -9185,6 +9338,17 @@ async def unlock(ctx):
             await channel.set_permissions(unverified_role, overwrite=None)
         else:
             await channel.set_permissions(unverified_role, overwrite=uow)
+
+    for role_id in HIGH_STAFF_ROLES.get(guild.id, set()):
+        role = guild.get_role(role_id)
+        if not role:
+            continue
+        row = channel.overwrites_for(role)
+        row.send_messages = None
+        if row.is_empty():
+            await channel.set_permissions(role, overwrite=None)
+        else:
+            await channel.set_permissions(role, overwrite=row)
 
     await ctx.send("🔓 Channel unlocked (including for unverified members)")
     await log(ctx.guild, "mod", "Channel Unlocked", None, discord.Color.green(),
@@ -10903,6 +11067,218 @@ async def staffstats(ctx, member: discord.Member = None):
     embed.add_field(name="🎫 Tickets Claimed", value=str(claims), inline=True)
     embed.add_field(name="Σ Total Actions", value=str(total), inline=True)
     embed.set_footer(text=f"TrapAI Staff Stats • {ctx.guild.name}")
+    await ctx.send(embed=embed)
+
+
+# ── Staff of the Month / Most Active Staff ──────────────────
+def _current_award_month() -> str:
+    return discord.utils.utcnow().strftime("%Y-%m")
+
+
+def _staff_mod_totals_30d(guild_id: int) -> dict[int, int]:
+    """{moderator_id: action_count} from MOD_HISTORY, trailing 30 days only."""
+    cutoff = discord.utils.utcnow() - timedelta(days=30)
+    totals: dict[int, int] = {}
+    for target_history in MOD_HISTORY.get(guild_id, {}).values():
+        for entry in target_history:
+            mod_id = entry.get("moderator_id")
+            if mod_id is None or entry.get("action") not in _STAFF_LEADERBOARD_ACTIONS:
+                continue
+            if entry["time"] < cutoff:
+                continue
+            totals[mod_id] = totals.get(mod_id, 0) + 1
+    return totals
+
+
+async def _crown_staff_awards(guild: discord.Guild):
+    """Picks this period's Staff of the Month (most moderation actions in
+    the trailing 30 days) and Most Active Staff (most messages sent by a
+    staff member this period), swaps the reward roles onto the winners,
+    and returns the announcement embed — or None if there's no data to
+    crown anyone with yet."""
+    mod_totals = _staff_mod_totals_30d(guild.id)
+    activity_totals = dict(STAFF_ACTIVITY.get(guild.id, {}))
+    if not mod_totals and not activity_totals:
+        return None
+
+    som_id = max(mod_totals, key=lambda uid: (mod_totals[uid], -uid)) if mod_totals else None
+    mas_id = max(activity_totals, key=lambda uid: (activity_totals[uid], -uid)) if activity_totals else None
+
+    embed = discord.Embed(title="🏆 Staff Awards", color=discord.Color.gold(), timestamp=discord.utils.utcnow())
+
+    async def _crown_field(role_map, winner_id, field_name, count, unit):
+        role_id = role_map.get(guild.id)
+        role = guild.get_role(role_id) if role_id else None
+        winner = guild.get_member(winner_id) if winner_id else None
+        if not winner:
+            embed.add_field(name=field_name, value="*No qualifying activity this period.*", inline=False)
+            return
+        value = f"{winner.mention} — **{count}** {unit}"
+        if role:
+            for old_holder in list(role.members):
+                if old_holder.id != winner.id:
+                    try:
+                        await old_holder.remove_roles(role, reason="Staff awards — new winner crowned")
+                    except (discord.Forbidden, discord.HTTPException):
+                        pass
+            if role not in winner.roles:
+                try:
+                    await winner.add_roles(role, reason="Staff awards winner")
+                except (discord.Forbidden, discord.HTTPException):
+                    value += f"\n⚠️ Couldn't grant {role.mention} — {_role_forbidden_reason(guild)}"
+                else:
+                    value += f"\n🎁 Awarded {role.mention}"
+            else:
+                value += f"\n🎁 Keeps {role.mention}"
+        embed.add_field(name=field_name, value=value, inline=False)
+
+    await _crown_field(STAFF_OF_MONTH_ROLE, som_id, "👑 Staff of the Month", mod_totals.get(som_id, 0), "moderation actions")
+    await _crown_field(MOST_ACTIVE_STAFF_ROLE, mas_id, "💬 Most Active Staff", activity_totals.get(mas_id, 0), "messages")
+
+    perks = STAFF_PERKS_TEXT.get(guild.id)
+    embed.add_field(
+        name="🎁 Perks",
+        value=perks if perks else "*No perks configured yet — set some with `,setstaffperks`.*",
+        inline=False
+    )
+    embed.set_footer(text=f"TrapAI Staff Awards • {guild.name}")
+    return embed
+
+
+async def _check_staff_awards():
+    """Runs periodically. Crowns each guild exactly once per calendar
+    month, right when the month actually rolls over."""
+    month = _current_award_month()
+    changed = False
+    for guild in bot.guilds:
+        last = LAST_STAFF_AWARD_MONTH.get(guild.id)
+        if last is None:
+            # First time seeing this guild — baseline it without crowning
+            # off partial/incomplete history.
+            LAST_STAFF_AWARD_MONTH[guild.id] = month
+            changed = True
+            continue
+        if last == month:
+            continue
+
+        embed = await _crown_staff_awards(guild)
+        if embed:
+            channel_id = STAFF_AWARDS_CHANNEL.get(guild.id)
+            channel = guild.get_channel(channel_id) if channel_id else None
+            channel = channel or _resolve_update_channel(guild)
+            if channel:
+                try:
+                    await channel.send(embed=embed)
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+
+        STAFF_ACTIVITY[guild.id] = {}
+        LAST_STAFF_AWARD_MONTH[guild.id] = month
+        changed = True
+
+    if changed:
+        _save_last_staff_award_month()
+        _save_staff_activity()
+
+
+async def _staff_awards_loop():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            await _check_staff_awards()
+        except Exception:
+            pass
+        await asyncio.sleep(3600)
+
+
+@bot.command()
+@_permitted_check(administrator=True)
+async def setstaffofmonthrole(ctx, role: discord.Role = None):
+    """
+    Set the role crowned each period to Staff of the Month (most
+    moderation actions in the trailing 30 days). Run with no argument to
+    clear it. Usage: ,setstaffofmonthrole @role
+    """
+    guild = ctx.guild
+    if role is None:
+        STAFF_OF_MONTH_ROLE.pop(guild.id, None)
+        _save_staff_of_month_role()
+        await ctx.send("↩️ Staff of the Month role cleared.")
+        return
+    STAFF_OF_MONTH_ROLE[guild.id] = role.id
+    _save_staff_of_month_role()
+    await ctx.send(f"✅ {role.mention} will now be crowned to whoever wins **Staff of the Month**.")
+
+
+@bot.command()
+@_permitted_check(administrator=True)
+async def setmostactiverole(ctx, role: discord.Role = None):
+    """
+    Set the role crowned each period to Most Active Staff (most messages
+    sent by a staff member this period). Run with no argument to clear
+    it. Usage: ,setmostactiverole @role
+    """
+    guild = ctx.guild
+    if role is None:
+        MOST_ACTIVE_STAFF_ROLE.pop(guild.id, None)
+        _save_most_active_staff_role()
+        await ctx.send("↩️ Most Active Staff role cleared.")
+        return
+    MOST_ACTIVE_STAFF_ROLE[guild.id] = role.id
+    _save_most_active_staff_role()
+    await ctx.send(f"✅ {role.mention} will now be crowned to whoever wins **Most Active Staff**.")
+
+
+@bot.command()
+@_permitted_check(administrator=True)
+async def setstaffawardschannel(ctx, channel: discord.TextChannel = None):
+    """
+    Set where the monthly Staff Awards announcement posts. Falls back to
+    the update channel if never set. Usage: ,setstaffawardschannel #channel
+    """
+    guild = ctx.guild
+    if channel is None:
+        STAFF_AWARDS_CHANNEL.pop(guild.id, None)
+        _save_staff_awards_channel()
+        await ctx.send("↩️ Staff awards channel cleared — falling back to the update channel.")
+        return
+    STAFF_AWARDS_CHANNEL[guild.id] = channel.id
+    _save_staff_awards_channel()
+    await ctx.send(f"✅ Staff Awards will now post in {channel.mention}.")
+
+
+@bot.command()
+@_permitted_check(administrator=True)
+async def setstaffperks(ctx, *, text: str = None):
+    """
+    Set the perks text shown in the Staff Awards announcement (e.g.
+    "custom color role, priority ticket claims, 2x XP"). Run with no
+    text to clear it. Usage: ,setstaffperks <text>
+    """
+    guild = ctx.guild
+    if text is None:
+        STAFF_PERKS_TEXT.pop(guild.id, None)
+        _save_staff_perks_text()
+        await ctx.send("↩️ Staff perks text cleared.")
+        return
+    text = text[:1000]
+    STAFF_PERKS_TEXT[guild.id] = text
+    _save_staff_perks_text()
+    await ctx.send(f"✅ Perks text set:\n{text}")
+
+
+@bot.command(aliases=["staffawards"])
+@_permitted_check(manage_guild=True)
+async def crownstaff(ctx):
+    """
+    Manually run the Staff of the Month / Most Active Staff picks right
+    now instead of waiting for the monthly auto-crown, and post the
+    announcement here. Usage: ,crownstaff
+    """
+    embed = await _crown_staff_awards(ctx.guild)
+    if embed is None:
+        await ctx.send("📭 No moderation actions or staff activity recorded yet — nothing to crown.")
+        return
     await ctx.send(embed=embed)
 
 
