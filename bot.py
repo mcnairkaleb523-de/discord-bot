@@ -1386,6 +1386,11 @@ _YTDL_OPTS = {
     "default_search": "ytsearch1",
     "source_address": "0.0.0.0",
     "extract_flat": False,
+    # The "web" client alone gets YouTube's "Sign in to confirm you're not
+    # a bot" wall constantly on datacenter/cloud IPs (Railway included) —
+    # the android/ios clients use a different auth flow that isn't
+    # subject to that same check, so try those first.
+    "extractor_args": {"youtube": {"player_client": ["android", "ios", "web"]}},
 }
 _YTDL = yt_dlp.YoutubeDL(_YTDL_OPTS)
 _FFMPEG_BEFORE_OPTS = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
@@ -1420,7 +1425,8 @@ def _ytdl_extract(query: str):
     directly. Returns a single info dict, or None if nothing was found."""
     try:
         info = _YTDL.extract_info(query, download=False)
-    except Exception:
+    except Exception as e:
+        print(f"[music] yt-dlp extraction failed for {query!r}: {e!r}")
         return None
     if info is None:
         return None
