@@ -18,20 +18,6 @@ from datetime import datetime, timedelta
 from collections import deque
 from typing import Union
 
-YTDL_OPTIONS = {
-    'format': 'bestaudio/best',
-    'extract_flat': False,
-    'noplaylist': True,
-    'quiet': True,
-    'no_warnings': True,
-    'default_search': 'auto',
-    'source_address': '0.0.0.0',  # Prevents IPv6 403 blocks
-    'extractor_args': {
-        'youtube': {
-            'player_client': ['android', 'ios']  # Bypasses web client 403 errors
-        }
-    }
-}
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
@@ -1462,14 +1448,14 @@ _YTDL_OPTS = {
 }
 if _YOUTUBE_COOKIES_FILE:
     _YTDL_OPTS["cookiefile"] = _YOUTUBE_COOKIES_FILE
-_YTDL = yt_dlp.YoutubeDL(YTDL_OPTIONS)
+_YTDL = yt_dlp.YoutubeDL(_YTDL_OPTS)
 try:
     for _rt_name, _rt in _YTDL._js_runtimes.items():
         _rt_info = _rt.info if _rt else None
         print(f"[music] JS runtime {_rt_name!r}: {_rt_info!r}")
 except Exception as e:
     print(f"[music] JS runtime check failed: {e!r}")
-    _FFMPEG_BEFORE_OPTS = '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -user_agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"'
+_FFMPEG_BEFORE_OPTS = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 _FFMPEG_OPTS = "-vn"
 _MUSIC_IDLE_TIMEOUT = 300  # seconds of an empty queue before auto-leaving
 
@@ -1651,7 +1637,7 @@ async def _play_next(guild: discord.Guild):
             before_options = f"{before_options} -headers {shlex.quote(header_block)}"
 
         try:
-            source = discord.FFmpegPCMAudio(track["stream_url"], **FFMPEG_OPTIONS)
+            source = discord.FFmpegPCMAudio(track["stream_url"], before_options=before_options, options=_FFMPEG_OPTS)
         except Exception as e:
             print(f"[music] Failed to start ffmpeg for {track['title']!r}: {e!r}")
             asyncio.create_task(_play_next(guild))
