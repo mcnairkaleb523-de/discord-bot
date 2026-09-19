@@ -1133,7 +1133,7 @@ WHOLE_BOT_PREMIUM_ONLY_COMMANDS = {
     "vcdeafen", "vcundeafen", "vctransfer", "vcclaim", "vcmod", "vcremovemod",
     "vcstats", "setupvc", "setunmutevc", "d",
     # Music (whole category)
-    "musicmode", "skip", "pause", "musicstop", "musicloop", "volume", "nowplaying", "np", "musicqueue",
+    "musicmode", "play", "skip", "pause", "musicstop", "musicloop", "volume", "nowplaying", "np", "musicqueue",
     # Vouch / trust system (whole category)
     "vouch", "unvouch", "cancelvouch", "pendingvouches", "vouches",
     "vouchleaderboard", "vouchstats", "vouchconfig",
@@ -4394,7 +4394,7 @@ HELP_CATEGORIES = [
     ('🤖', 'Verification', ['verify', 'unverify', 'denyverify', 'sendverify', 'setverifybackup']),
     ('🏷️', 'Roles', ['role', 'roleall', 'massrole', 'massunrole', 'restoreallroles', 'autorole', 'setgifrole', 'protectedrole', 'br', 'roles', 'createrolemenu', 'addrole', 'removerole', 'rolemenus']),
     ('🎤', 'Voice Channels', ['vclock', 'vcunlock', 'vchide', 'vcshow', 'vcname', 'vclimit', 'vcbitrate', 'vcregion', 'vckick', 'vcban', 'vcunban', 'vcpermit', 'vcmute', 'vcunmute', 'vcdeafen', 'vcundeafen', 'vctransfer', 'vcclaim', 'vcmod', 'vcremovemod', 'vcstats', 'setupvc', 'setunmutevc', 'd']),
-    ('🎶', 'Music', ['musicmode', 'skip', 'pause', 'musicstop', 'musicloop', 'volume', 'nowplaying', 'np', 'musicqueue']),
+    ('🎶', 'Music', ['musicmode', 'play', 'skip', 'pause', 'musicstop', 'musicloop', 'volume', 'nowplaying', 'np', 'musicqueue']),
     ('🎫', 'Tickets', ['sendtickets', 'addticketcategory', 'removeticketcategory', 'ticketcategories', 'setticketformat', 'claimticket', 'closeticket']),
     ('💳', 'Billing', ['subscribe', 'managesubscription', 'subscriptionstatus']),
     ('📊', 'Stats & Info', ['whois', 'chatstats', 'serverstats', 'invites', 'invitelogs', 'inviteleaderboard', 'setinvite', 'milestones', 'setmilestone', 'testmilestone', 'ping', 'exitsurveys']),
@@ -9939,6 +9939,27 @@ async def musicmode(ctx, state: str = None):
         )
     else:
         await ctx.send("↩️ Music mode is **OFF** — song requests won't auto-queue until this is turned back on.")
+
+
+@bot.command()
+async def play(ctx, *, query: str = None):
+    """
+    Play a song by name or link. Works the same as just typing it while
+    in a VC (,musicmode on), but this works regardless of that setting.
+    Usage: ,play <song name or link>
+    """
+    if not query:
+        await ctx.send("❌ Usage: `,play <song name or link>`", delete_after=8)
+        return
+    if not ctx.author.voice or not ctx.author.voice.channel:
+        await ctx.send("❌ You have to be in a voice channel to play something.", delete_after=8)
+        return
+    async with ctx.typing():
+        track = await _music_enqueue(ctx.guild, ctx.author, query, ctx.channel)
+    if not track:
+        await ctx.send(f"❌ Couldn't find anything for **{query}**.", delete_after=8)
+        return
+    await ctx.send(f"🎵 Queued **{track['title']}**.")
 
 
 @bot.command()
