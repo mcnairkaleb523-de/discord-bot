@@ -1438,6 +1438,12 @@ _YTDL_OPTS = {
     # node@22 installed on this container was never actually being used
     # for signature/n-parameter solving until this was added.
     "js_runtimes": {"node": {}},
+    # The node-compatible variant of yt-dlp's challenge-solver script isn't
+    # vendored in the package itself (only the deno/bun variants are) — it
+    # has to be fetched from yt-dlp's own GitHub releases at runtime, which
+    # is opt-in via remote_components. Without this, node runs but has no
+    # actual solver script to execute, so every format request still fails.
+    "remote_components": ["ejs:github"],
 }
 if _YOUTUBE_COOKIES_FILE:
     _YTDL_OPTS["cookiefile"] = _YOUTUBE_COOKIES_FILE
