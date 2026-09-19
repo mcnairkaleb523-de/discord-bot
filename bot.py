@@ -5,6 +5,7 @@ import os
 import sys
 import io
 import re
+import shlex
 import time
 import asyncio
 import json
@@ -1516,6 +1517,7 @@ async def _resolve_track(query: str, member: discord.Member):
         "title": (info.get("title") or "Unknown title")[:100],
         "webpage_url": info.get("webpage_url", search_query),
         "stream_url": info["url"],
+        "http_headers": dict(info.get("http_headers") or {}),
         "duration": info.get("duration"),
         "thumbnail": info.get("thumbnail"),
         "requester": member.mention,
@@ -1624,9 +1626,20 @@ async def _play_next(guild: discord.Guild):
 
         _cancel_idle_disconnect(guild)
 
+        before_options = _FFMPEG_BEFORE_OPTS
+        headers = track.get("http_headers")
+        if headers:
+            # Googlevideo CDN URLs 403 without the same headers (User-Agent,
+            # etc.) yt-dlp used to obtain them — confirmed in production via
+            # ffmpeg's own stderr ("HTTP error 403 Forbidden") once yt-dlp
+            # extraction itself started succeeding.
+            header_block = "".join(f"{k}: {v}\r\n" for k, v in headers.items())
+            before_options = f"{before_options} -headers {shlex.quote(header_block)}"
+
         try:
-            source = discord.FFmpegPCMAudio(track["stream_url"], before_options=_FFMPEG_BEFORE_OPTS, options=_FFMPEG_OPTS)
-        except Exception:
+            source = discord.FFmpegPCMAudio(track["stream_url"], before_options=before_options, options=_FFMPEG_OPTS)
+        except Exception as e:
+            print(f"[music] Failed to start ffmpeg for {track['title']!r}: {e!r}")
             asyncio.create_task(_play_next(guild))
             return
         source = discord.PCMVolumeTransformer(source, volume=MUSIC_VOLUME.get(guild.id, 0.5))
