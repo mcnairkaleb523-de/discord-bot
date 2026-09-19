@@ -1396,6 +1396,13 @@ if _youtube_cookies_raw:
         print(f"[music] Couldn't write YOUTUBE_COOKIES to disk: {e!r}")
         _YOUTUBE_COOKIES_FILE = None
 
+# bgutil-ytdlp-pot-provider — a companion Railway service (separate from
+# this bot) that generates the proof-of-origin (PO) token YouTube now
+# requires for actual stream URLs, on top of the bot-check that cookies
+# alone handle. Reached over Railway's private network; overridable via
+# env var in case the service ever gets renamed/moved.
+_BGUTIL_POT_BASE_URL = os.getenv("BGUTIL_POT_BASE_URL", "http://bgutil-pot-provider.railway.internal:4416")
+
 _YTDL_OPTS = {
     "format": "bestaudio/best",
     "noplaylist": True,
@@ -1404,15 +1411,16 @@ _YTDL_OPTS = {
     "default_search": "ytsearch1",
     "source_address": "0.0.0.0",
     "extract_flat": False,
-    # Confirmed in production: even with cookies solving the bot-check
-    # wall, the "web" client alone still comes back with "Requested
-    # format is not available" — YouTube now gates the actual stream
-    # URLs behind a separate proof-of-origin (PO) token requirement that
-    # cookies don't satisfy for that client. "android" has held up
-    # without needing one, so it's primary; "web" (cookie-authenticated)
-    # stays as a fallback in case a given video's formats do come
-    # through on it.
-    "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
+    # Cookies alone got past the bot-check, but every client still failed
+    # with "Requested format is not available" — a separate PO-token
+    # requirement for the stream URLs themselves, which the bgutil
+    # provider above supplies. With a working PO token, "web" (cookie-
+    # authenticated) is the most complete client again; "android" stays
+    # as a fallback for whichever video/client combo it doesn't cover.
+    "extractor_args": {
+        "youtube": {"player_client": ["web", "android"]},
+        "youtubepot-bgutilhttp": {"base_url": [_BGUTIL_POT_BASE_URL]},
+    },
 }
 if _YOUTUBE_COOKIES_FILE:
     _YTDL_OPTS["cookiefile"] = _YOUTUBE_COOKIES_FILE

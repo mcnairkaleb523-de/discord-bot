@@ -2,6 +2,7 @@ discord.py
 PyNaCl
 davey
 yt-dlp
+bgutil-ytdlp-pot-provider
 python-dotenv
 aiohttp
 stripe
