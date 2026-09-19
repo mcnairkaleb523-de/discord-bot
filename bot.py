@@ -10,6 +10,7 @@ import asyncio
 import json
 import aiohttp
 import discord
+import yt_dlp
 from discord.ext import commands
 from discord import app_commands
 from datetime import datetime, timedelta
@@ -473,6 +474,7 @@ def _save_all_state() -> None:
     _save_mvp_streak()
     _save_vc_stats()
     _save_temp_vcs()
+    _save_music_mode()
     _save_birthdays()
     _save_birthday_channels()
     _save_birthday_timezones()
@@ -1130,6 +1132,8 @@ WHOLE_BOT_PREMIUM_ONLY_COMMANDS = {
     "vcregion", "vckick", "vcban", "vcunban", "vcpermit", "vcmute", "vcunmute",
     "vcdeafen", "vcundeafen", "vctransfer", "vcclaim", "vcmod", "vcremovemod",
     "vcstats", "setupvc", "setunmutevc", "d",
+    # Music (whole category)
+    "musicmode", "skip", "pause", "musicstop", "musicloop", "volume", "nowplaying", "np", "musicqueue",
     # Vouch / trust system (whole category)
     "vouch", "unvouch", "cancelvouch", "pendingvouches", "vouches",
     "vouchleaderboard", "vouchstats", "vouchconfig",
@@ -1327,6 +1331,381 @@ def _save_temp_vcs():
         for gid, owners in vc_owner_mods.items()
     })
     _save_data("vc_mods", {str(vid): list(users) for vid, users in vc_mods.items()})
+
+# ── Music (no-command song requests) ────────────────────────
+# MUSIC_MODE[guild_id] = bool — opt-in per server, off by default. Once
+# on, ANY message a member sends in ANY channel while they're connected
+# to a voice channel is treated as a song request (name or link), no
+# command prefix needed — set via ,musicmode.
+MUSIC_MODE: dict[int, bool] = {int(gid): bool(v) for gid, v in _load_data("music_mode", {}).items()}
+# Everything else below is deliberately in-memory only, like CHAT_HISTORY
+# for the AI chat feature — queue/now-playing state is meaningless after
+# a restart anyway, since the bot isn't connected to any voice channel
+# anymore at that point.
+# MUSIC_QUEUES[guild_id] = [track_dict, ...] — up next, in order.
+MUSIC_QUEUES: dict[int, list] = {}
+# MUSIC_NOW_PLAYING[guild_id] = track_dict currently playing, or absent.
+MUSIC_NOW_PLAYING: dict[int, dict] = {}
+# MUSIC_VOLUME[guild_id] = 0.0-2.0 (PCMVolumeTransformer scale), default 0.5.
+MUSIC_VOLUME: dict[int, float] = {}
+# MUSIC_LOOP[guild_id] = bool — repeat the current track instead of
+# advancing the queue.
+MUSIC_LOOP: dict[int, bool] = {}
+# MUSIC_TEXT_CHANNEL[guild_id] = channel_id — the channel the most recent
+# request came from, so the Now Playing panel has somewhere to post
+# (requests can come from any channel, there's no dedicated music channel).
+MUSIC_TEXT_CHANNEL: dict[int, int] = {}
+# MUSIC_IDLE_TASK[guild_id] = asyncio.Task — pending auto-disconnect after
+# the queue empties out; cancelled the moment something new starts playing.
+MUSIC_IDLE_TASK: dict[int, "asyncio.Task"] = {}
+# MUSIC_LOCKS[guild_id] = asyncio.Lock — guards the "append to queue, then
+# start playback if nothing's already playing" check in _music_enqueue.
+# Without it, two song requests landing in the same event-loop tick (two
+# people pasting a link seconds apart in an idle channel — very possible
+# with no command needed) can both see "nothing playing yet" and both
+# call vc.play(), and discord.py's VoiceClient raises on the second one.
+MUSIC_LOCKS: dict[int, "asyncio.Lock"] = {}
+
+
+def _music_lock(guild_id: int):
+    return MUSIC_LOCKS.setdefault(guild_id, asyncio.Lock())
+
+
+def _save_music_mode():
+    _save_data("music_mode", {str(gid): v for gid, v in MUSIC_MODE.items()})
+
+
+# yt-dlp does the actual blocking network/extraction work, so every call
+# to it is pushed into a thread executor (see _ytdl_extract) — it must
+# never be awaited directly on the event loop.
+_YTDL_OPTS = {
+    "format": "bestaudio/best",
+    "noplaylist": True,
+    "quiet": True,
+    "no_warnings": True,
+    "default_search": "ytsearch1",
+    "source_address": "0.0.0.0",
+    "extract_flat": False,
+}
+_YTDL = yt_dlp.YoutubeDL(_YTDL_OPTS)
+_FFMPEG_BEFORE_OPTS = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
+_FFMPEG_OPTS = "-vn"
+_MUSIC_IDLE_TIMEOUT = 300  # seconds of an empty queue before auto-leaving
+
+_MUSIC_LINK_RE = re.compile(r"(?:youtube\.com|youtu\.be|open\.spotify\.com|soundcloud\.com)", re.I)
+_SPOTIFY_TRACK_RE = re.compile(r"open\.spotify\.com/(?:intl-\w+/)?track/([A-Za-z0-9]+)", re.I)
+
+
+async def _resolve_spotify_title(url: str):
+    """Spotify's oEmbed endpoint is public and needs no API key/auth —
+    used purely to turn a Spotify link into a "song name - artist" string
+    we can then search for on YouTube, since yt-dlp can't play Spotify's
+    DRM-protected streams directly."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://open.spotify.com/oembed", params={"url": url},
+                timeout=aiohttp.ClientTimeout(total=8)
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                return data.get("title")
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+        return None
+
+
+def _ytdl_extract(query: str):
+    """Blocking — always run through loop.run_in_executor, never awaited
+    directly. Returns a single info dict, or None if nothing was found."""
+    try:
+        info = _YTDL.extract_info(query, download=False)
+    except Exception:
+        return None
+    if info is None:
+        return None
+    if "entries" in info:
+        entries = [e for e in info["entries"] if e]
+        if not entries:
+            return None
+        info = entries[0]
+    return info
+
+
+async def _resolve_track(query: str, member: discord.Member):
+    query = query.strip()
+    if _SPOTIFY_TRACK_RE.search(query):
+        title = await _resolve_spotify_title(query)
+        if not title:
+            return None
+        search_query = title
+    else:
+        search_query = query
+
+    loop = asyncio.get_running_loop()
+    info = await loop.run_in_executor(None, _ytdl_extract, search_query)
+    if not info or not info.get("url"):
+        return None
+    return {
+        "title": (info.get("title") or "Unknown title")[:100],
+        "webpage_url": info.get("webpage_url", search_query),
+        "stream_url": info["url"],
+        "duration": info.get("duration"),
+        "thumbnail": info.get("thumbnail"),
+        "requester": member.mention,
+        "requester_id": member.id,
+    }
+
+
+async def _ensure_voice_client(member: discord.Member):
+    """Join (or move to) the member's current VC. None if they're not in
+    one or the bot can't connect."""
+    if not member.voice or not member.voice.channel:
+        return None
+    channel = member.voice.channel
+    vc = member.guild.voice_client
+    if vc and vc.channel.id == channel.id:
+        return vc
+    if vc:
+        try:
+            await vc.move_to(channel)
+        except (discord.ClientException, asyncio.TimeoutError):
+            return None
+        return vc
+    try:
+        return await channel.connect()
+    except (discord.ClientException, discord.Forbidden, asyncio.TimeoutError):
+        return None
+
+
+def _cancel_idle_disconnect(guild: discord.Guild):
+    task = MUSIC_IDLE_TASK.pop(guild.id, None)
+    if task and not task.done():
+        task.cancel()
+
+
+async def _idle_disconnect_after(guild: discord.Guild):
+    try:
+        await asyncio.sleep(_MUSIC_IDLE_TIMEOUT)
+    except asyncio.CancelledError:
+        return
+    vc = guild.voice_client
+    if vc and not vc.is_playing() and not vc.is_paused():
+        try:
+            await vc.disconnect()
+        except discord.HTTPException:
+            pass
+    MUSIC_IDLE_TASK.pop(guild.id, None)
+
+
+def _schedule_idle_disconnect(guild: discord.Guild):
+    _cancel_idle_disconnect(guild)
+    MUSIC_IDLE_TASK[guild.id] = asyncio.create_task(_idle_disconnect_after(guild))
+
+
+async def _post_now_playing(guild: discord.Guild, track: dict):
+    channel_id = MUSIC_TEXT_CHANNEL.get(guild.id)
+    channel = guild.get_channel(channel_id) if channel_id else None
+    if not channel:
+        return
+    embed = discord.Embed(
+        title="🎶 Now Playing",
+        description=f"**[{track['title']}]({track['webpage_url']})**",
+        color=discord.Color.blurple(),
+        timestamp=discord.utils.utcnow()
+    )
+    if track.get("thumbnail"):
+        embed.set_thumbnail(url=track["thumbnail"])
+    if track.get("duration"):
+        m, s = divmod(int(track["duration"]), 60)
+        embed.add_field(name="⏱️ Duration", value=f"{m}:{s:02d}", inline=True)
+    embed.add_field(name="🙋 Requested by", value=track["requester"], inline=True)
+    queue_len = len(MUSIC_QUEUES.get(guild.id, []))
+    if queue_len:
+        embed.add_field(name="📜 Up Next", value=f"{queue_len} more queued", inline=True)
+    embed.set_footer(text="TrapAI Music • just type a song name or link while in a VC")
+    try:
+        await channel.send(embed=embed, view=MusicControlView())
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
+
+async def _play_next(guild: discord.Guild):
+    """Safe to call redundantly from multiple places at once (a fresh
+    request that finds the queue idle, AND the `after` callback of a
+    track that just finished) — the lock plus the is_playing()/is_paused()
+    check make every call but the one that should actually start
+    something a no-op, instead of racing into two vc.play() calls."""
+    vc = guild.voice_client
+    if not vc:
+        MUSIC_NOW_PLAYING.pop(guild.id, None)
+        return
+
+    async with _music_lock(guild.id):
+        if vc.is_playing() or vc.is_paused():
+            return
+
+        if MUSIC_LOOP.get(guild.id) and guild.id in MUSIC_NOW_PLAYING:
+            track = MUSIC_NOW_PLAYING[guild.id]
+        else:
+            queue = MUSIC_QUEUES.get(guild.id, [])
+            if not queue:
+                MUSIC_NOW_PLAYING.pop(guild.id, None)
+                _schedule_idle_disconnect(guild)
+                return
+            track = queue.pop(0)
+            MUSIC_NOW_PLAYING[guild.id] = track
+
+        _cancel_idle_disconnect(guild)
+
+        try:
+            source = discord.FFmpegPCMAudio(track["stream_url"], before_options=_FFMPEG_BEFORE_OPTS, options=_FFMPEG_OPTS)
+        except Exception:
+            asyncio.create_task(_play_next(guild))
+            return
+        source = discord.PCMVolumeTransformer(source, volume=MUSIC_VOLUME.get(guild.id, 0.5))
+
+        def _after(error):
+            fut = asyncio.run_coroutine_threadsafe(_play_next(guild), bot.loop)
+            try:
+                fut.result()
+            except Exception:
+                pass
+
+        vc.play(source, after=_after)
+
+    asyncio.create_task(_post_now_playing(guild, track))
+
+
+async def _music_enqueue(guild: discord.Guild, member: discord.Member, query: str, text_channel):
+    vc = await _ensure_voice_client(member)
+    if not vc:
+        return None
+    track = await _resolve_track(query, member)
+    if not track:
+        return None
+    MUSIC_TEXT_CHANNEL[guild.id] = text_channel.id
+    MUSIC_QUEUES.setdefault(guild.id, []).append(track)
+    _cancel_idle_disconnect(guild)
+    await _play_next(guild)
+    return track
+
+
+def _in_bot_vc(member: discord.Member) -> bool:
+    vc = member.guild.voice_client
+    return bool(vc and member.voice and member.voice.channel and member.voice.channel.id == vc.channel.id)
+
+
+def _music_pause_resume(guild: discord.Guild) -> str:
+    vc = guild.voice_client
+    if not vc:
+        return "❌ Not connected to a voice channel."
+    if vc.is_playing():
+        vc.pause()
+        return "⏸️ Paused."
+    if vc.is_paused():
+        vc.resume()
+        return "▶️ Resumed."
+    return "❌ Nothing is playing."
+
+
+def _music_skip(guild: discord.Guild) -> str:
+    vc = guild.voice_client
+    if not vc or not (vc.is_playing() or vc.is_paused()):
+        return "❌ Nothing playing to skip."
+    vc.stop()  # triggers the `after` callback -> _play_next
+    return "⏭️ Skipped."
+
+
+async def _music_stop(guild: discord.Guild) -> str:
+    MUSIC_QUEUES[guild.id] = []
+    MUSIC_LOOP[guild.id] = False
+    _cancel_idle_disconnect(guild)
+    vc = guild.voice_client
+    if vc:
+        vc.stop()
+        try:
+            await vc.disconnect()
+        except discord.HTTPException:
+            pass
+    MUSIC_NOW_PLAYING.pop(guild.id, None)
+    return "⏹️ Stopped and left the voice channel."
+
+
+def _music_toggle_loop(guild: discord.Guild) -> str:
+    MUSIC_LOOP[guild.id] = not MUSIC_LOOP.get(guild.id, False)
+    return f"🔁 Loop is now **{'on' if MUSIC_LOOP[guild.id] else 'off'}**."
+
+
+def _music_set_volume(guild: discord.Guild, percent: int) -> str:
+    percent = max(0, min(200, percent))
+    vol = percent / 100
+    MUSIC_VOLUME[guild.id] = vol
+    vc = guild.voice_client
+    if vc and isinstance(vc.source, discord.PCMVolumeTransformer):
+        vc.source.volume = vol
+    return f"🔊 Volume set to **{percent}%**."
+
+
+class MusicControlView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(emoji="⏯️", style=discord.ButtonStyle.primary, custom_id="music_btn_pauseresume")
+    async def btn_pauseresume(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not _in_bot_vc(interaction.user):
+            await interaction.response.send_message("❌ You have to be in the voice channel to control the music.", ephemeral=True)
+            return
+        await interaction.response.send_message(_music_pause_resume(interaction.guild), ephemeral=True)
+
+    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, custom_id="music_btn_skip")
+    async def btn_skip(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not _in_bot_vc(interaction.user):
+            await interaction.response.send_message("❌ You have to be in the voice channel to control the music.", ephemeral=True)
+            return
+        await interaction.response.send_message(_music_skip(interaction.guild), ephemeral=True)
+
+    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="music_btn_stop")
+    async def btn_stop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not _in_bot_vc(interaction.user):
+            await interaction.response.send_message("❌ You have to be in the voice channel to control the music.", ephemeral=True)
+            return
+        await interaction.response.send_message(await _music_stop(interaction.guild), ephemeral=True)
+
+    @discord.ui.button(emoji="🔁", style=discord.ButtonStyle.secondary, custom_id="music_btn_loop")
+    async def btn_loop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not _in_bot_vc(interaction.user):
+            await interaction.response.send_message("❌ You have to be in the voice channel to control the music.", ephemeral=True)
+            return
+        await interaction.response.send_message(_music_toggle_loop(interaction.guild), ephemeral=True)
+
+    @discord.ui.button(emoji="🔉", style=discord.ButtonStyle.secondary, custom_id="music_btn_voldown")
+    async def btn_voldown(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not _in_bot_vc(interaction.user):
+            await interaction.response.send_message("❌ You have to be in the voice channel to control the music.", ephemeral=True)
+            return
+        current = int(MUSIC_VOLUME.get(interaction.guild.id, 0.5) * 100)
+        await interaction.response.send_message(_music_set_volume(interaction.guild, current - 10), ephemeral=True)
+
+    @discord.ui.button(emoji="🔊", style=discord.ButtonStyle.secondary, custom_id="music_btn_volup")
+    async def btn_volup(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not _in_bot_vc(interaction.user):
+            await interaction.response.send_message("❌ You have to be in the voice channel to control the music.", ephemeral=True)
+            return
+        current = int(MUSIC_VOLUME.get(interaction.guild.id, 0.5) * 100)
+        await interaction.response.send_message(_music_set_volume(interaction.guild, current + 10), ephemeral=True)
+
+    @discord.ui.button(label="Queue", emoji="📜", style=discord.ButtonStyle.secondary, custom_id="music_btn_queue")
+    async def btn_queue(self, interaction: discord.Interaction, button: discord.ui.Button):
+        queue = MUSIC_QUEUES.get(interaction.guild.id, [])
+        if not queue:
+            await interaction.response.send_message("📭 Queue is empty.", ephemeral=True)
+            return
+        lines = [f"{i + 1}. **{t['title']}** — requested by {t['requester']}" for i, t in enumerate(queue[:10])]
+        if len(queue) > 10:
+            lines.append(f"*+ {len(queue) - 10} more*")
+        await interaction.response.send_message("📜 **Up next:**\n" + "\n".join(lines), ephemeral=True)
+
 
 # jailed_users[(guild_id, user_id)] = asyncio.Task — the pending auto_unjail
 # timer. Keyed by (guild_id, user_id), NOT just user_id, so jailing the same
@@ -3985,6 +4364,7 @@ HELP_CATEGORIES = [
     ('🤖', 'Verification', ['verify', 'unverify', 'denyverify', 'sendverify', 'setverifybackup']),
     ('🏷️', 'Roles', ['role', 'roleall', 'massrole', 'massunrole', 'restoreallroles', 'autorole', 'setgifrole', 'protectedrole', 'br', 'roles', 'createrolemenu', 'addrole', 'removerole', 'rolemenus']),
     ('🎤', 'Voice Channels', ['vclock', 'vcunlock', 'vchide', 'vcshow', 'vcname', 'vclimit', 'vcbitrate', 'vcregion', 'vckick', 'vcban', 'vcunban', 'vcpermit', 'vcmute', 'vcunmute', 'vcdeafen', 'vcundeafen', 'vctransfer', 'vcclaim', 'vcmod', 'vcremovemod', 'vcstats', 'setupvc', 'setunmutevc', 'd']),
+    ('🎶', 'Music', ['musicmode', 'skip', 'pause', 'musicstop', 'musicloop', 'volume', 'nowplaying', 'np', 'musicqueue']),
     ('🎫', 'Tickets', ['sendtickets', 'addticketcategory', 'removeticketcategory', 'ticketcategories', 'setticketformat', 'claimticket', 'closeticket']),
     ('💳', 'Billing', ['subscribe', 'managesubscription', 'subscriptionstatus']),
     ('📊', 'Stats & Info', ['whois', 'chatstats', 'serverstats', 'invites', 'invitelogs', 'inviteleaderboard', 'setinvite', 'milestones', 'setmilestone', 'testmilestone', 'ping', 'exitsurveys']),
@@ -4847,6 +5227,7 @@ async def on_ready():
     bot.add_view(TicketOpenView())
     bot.add_view(TicketControlView())
     bot.add_view(VCControlView())
+    bot.add_view(MusicControlView())
     bot.add_view(GiveawayView())
     bot.add_view(PSADismissView())
     try:
@@ -6097,6 +6478,18 @@ async def on_voice_state_update(member, before, after):
     now = time.time()
     guild = member.guild
 
+    # ── Music: leave automatically once the VC is empty of real members ──
+    if before.channel and before.channel != after.channel:
+        vc = guild.voice_client
+        if vc and vc.channel.id == before.channel.id and not any(not m.bot for m in before.channel.members):
+            _cancel_idle_disconnect(guild)
+            MUSIC_QUEUES[guild.id] = []
+            MUSIC_NOW_PLAYING.pop(guild.id, None)
+            try:
+                await vc.disconnect()
+            except discord.HTTPException:
+                pass
+
     # ── Active enforcement for ,vcban / ,vckick / ,vclock ─────────────
     # A channel overwrite of connect=False can be bypassed by anyone with
     # guild-level Administrator, a staff role with Move Members/Manage
@@ -6535,6 +6928,34 @@ async def on_message(message):
                     await message.reply(reply, mention_author=False)
                 except (discord.Forbidden, discord.HTTPException):
                     pass
+
+    # ── Music: no-command song requests while in a VC ──────────────
+    # Off by default (,musicmode on). Once on, ANY message from a member
+    # currently connected to a voice channel — in ANY text channel, not
+    # just a dedicated one — is treated as a song name or link and
+    # queued automatically. A 🎵 reaction confirms it queued; a ❌
+    # reaction only shows up for a recognized music link that failed to
+    # resolve (plain text that doesn't match anything just fails
+    # silently, since most ordinary chat will never be a real request).
+    if (
+        not is_command
+        and MUSIC_MODE.get(message.guild.id)
+        and bot.user not in message.mentions
+        and isinstance(message.author, discord.Member)
+        and message.author.voice and message.author.voice.channel
+        and message.content
+    ):
+        content = message.content.strip()
+        if 1 < len(content) <= 200 and not _on_cooldown(message.guild.id, message.author.id, "musicreq", 5):
+            is_known_link = bool(_MUSIC_LINK_RE.search(content))
+            track = await _music_enqueue(message.guild, message.author, content, message.channel)
+            try:
+                if track:
+                    await message.add_reaction("🎵")
+                elif is_known_link:
+                    await message.add_reaction("❌")
+            except (discord.Forbidden, discord.HTTPException):
+                pass
 
     await bot.process_commands(message)
 
@@ -9455,6 +9876,119 @@ async def worktime(ctx):
 
     m, s = divmod(int(new_remaining), 60)
     await ctx.send(f"✅ Correct! **1 minute** off your sentence — Inmate #{inmate_number} now has **{m}m {s}s** left.")
+
+
+# ============================================================
+# MUSIC COMMANDS
+# ============================================================
+@bot.command()
+@_permitted_check(manage_guild=True)
+async def musicmode(ctx, state: str = None):
+    """
+    Turn no-command song requests on/off for this server. Once on, ANY
+    message a member sends — in any text channel, no prefix needed —
+    while they're connected to a voice channel is treated as a song
+    name or link and gets queued automatically. Off by default since
+    it's a big behavior change. Usage: ,musicmode on|off
+    """
+    guild = ctx.guild
+    if state is None:
+        current = MUSIC_MODE.get(guild.id, False)
+        await ctx.send(f"🎵 Music mode is currently **{'ON' if current else 'OFF'}**. Usage: `,musicmode on|off`")
+        return
+    state = state.lower()
+    if state not in ("on", "off"):
+        await ctx.send("❌ Usage: `,musicmode on|off`", delete_after=8)
+        return
+    MUSIC_MODE[guild.id] = (state == "on")
+    _save_music_mode()
+    if state == "on":
+        await ctx.send(
+            "✅ Music mode is **ON** — anyone connected to a voice channel can now just type a song "
+            "name or a YouTube/Spotify link in **any channel** and it'll queue automatically. No command needed."
+        )
+    else:
+        await ctx.send("↩️ Music mode is **OFF** — song requests won't auto-queue until this is turned back on.")
+
+
+@bot.command()
+async def skip(ctx):
+    """Skip the current song. Usage: ,skip"""
+    if not _in_bot_vc(ctx.author):
+        await ctx.send("❌ You have to be in the voice channel to control the music.", delete_after=8)
+        return
+    await ctx.send(_music_skip(ctx.guild))
+
+
+@bot.command()
+async def pause(ctx):
+    """Pause or resume the current song. Usage: ,pause"""
+    if not _in_bot_vc(ctx.author):
+        await ctx.send("❌ You have to be in the voice channel to control the music.", delete_after=8)
+        return
+    await ctx.send(_music_pause_resume(ctx.guild))
+
+
+@bot.command()
+async def musicstop(ctx):
+    """Stop playback, clear the queue, and leave the voice channel. Usage: ,musicstop"""
+    if not _in_bot_vc(ctx.author):
+        await ctx.send("❌ You have to be in the voice channel to control the music.", delete_after=8)
+        return
+    await ctx.send(await _music_stop(ctx.guild))
+
+
+@bot.command()
+async def musicloop(ctx):
+    """Toggle looping the current song instead of advancing the queue. Usage: ,musicloop"""
+    if not _in_bot_vc(ctx.author):
+        await ctx.send("❌ You have to be in the voice channel to control the music.", delete_after=8)
+        return
+    await ctx.send(_music_toggle_loop(ctx.guild))
+
+
+@bot.command()
+async def volume(ctx, percent: int = None):
+    """Show or set playback volume (0-200%). Usage: ,volume 80"""
+    if percent is None:
+        current = int(MUSIC_VOLUME.get(ctx.guild.id, 0.5) * 100)
+        await ctx.send(f"🔊 Current volume: **{current}%**. Usage: `,volume <0-200>`")
+        return
+    if not _in_bot_vc(ctx.author):
+        await ctx.send("❌ You have to be in the voice channel to control the music.", delete_after=8)
+        return
+    await ctx.send(_music_set_volume(ctx.guild, percent))
+
+
+@bot.command(aliases=["np"])
+async def nowplaying(ctx):
+    """Show the current track and queue with the control panel. Usage: ,nowplaying"""
+    track = MUSIC_NOW_PLAYING.get(ctx.guild.id)
+    if not track:
+        await ctx.send("📭 Nothing is playing right now.")
+        return
+    MUSIC_TEXT_CHANNEL[ctx.guild.id] = ctx.channel.id
+    await _post_now_playing(ctx.guild, track)
+
+
+@bot.command()
+async def musicqueue(ctx):
+    """Show what's queued up. Usage: ,musicqueue"""
+    queue = MUSIC_QUEUES.get(ctx.guild.id, [])
+    now = MUSIC_NOW_PLAYING.get(ctx.guild.id)
+    if not now and not queue:
+        await ctx.send("📭 Nothing playing and the queue is empty.")
+        return
+    embed = discord.Embed(title="📜 Music Queue", color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
+    if now:
+        embed.add_field(name="🎶 Now Playing", value=f"[{now['title']}]({now['webpage_url']}) — {now['requester']}", inline=False)
+    if queue:
+        lines = [f"**{i + 1}.** [{t['title']}]({t['webpage_url']}) — {t['requester']}" for i, t in enumerate(queue[:10])]
+        if len(queue) > 10:
+            lines.append(f"*+ {len(queue) - 10} more*")
+        embed.add_field(name="⏭️ Up Next", value="\n".join(lines), inline=False)
+    embed.set_footer(text=f"TrapAI Music • {ctx.guild.name}")
+    await ctx.send(embed=embed)
 
 
 # ============================================================
