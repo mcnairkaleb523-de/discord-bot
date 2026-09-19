@@ -1,4 +1,6 @@
 discord.py
+PyNaCl
+yt-dlp
 python-dotenv
 aiohttp
 stripe
