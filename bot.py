@@ -1404,14 +1404,15 @@ _YTDL_OPTS = {
     "default_search": "ytsearch1",
     "source_address": "0.0.0.0",
     "extract_flat": False,
-    # Mixing player clients makes yt-dlp merge format lists across all of
-    # them, and android/ios formats aren't always compatible with a plain
-    # "bestaudio" selector — that combo threw "Requested format is not
-    # available" in production even though extraction itself succeeded.
-    # Cookies authenticate the "web" client cleanly, so once they're
-    # configured there's no reason to mix in android/ios at all; without
-    # cookies, web alone hits the bot-check wall, so fall back to those.
-    "extractor_args": {"youtube": {"player_client": ["web"] if _YOUTUBE_COOKIES_FILE else ["android", "ios", "web"]}},
+    # Confirmed in production: even with cookies solving the bot-check
+    # wall, the "web" client alone still comes back with "Requested
+    # format is not available" — YouTube now gates the actual stream
+    # URLs behind a separate proof-of-origin (PO) token requirement that
+    # cookies don't satisfy for that client. "android" has held up
+    # without needing one, so it's primary; "web" (cookie-authenticated)
+    # stays as a fallback in case a given video's formats do come
+    # through on it.
+    "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
 }
 if _YOUTUBE_COOKIES_FILE:
     _YTDL_OPTS["cookiefile"] = _YOUTUBE_COOKIES_FILE
