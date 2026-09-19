@@ -1403,11 +1403,33 @@ if _youtube_cookies_raw:
 # env var in case the service ever gets renamed/moved.
 _BGUTIL_POT_BASE_URL = os.getenv("BGUTIL_POT_BASE_URL", "http://bgutil-pot-provider.railway.internal:4416")
 
+
+class _YTDLLogger:
+    """Forwards yt-dlp's own internal diagnostic trail (which client it's
+    using, PO-token requests, format list results) into Railway logs —
+    quiet=True alone hides all of this, which made every YouTube-side
+    failure a guessing game instead of a quick log check."""
+    def debug(self, msg):
+        if msg.startswith("[debug] "):
+            return
+        print(f"[music/yt-dlp] {msg}")
+
+    def info(self, msg):
+        print(f"[music/yt-dlp] {msg}")
+
+    def warning(self, msg):
+        print(f"[music/yt-dlp] WARNING: {msg}")
+
+    def error(self, msg):
+        print(f"[music/yt-dlp] ERROR: {msg}")
+
+
 _YTDL_OPTS = {
     "format": "bestaudio/best",
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
+    "logger": _YTDLLogger(),
     "default_search": "ytsearch1",
     "source_address": "0.0.0.0",
     "extract_flat": False,
