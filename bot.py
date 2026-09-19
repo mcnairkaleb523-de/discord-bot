@@ -1378,6 +1378,24 @@ def _save_music_mode():
 # yt-dlp does the actual blocking network/extraction work, so every call
 # to it is pushed into a thread executor (see _ytdl_extract) — it must
 # never be awaited directly on the event loop.
+#
+# YOUTUBE_COOKIES (optional) — a real logged-in YouTube session's
+# cookies.txt contents, set as a Railway variable. Without it, YouTube's
+# "Sign in to confirm you're not a bot" wall blocks extraction outright
+# on most cloud/datacenter IPs (confirmed in production — neither the
+# android nor ios client alone was enough). Written to a local file once
+# at startup since yt-dlp needs a file path, not the raw text.
+_YOUTUBE_COOKIES_FILE = None
+_youtube_cookies_raw = os.getenv("YOUTUBE_COOKIES")
+if _youtube_cookies_raw:
+    try:
+        _YOUTUBE_COOKIES_FILE = "/tmp/yt_cookies.txt"
+        with open(_YOUTUBE_COOKIES_FILE, "w") as _f:
+            _f.write(_youtube_cookies_raw)
+    except OSError as e:
+        print(f"[music] Couldn't write YOUTUBE_COOKIES to disk: {e!r}")
+        _YOUTUBE_COOKIES_FILE = None
+
 _YTDL_OPTS = {
     "format": "bestaudio/best",
     "noplaylist": True,
@@ -1386,12 +1404,12 @@ _YTDL_OPTS = {
     "default_search": "ytsearch1",
     "source_address": "0.0.0.0",
     "extract_flat": False,
-    # The "web" client alone gets YouTube's "Sign in to confirm you're not
-    # a bot" wall constantly on datacenter/cloud IPs (Railway included) —
-    # the android/ios clients use a different auth flow that isn't
-    # subject to that same check, so try those first.
-    "extractor_args": {"youtube": {"player_client": ["android", "ios", "web"]}},
+    # Cookies (when configured) authenticate the "web" client, so it goes
+    # first; android/ios stay as a fallback for when cookies aren't set.
+    "extractor_args": {"youtube": {"player_client": ["web", "android", "ios"]}},
 }
+if _YOUTUBE_COOKIES_FILE:
+    _YTDL_OPTS["cookiefile"] = _YOUTUBE_COOKIES_FILE
 _YTDL = yt_dlp.YoutubeDL(_YTDL_OPTS)
 _FFMPEG_BEFORE_OPTS = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 _FFMPEG_OPTS = "-vn"
