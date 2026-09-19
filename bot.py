@@ -474,7 +474,6 @@ def _save_all_state() -> None:
     _save_mvp_streak()
     _save_vc_stats()
     _save_temp_vcs()
-    _save_music_mode()
     _save_birthdays()
     _save_birthday_channels()
     _save_birthday_timezones()
@@ -1133,7 +1132,7 @@ WHOLE_BOT_PREMIUM_ONLY_COMMANDS = {
     "vcdeafen", "vcundeafen", "vctransfer", "vcclaim", "vcmod", "vcremovemod",
     "vcstats", "setupvc", "setunmutevc", "d",
     # Music (whole category)
-    "musicmode", "play", "skip", "pause", "musicstop", "musicloop", "volume", "nowplaying", "np", "musicqueue",
+    "play", "skip", "pause", "musicstop", "musicloop", "volume", "nowplaying", "np", "musicqueue",
     # Vouch / trust system (whole category)
     "vouch", "unvouch", "cancelvouch", "pendingvouches", "vouches",
     "vouchleaderboard", "vouchstats", "vouchconfig",
@@ -1332,13 +1331,8 @@ def _save_temp_vcs():
     })
     _save_data("vc_mods", {str(vid): list(users) for vid, users in vc_mods.items()})
 
-# ── Music (no-command song requests) ────────────────────────
-# MUSIC_MODE[guild_id] = bool — opt-in per server, off by default. Once
-# on, ANY message a member sends in ANY channel while they're connected
-# to a voice channel is treated as a song request (name or link), no
-# command prefix needed — set via ,musicmode.
-MUSIC_MODE: dict[int, bool] = {int(gid): bool(v) for gid, v in _load_data("music_mode", {}).items()}
-# Everything else below is deliberately in-memory only, like CHAT_HISTORY
+# ── Music (command-only: ,play) ─────────────────────────────
+# Everything below is deliberately in-memory only, like CHAT_HISTORY
 # for the AI chat feature — queue/now-playing state is meaningless after
 # a restart anyway, since the bot isn't connected to any voice channel
 # anymore at that point.
@@ -1360,19 +1354,14 @@ MUSIC_TEXT_CHANNEL: dict[int, int] = {}
 MUSIC_IDLE_TASK: dict[int, "asyncio.Task"] = {}
 # MUSIC_LOCKS[guild_id] = asyncio.Lock — guards the "append to queue, then
 # start playback if nothing's already playing" check in _music_enqueue.
-# Without it, two song requests landing in the same event-loop tick (two
-# people pasting a link seconds apart in an idle channel — very possible
-# with no command needed) can both see "nothing playing yet" and both
-# call vc.play(), and discord.py's VoiceClient raises on the second one.
+# Without it, two ,play commands landing in the same event-loop tick can
+# both see "nothing playing yet" and both call vc.play(), and discord.py's
+# VoiceClient raises on the second one.
 MUSIC_LOCKS: dict[int, "asyncio.Lock"] = {}
 
 
 def _music_lock(guild_id: int):
     return MUSIC_LOCKS.setdefault(guild_id, asyncio.Lock())
-
-
-def _save_music_mode():
-    _save_data("music_mode", {str(gid): v for gid, v in MUSIC_MODE.items()})
 
 
 # yt-dlp does the actual blocking network/extraction work, so every call
@@ -1451,7 +1440,6 @@ _FFMPEG_BEFORE_OPTS = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5
 _FFMPEG_OPTS = "-vn"
 _MUSIC_IDLE_TIMEOUT = 300  # seconds of an empty queue before auto-leaving
 
-_MUSIC_LINK_RE = re.compile(r"(?:youtube\.com|youtu\.be|open\.spotify\.com|soundcloud\.com)", re.I)
 _SPOTIFY_TRACK_RE = re.compile(r"open\.spotify\.com/(?:intl-\w+/)?track/([A-Za-z0-9]+)", re.I)
 
 
@@ -1583,7 +1571,7 @@ async def _post_now_playing(guild: discord.Guild, track: dict):
     queue_len = len(MUSIC_QUEUES.get(guild.id, []))
     if queue_len:
         embed.add_field(name="📜 Up Next", value=f"{queue_len} more queued", inline=True)
-    embed.set_footer(text="TrapAI Music • just type a song name or link while in a VC")
+    embed.set_footer(text="TrapAI Music • ,play <song name or link>")
     try:
         await channel.send(embed=embed, view=MusicControlView())
     except (discord.Forbidden, discord.HTTPException):
@@ -4424,7 +4412,7 @@ HELP_CATEGORIES = [
     ('🤖', 'Verification', ['verify', 'unverify', 'denyverify', 'sendverify', 'setverifybackup']),
     ('🏷️', 'Roles', ['role', 'roleall', 'massrole', 'massunrole', 'restoreallroles', 'autorole', 'setgifrole', 'protectedrole', 'br', 'roles', 'createrolemenu', 'addrole', 'removerole', 'rolemenus']),
     ('🎤', 'Voice Channels', ['vclock', 'vcunlock', 'vchide', 'vcshow', 'vcname', 'vclimit', 'vcbitrate', 'vcregion', 'vckick', 'vcban', 'vcunban', 'vcpermit', 'vcmute', 'vcunmute', 'vcdeafen', 'vcundeafen', 'vctransfer', 'vcclaim', 'vcmod', 'vcremovemod', 'vcstats', 'setupvc', 'setunmutevc', 'd']),
-    ('🎶', 'Music', ['musicmode', 'play', 'skip', 'pause', 'musicstop', 'musicloop', 'volume', 'nowplaying', 'np', 'musicqueue']),
+    ('🎶', 'Music', ['play', 'skip', 'pause', 'musicstop', 'musicloop', 'volume', 'nowplaying', 'np', 'musicqueue']),
     ('🎫', 'Tickets', ['sendtickets', 'addticketcategory', 'removeticketcategory', 'ticketcategories', 'setticketformat', 'claimticket', 'closeticket']),
     ('💳', 'Billing', ['subscribe', 'managesubscription', 'subscriptionstatus']),
     ('📊', 'Stats & Info', ['whois', 'chatstats', 'serverstats', 'invites', 'invitelogs', 'inviteleaderboard', 'setinvite', 'milestones', 'setmilestone', 'testmilestone', 'ping', 'exitsurveys']),
@@ -6988,34 +6976,6 @@ async def on_message(message):
                     await message.reply(reply, mention_author=False)
                 except (discord.Forbidden, discord.HTTPException):
                     pass
-
-    # ── Music: no-command song requests while in a VC ──────────────
-    # Off by default (,musicmode on). Once on, ANY message from a member
-    # currently connected to a voice channel — in ANY text channel, not
-    # just a dedicated one — is treated as a song name or link and
-    # queued automatically. A 🎵 reaction confirms it queued; a ❌
-    # reaction only shows up for a recognized music link that failed to
-    # resolve (plain text that doesn't match anything just fails
-    # silently, since most ordinary chat will never be a real request).
-    if (
-        not is_command
-        and MUSIC_MODE.get(message.guild.id)
-        and bot.user not in message.mentions
-        and isinstance(message.author, discord.Member)
-        and message.author.voice and message.author.voice.channel
-        and message.content
-    ):
-        content = message.content.strip()
-        if 1 < len(content) <= 200 and not _on_cooldown(message.guild.id, message.author.id, "musicreq", 5):
-            is_known_link = bool(_MUSIC_LINK_RE.search(content))
-            track = await _music_enqueue(message.guild, message.author, content, message.channel)
-            try:
-                if track:
-                    await message.add_reaction("🎵")
-                elif is_known_link:
-                    await message.add_reaction("❌")
-            except (discord.Forbidden, discord.HTTPException):
-                pass
 
     await bot.process_commands(message)
 
@@ -9942,40 +9902,9 @@ async def worktime(ctx):
 # MUSIC COMMANDS
 # ============================================================
 @bot.command()
-@_permitted_check(manage_guild=True)
-async def musicmode(ctx, state: str = None):
-    """
-    Turn no-command song requests on/off for this server. Once on, ANY
-    message a member sends — in any text channel, no prefix needed —
-    while they're connected to a voice channel is treated as a song
-    name or link and gets queued automatically. Off by default since
-    it's a big behavior change. Usage: ,musicmode on|off
-    """
-    guild = ctx.guild
-    if state is None:
-        current = MUSIC_MODE.get(guild.id, False)
-        await ctx.send(f"🎵 Music mode is currently **{'ON' if current else 'OFF'}**. Usage: `,musicmode on|off`")
-        return
-    state = state.lower()
-    if state not in ("on", "off"):
-        await ctx.send("❌ Usage: `,musicmode on|off`", delete_after=8)
-        return
-    MUSIC_MODE[guild.id] = (state == "on")
-    _save_music_mode()
-    if state == "on":
-        await ctx.send(
-            "✅ Music mode is **ON** — anyone connected to a voice channel can now just type a song "
-            "name or a YouTube/Spotify link in **any channel** and it'll queue automatically. No command needed."
-        )
-    else:
-        await ctx.send("↩️ Music mode is **OFF** — song requests won't auto-queue until this is turned back on.")
-
-
-@bot.command()
 async def play(ctx, *, query: str = None):
     """
-    Play a song by name or link. Works the same as just typing it while
-    in a VC (,musicmode on), but this works regardless of that setting.
+    Play a song by name or link. Joins your voice channel and queues it.
     Usage: ,play <song name or link>
     """
     if not query:
