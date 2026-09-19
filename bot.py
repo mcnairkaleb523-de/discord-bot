@@ -1432,10 +1432,22 @@ _YTDL_OPTS = {
         "youtube": {"player_client": ["web", "android"]},
         "youtubepot-bgutilhttp": {"base_url": [_BGUTIL_POT_BASE_URL]},
     },
+    # yt-dlp's library API only enables the "deno" JS runtime default when
+    # driven through its own CLI parser — going through YoutubeDL directly
+    # (as here) registers NO js_runtimes unless explicitly listed, so the
+    # node@22 installed on this container was never actually being used
+    # for signature/n-parameter solving until this was added.
+    "js_runtimes": {"node": {}},
 }
 if _YOUTUBE_COOKIES_FILE:
     _YTDL_OPTS["cookiefile"] = _YOUTUBE_COOKIES_FILE
 _YTDL = yt_dlp.YoutubeDL(_YTDL_OPTS)
+try:
+    for _rt_name, _rt in _YTDL._js_runtimes.items():
+        _rt_info = _rt.info if _rt else None
+        print(f"[music] JS runtime {_rt_name!r}: {_rt_info!r}")
+except Exception as e:
+    print(f"[music] JS runtime check failed: {e!r}")
 _FFMPEG_BEFORE_OPTS = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 _FFMPEG_OPTS = "-vn"
 _MUSIC_IDLE_TIMEOUT = 300  # seconds of an empty queue before auto-leaving
