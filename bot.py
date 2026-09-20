@@ -1556,7 +1556,11 @@ async def _resolve_track(query: str, member: discord.Member):
 
 async def _ensure_voice_client(member: discord.Member):
     """Join (or move to) the member's current VC. None if they're not in
-    one or the bot can't connect."""
+    one, the bot can't connect, or the bot is already serving another
+    channel that still has real (non-bot) listeners in it — so a ,play
+    from a different channel doesn't yank the bot away from people it's
+    already playing for. Once that other channel empties out, it's fair
+    game to move."""
     if not member.voice or not member.voice.channel:
         return None
     channel = member.voice.channel
@@ -1564,6 +1568,8 @@ async def _ensure_voice_client(member: discord.Member):
     if vc and vc.channel.id == channel.id:
         return vc
     if vc:
+        if any(not m.bot for m in vc.channel.members):
+            return None
         try:
             await vc.move_to(channel)
         except (discord.ClientException, asyncio.TimeoutError):
@@ -9978,6 +9984,13 @@ async def play(ctx, *, query: str = None):
         return
     if not ctx.author.voice or not ctx.author.voice.channel:
         await ctx.send("❌ You have to be in a voice channel to play something.", delete_after=8)
+        return
+    vc = ctx.guild.voice_client
+    if vc and vc.channel.id != ctx.author.voice.channel.id and any(not m.bot for m in vc.channel.members):
+        await ctx.send(
+            f"❌ I'm currently playing in **{vc.channel.name}** — join that channel to add to the queue.",
+            delete_after=8,
+        )
         return
     async with ctx.typing():
         track = await _music_enqueue(ctx.guild, ctx.author, query, ctx.channel)
