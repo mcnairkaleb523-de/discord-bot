@@ -1628,6 +1628,7 @@ async def _play_next(guild: discord.Guild):
 
         before_options = _FFMPEG_BEFORE_OPTS
         headers = track.get("http_headers")
+        print(f"[music] http_headers for {track['title']!r}: {headers!r}")
         if headers:
             # Googlevideo CDN URLs 403 without the same headers (User-Agent,
             # etc.) yt-dlp used to obtain them — confirmed in production via
@@ -1635,6 +1636,7 @@ async def _play_next(guild: discord.Guild):
             # extraction itself started succeeding.
             header_block = "".join(f"{k}: {v}\r\n" for k, v in headers.items())
             before_options = f"{before_options} -headers {shlex.quote(header_block)}"
+        print(f"[music] ffmpeg before_options: {before_options!r}")
 
         try:
             source = discord.FFmpegPCMAudio(track["stream_url"], before_options=before_options, options=_FFMPEG_OPTS)
