@@ -1423,14 +1423,18 @@ _YTDL_OPTS = {
     "default_search": "ytsearch1",
     "source_address": "0.0.0.0",
     "extract_flat": False,
-    # Cookies alone got past the bot-check, but every client still failed
-    # with "Requested format is not available" — a separate PO-token
-    # requirement for the stream URLs themselves, which the bgutil
-    # provider above supplies. With a working PO token, "web" (cookie-
-    # authenticated) is the most complete client again; "android" stays
-    # as a fallback for whichever video/client combo it doesn't cover.
+    # Forcing player_client to ["web", "android"] backfired: with cookies
+    # set, yt-dlp skips "android" outright ("does not support cookies"),
+    # leaving only "web" -- whose only downloadable format under the
+    # current PO-token/SABR rules turned out to be legacy progressive
+    # itag 18, which googlevideo's CDN 403s for non-browser requests
+    # regardless of headers (confirmed in production). yt-dlp's own
+    # maintained default client mix is BASE_CLIENTS = ('tv', 'web',
+    # 'mweb', 'android', 'ios') -- notably including "tv", which needs no
+    # PO token at all for GVS and still supports cookies. Dropping our
+    # override lets yt-dlp pick from that full set instead of the
+    # narrower one that produced the broken format.
     "extractor_args": {
-        "youtube": {"player_client": ["web", "android"]},
         "youtubepot-bgutilhttp": {"base_url": [_BGUTIL_POT_BASE_URL]},
     },
     # yt-dlp's library API only enables the "deno" JS runtime default when
