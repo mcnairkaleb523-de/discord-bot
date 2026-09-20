@@ -5,8 +5,9 @@ import os
 import sys
 import io
 import re
-import shlex
 import time
+import uuid
+import shutil
 import asyncio
 import json
 import aiohttp
@@ -1459,9 +1460,35 @@ try:
         print(f"[music] JS runtime {_rt_name!r}: {_rt_info!r}")
 except Exception as e:
     print(f"[music] JS runtime check failed: {e!r}")
-_FFMPEG_BEFORE_OPTS = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 _FFMPEG_OPTS = "-vn"
 _MUSIC_IDLE_TIMEOUT = 300  # seconds of an empty queue before auto-leaving
+
+# ffmpeg fetching googlevideo's signed CDN URLs directly kept 403ing in
+# production — confirmed across multiple format/client combinations, with
+# headers verified correct — while yt-dlp's own downloader handles the
+# exact same URLs fine. Downloading through yt-dlp first (into this
+# scratch dir) sidesteps whatever fetcher-level mismatch was causing that,
+# at the cost of a short download delay before playback starts instead of
+# true streaming. Wiped and recreated on startup in case of an unclean
+# shutdown; each file is deleted the moment its track stops playing.
+_MUSIC_CACHE_DIR = "/tmp/music_cache"
+shutil.rmtree(_MUSIC_CACHE_DIR, ignore_errors=True)
+os.makedirs(_MUSIC_CACHE_DIR, exist_ok=True)
+
+
+def _ytdl_download(webpage_url: str, dest_template: str):
+    """Blocking — always run through loop.run_in_executor, never awaited
+    directly. Downloads the track's best audio to disk, reusing the same
+    cookies/PO-token/JS-runtime pipeline as extraction. Returns the local
+    file path, or None on failure."""
+    opts = dict(_YTDL_OPTS, outtmpl=dest_template, logger=_YTDLLogger())
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(webpage_url, download=True)
+            return ydl.prepare_filename(info)
+    except Exception as e:
+        print(f"[music] yt-dlp download failed for {webpage_url!r}: {e!r}")
+        return None
 
 _SPOTIFY_TRACK_RE = re.compile(r"open\.spotify\.com/(?:intl-\w+/)?track/([A-Za-z0-9]+)", re.I)
 
@@ -1520,8 +1547,6 @@ async def _resolve_track(query: str, member: discord.Member):
     return {
         "title": (info.get("title") or "Unknown title")[:100],
         "webpage_url": info.get("webpage_url", search_query),
-        "stream_url": info["url"],
-        "http_headers": dict(info.get("http_headers") or {}),
         "duration": info.get("duration"),
         "thumbnail": info.get("thumbnail"),
         "requester": member.mention,
@@ -1630,27 +1655,31 @@ async def _play_next(guild: discord.Guild):
 
         _cancel_idle_disconnect(guild)
 
-        before_options = _FFMPEG_BEFORE_OPTS
-        headers = track.get("http_headers")
-        print(f"[music] http_headers for {track['title']!r}: {headers!r}")
-        if headers:
-            # Googlevideo CDN URLs 403 without the same headers (User-Agent,
-            # etc.) yt-dlp used to obtain them — confirmed in production via
-            # ffmpeg's own stderr ("HTTP error 403 Forbidden") once yt-dlp
-            # extraction itself started succeeding.
-            header_block = "".join(f"{k}: {v}\r\n" for k, v in headers.items())
-            before_options = f"{before_options} -headers {shlex.quote(header_block)}"
-        print(f"[music] ffmpeg before_options: {before_options!r}")
+        loop = asyncio.get_running_loop()
+        dest_template = os.path.join(_MUSIC_CACHE_DIR, f"{uuid.uuid4().hex}.%(ext)s")
+        local_path = await loop.run_in_executor(None, _ytdl_download, track["webpage_url"], dest_template)
+        if not local_path or not os.path.isfile(local_path):
+            print(f"[music] Download failed for {track['title']!r}, skipping.")
+            asyncio.create_task(_play_next(guild))
+            return
 
         try:
-            source = discord.FFmpegPCMAudio(track["stream_url"], before_options=before_options, options=_FFMPEG_OPTS)
+            source = discord.FFmpegPCMAudio(local_path, options=_FFMPEG_OPTS)
         except Exception as e:
             print(f"[music] Failed to start ffmpeg for {track['title']!r}: {e!r}")
+            try:
+                os.remove(local_path)
+            except OSError:
+                pass
             asyncio.create_task(_play_next(guild))
             return
         source = discord.PCMVolumeTransformer(source, volume=MUSIC_VOLUME.get(guild.id, 0.5))
 
         def _after(error):
+            try:
+                os.remove(local_path)
+            except OSError:
+                pass
             fut = asyncio.run_coroutine_threadsafe(_play_next(guild), bot.loop)
             try:
                 fut.result()
