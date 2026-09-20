@@ -602,6 +602,14 @@ CHANGELOG = [
             ",unverify was showing a leftover old role name in its confirmation message instead of the real Unverified role.",
         ],
     },
+    {
+        "version": "1.3",
+        "new": [
+            "Music — `,play <song name or link>` joins your voice channel and queues a song from YouTube or a Spotify link, with pause/skip/loop/volume buttons right on the Now Playing card.",
+            "The bot won't get pulled into a different voice channel while it's already playing for people somewhere else — it only moves once that channel empties out.",
+        ],
+        "fixed": [],
+    },
 ]
 
 # UPDATE_CHANNEL_OVERRIDES[guild_id] = channel_id — set via ,setupdatechannel.
