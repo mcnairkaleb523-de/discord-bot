@@ -1633,6 +1633,56 @@ async def _post_now_playing(guild: discord.Guild, track: dict):
         pass
 
 
+async def _download_track(track: dict) -> str | None:
+    loop = asyncio.get_running_loop()
+    dest_template = os.path.join(_MUSIC_CACHE_DIR, f"{uuid.uuid4().hex}.%(ext)s")
+    return await loop.run_in_executor(None, _ytdl_download, track["webpage_url"], dest_template)
+
+
+async def _prefetch_upcoming(guild: discord.Guild):
+    """Downloads the next queued track ahead of time, while the current
+    one is still playing, so its turn doesn't have to wait on a fresh
+    download — the main source of ,play's response-time lag. Best
+    effort: any failure just falls back to the normal on-demand download
+    in _play_next."""
+    queue = MUSIC_QUEUES.get(guild.id)
+    if not queue:
+        return
+    track = queue[0]
+    if track.get("_prefetched_path") or track.get("_prefetching"):
+        return
+    track["_prefetching"] = True
+    try:
+        local_path = await _download_track(track)
+    finally:
+        track["_prefetching"] = False
+    if not local_path or not os.path.isfile(local_path):
+        return
+    current_queue = MUSIC_QUEUES.get(guild.id)
+    if current_queue and current_queue[0] is track:
+        track["_prefetched_path"] = local_path
+    else:
+        # Already played (e.g. a skip raced ahead) or removed — the
+        # download was wasted work, don't leave the file behind.
+        try:
+            os.remove(local_path)
+        except OSError:
+            pass
+
+
+def _clear_music_queue(guild_id: int):
+    """Clears a guild's queue, deleting any files already prefetched for
+    tracks in it so they don't linger in the scratch dir unused."""
+    for track in MUSIC_QUEUES.get(guild_id, []):
+        path = track.get("_prefetched_path")
+        if path:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    MUSIC_QUEUES[guild_id] = []
+
+
 async def _play_next(guild: discord.Guild):
     """Safe to call redundantly from multiple places at once (a fresh
     request that finds the queue idle, AND the `after` callback of a
@@ -1661,9 +1711,9 @@ async def _play_next(guild: discord.Guild):
 
         _cancel_idle_disconnect(guild)
 
-        loop = asyncio.get_running_loop()
-        dest_template = os.path.join(_MUSIC_CACHE_DIR, f"{uuid.uuid4().hex}.%(ext)s")
-        local_path = await loop.run_in_executor(None, _ytdl_download, track["webpage_url"], dest_template)
+        local_path = track.pop("_prefetched_path", None)
+        if not local_path or not os.path.isfile(local_path):
+            local_path = await _download_track(track)
         if not local_path or not os.path.isfile(local_path):
             print(f"[music] Download failed for {track['title']!r}, skipping.")
             asyncio.create_task(_play_next(guild))
@@ -1695,6 +1745,7 @@ async def _play_next(guild: discord.Guild):
         vc.play(source, after=_after)
 
     asyncio.create_task(_post_now_playing(guild, track))
+    asyncio.create_task(_prefetch_upcoming(guild))
 
 
 async def _music_enqueue(guild: discord.Guild, member: discord.Member, query: str, text_channel):
@@ -1708,6 +1759,11 @@ async def _music_enqueue(guild: discord.Guild, member: discord.Member, query: st
     MUSIC_QUEUES.setdefault(guild.id, []).append(track)
     _cancel_idle_disconnect(guild)
     await _play_next(guild)
+    # If something was already playing, _play_next above was a no-op and
+    # never reached its own prefetch trigger — kick it off here instead,
+    # so a song added to a live queue doesn't just sit there undownloaded
+    # until its turn comes up.
+    asyncio.create_task(_prefetch_upcoming(guild))
     return track
 
 
@@ -1738,7 +1794,7 @@ def _music_skip(guild: discord.Guild) -> str:
 
 
 async def _music_stop(guild: discord.Guild) -> str:
-    MUSIC_QUEUES[guild.id] = []
+    _clear_music_queue(guild.id)
     MUSIC_LOOP[guild.id] = False
     _cancel_idle_disconnect(guild)
     vc = guild.voice_client
@@ -6603,7 +6659,7 @@ async def on_voice_state_update(member, before, after):
         vc = guild.voice_client
         if vc and vc.channel.id == before.channel.id and not any(not m.bot for m in before.channel.members):
             _cancel_idle_disconnect(guild)
-            MUSIC_QUEUES[guild.id] = []
+            _clear_music_queue(guild.id)
             MUSIC_NOW_PLAYING.pop(guild.id, None)
             try:
                 await vc.disconnect()
